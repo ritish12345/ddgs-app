@@ -59,10 +59,13 @@ const A = runOn(oldCode), B = runOn(undefined);
 /* Differences Nitish asked for (round 2, Nov 2026). They are taken out here so everything else must still match exactly:
    - dates in messages are DD-MM-YYYY (old: yyyy-mm-dd)
    - new setting qtyTolerancePct (order quantity window) */
-const EXPECTED = ['dates in messages DD-MM-YYYY', 'new setting qtyTolerancePct'];
+const EXPECTED = ['dates in messages DD-MM-YYYY', 'new setting qtyTolerancePct',
+  'customer payments (pays) sent to money roles', 'new Closed rule changes the stage sent to Dispatch (_st)'];
 A.log.forEach(l => { if (l.err) l.err = l.err.replace(/\b(\d{4})-(\d{2})-(\d{2})\b/g, '$3-$2-$1'); });
 if (B.tabs.APP_SETTINGS) B.tabs.APP_SETTINGS = B.tabs.APP_SETTINGS.filter(r => r[0] !== 'qtyTolerancePct');
-Object.keys(B.screens).forEach(k => { if (B.screens[k].settings) delete B.screens[k].settings.qtyTolerancePct; });
+Object.keys(B.screens).forEach(k => { if (B.screens[k].settings) delete B.screens[k].settings.qtyTolerancePct; delete B.screens[k].pays; });
+// Stage values follow the new Closed rule (checked in parity / receivables tests); here only that Dispatch still gets one.
+[A, B].forEach(X => Object.keys(X.screens).forEach(k => (X.screens[k].trucks || []).forEach(t => { if ('_st' in t) t._st = 'present'; })));
 
 console.log('Old code: ' + oldRef + '  vs  new code: working copy   (expected changes left out: ' + EXPECTED.join('; ') + ')');
 same('step results and error messages (' + A.log.length + ' steps)', A.log.map(l => [l.label, l.ok, l.err || '']), B.log.map(l => [l.label, l.ok, l.err || '']));

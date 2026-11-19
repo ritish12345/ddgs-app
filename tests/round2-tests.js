@@ -108,15 +108,17 @@ const lastId = (s, truck) => s.store.sheet('APP_TRUCKS').dump().slice(1).filter(
   ok(!/>Closed <b>|>Cancelled <b>|>Returned <b>/.test(A.$('#view').innerHTML), '5. no Closed / Cancelled / Returned chips there any more');
   A.win.go('sos');
   ok(!/SO-0002/.test(A.$('#view').innerHTML) && /Short-closed &amp; cancelled →|Short-closed & cancelled →/.test(A.$('#view').innerHTML), '5. Sale Orders list: short-closed SO-0002 gone, link to the Closed page');
-  // a truck the customer has paid in full, freight not paid yet: it stays in Sales and is labelled "Fully paid"
+  // an unloaded truck that is not closed yet (supplier and freight not paid): it is on the Sales page
   const tq = newTruck(dis, { truck: 'PB08UT0004', po: 'PO-01-BCL', date: '2026-11-19', loadWt: '380', transporter: 'Sharma Roadlines', frate: '85', so: 'SO-0001' });
   s.run('api_saveTruck', dis, { id: tq, unloadDate: '2026-11-19', unloadWt: '379' });
-  s.run('api_addPayment', acc, tq, 379 * 2100, '2026-11-19', '', '');
   A.win.LASTFULL = 0; A.win.sync(); await idle(A);
   A.win.go('settle');
-  ok(/✓ Fully paid/.test(A.$('#view').innerHTML) && />Fully paid <b>1<\/b>/.test(A.$('#view').innerHTML) && !/Short-closed/.test(A.$('#view').innerHTML), '5. Sales & Receivables says "Fully paid", not "Short-closed"');
+  const salesHead = A.$$('#view .tr.th div').map(d => d.textContent);
+  ok(A.win.LASTIDS.indexOf(tq) >= 0 && !/Short-closed|Fully paid/.test(A.$('#view').innerHTML) && salesHead.indexOf('Received') < 0 && salesHead.indexOf('Balance') < 0 && salesHead.indexOf('Next step') < 0,
+    '5. Sales page lists the unloaded truck, with no Received / Balance / Next step');
   A.win.go('closed');
-  ok(A.win.LASTIDS.indexOf('DISP-0002') >= 0 && A.win.LASTIDS.indexOf('DISP-0003') >= 0, '5. Closed & cancelled → Completed trucks: DISP-0002, DISP-0003');
+  // New Closed rule: unloaded + supplier paid + freight paid (or customer pays freight). DISP-0003 (own plant) has no supplier payment.
+  ok(A.win.LASTIDS.indexOf('DISP-0001') >= 0 && A.win.LASTIDS.indexOf('DISP-0002') >= 0 && A.win.LASTIDS.indexOf('DISP-0003') < 0, '5. Closed & cancelled → Completed trucks: DISP-0001, DISP-0002 (not DISP-0003: supplier unpaid)');
   A.win.SUBF.closed = 'cx'; A.win.render();
   ok(A.win.LASTIDS.indexOf('DISP-0006') >= 0 && /duplicate entry/.test(A.$('#view').innerHTML), '5. Cancelled / returned: DISP-0006 with its reason');
   A.win.runAct('closedOrders');
@@ -189,13 +191,13 @@ const lastId = (s, truck) => s.store.sheet('APP_TRUCKS').dump().slice(1).filter(
   ok(!V.$('#view [data-act="settle"]'), 'Dispatch sees no Short-close button (orders are for Owner / Accounts)');
 
   console.log('6. Screen: someone else\'s change arrives right after your own save');
-  s.run('api_saveTruck', own, { id: 'DISP-0004', note: 'owner checked the bill' });
+  s.run('api_saveTruck', own, { id: 'DISP-0005', note: 'owner checked the bill' });
   A.br.calls.length = 0;
-  A.win.runAct('advance', 'DISP-0001');
+  A.win.runAct('advance', 'DISP-0004'); // an open truck (DISP-0001 is now Closed: only the Owner may change it)
   fill(A, { advance: '12000' });
   submit(A);
   ok(await idle(A), 'saved');
-  ok(A.win.getT('DISP-0004').note === 'owner checked the bill' && A.br.calls.join(',') === 'api_saveTruck,api_sync', 'the owner\'s note is already on this screen (' + A.br.calls.join(',') + '), no waiting');
+  ok(A.win.getT('DISP-0005').note === 'owner checked the bill' && A.br.calls.join(',') === 'api_saveTruck,api_sync', 'the owner\'s note is already on this screen (' + A.br.calls.join(',') + '), no waiting');
   O.win.go('activity'); await idle(O);
   ok(/^\d{2}-\d{2}-\d{4}$/.test(O.$('#rv_date').value), 'Activity day box is DD-MM-YYYY too (' + O.$('#rv_date').value + ')');
 

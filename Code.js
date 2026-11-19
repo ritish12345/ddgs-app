@@ -398,8 +398,55 @@ function api_addPayment(token, id, amount, date, deduction, note, rid) {
       id: nextId_(T.PAY, rows_(T.PAY), {}), date: upd.receivedDate || Utilities.formatDate(new Date(), tz_(), 'yyyy-MM-dd'),
       truck: id, so: t.so, buyer: so ? so.buyer : '', amount: a || '', deduction: d || '', note: d ? (note || 'Deduction') : ''
     })]);
-    dropTab_(T.PAY);
+    dropTab_(T.PAY); markChanged_(T.PAY);
   }, cleanRid_(rid));
+}
+
+/** Money received from a customer (factory). Customer money is kept per customer, not per truck (Nov 2026).
+    One line in APP_PAYMENTS: Dispatch No. blank, Customer filled, deduction reason and bank reference in the Note. */
+function api_addCustomerPayment(token, buyer, amount, date, deduction, reason, ref, note, rid) {
+  auth_(token); need_('truckMoney');
+  buyer = normName_(buyer);
+  var a = num_(amount) || 0, d = num_(deduction) || 0;
+  reason = String(reason || '').trim(); ref = String(ref || '').trim().toUpperCase(); note = String(note || '').trim();
+  if (!buyer) throw new Error('Choose the customer.');
+  if (a < 0 || d < 0) throw new Error('Amounts must be 0 or more.');
+  if (!a && !d) throw new Error('Enter the amount received, or a deduction.');
+  if (d && !reason) throw new Error('Choose the reason for the deduction.');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(date || ''))) throw new Error('Enter the date.');
+  return withLock_(function () {
+    if (!rows_(T.SO).some(function (o) { return normName_(o.buyer) === buyer; })) throw new Error('There is no sale order for ' + buyer + '.');
+    var parts = [];
+    if (d) parts.push(reason);
+    if (ref) parts.push('Ref ' + ref);
+    if (note) parts.push(note);
+    var id = appendPay_({ date: date, truck: '', so: '', buyer: buyer, amount: a || '', deduction: d || '', note: parts.join(' · ') });
+    log_('Customer payment', buyer, id + ': received ' + a + (d ? ', ' + reason + ' ' + d : '') + (ref ? ', ref ' + ref : ''));
+  }, cleanRid_(rid));
+}
+function appendPay_(o) {
+  var sh = sheet_(T.PAY) || makeTab_(T.PAY);
+  o.id = nextId_(T.PAY, rows_(T.PAY), {});
+  sh.getRange(sh.getLastRow() + 1, 1, 1, SCHEMA[T.PAY].length).setValues([rowFor_(T.PAY, o)]);
+  dropTab_(T.PAY); markChanged_(T.PAY);
+  return o.id;
+}
+/** A wrong payment is never deleted: a reversal line with the same amounts in minus is added (dated today).
+    Accounts can reverse only what was entered today; the Owner any payment. */
+function api_reversePayment(token, payId, reason) {
+  auth_(token); need_('truckMoney');
+  reason = String(reason || '').trim();
+  if (!reason) throw new Error('Write why this payment is reversed.');
+  return withLock_(function () {
+    var all = rows_(T.PAY), p = all.filter(function (r) { return r.id === payId; })[0];
+    if (!p) throw new Error('Payment ' + payId + ' was not found.');
+    if (/^Reversal of /.test(String(p.note)) || (num_(p.amount) || 0) < 0 || (num_(p.deduction) || 0) < 0) throw new Error(payId + ' is itself a reversal.');
+    if (all.some(function (r) { return String(r.note).indexOf('Reversal of ' + payId + ':') === 0; })) throw new Error(payId + ' is already reversed.');
+    if (ME.role !== 'Owner' && String(p.at).slice(0, 10) !== today_()) throw new Error('Only the Owner can reverse a payment entered on an earlier day.');
+    var a = num_(p.amount) || 0, d = num_(p.deduction) || 0;
+    var id = appendPay_({ date: today_(), truck: p.truck, so: p.so, buyer: p.buyer, amount: a ? -a : '', deduction: d ? -d : '', note: 'Reversal of ' + payId + ': ' + reason });
+    log_('Payment reversed', payId, id + ': ' + reason);
+  });
 }
 
 function api_savePO(token, obj) {
@@ -935,7 +982,7 @@ function cacheRow_(name, row, rowNo) {
 }
 
 /* ---------------- data version: lets an open screen ask "anything new?" without reading the tabs ---------------- */
-var SCREEN_TABS_ = [T.PO, T.SO, T.TR, T.NOTE, T.BANK, T.US];
+var SCREEN_TABS_ = [T.PO, T.SO, T.TR, T.NOTE, T.BANK, T.US, T.PAY];
 function dataChanged_() { return SCREEN_TABS_.some(function (n) { return !!REQ_.changed[n]; }); }
 /* Kept in a script property (lasting) and mirrored in Apps Script's cache (fast, no daily read limit). */
 function dataVersion_() {
@@ -970,6 +1017,7 @@ function readAll_() {
     today: today_(), syncedAt: nowStr_(), v: v
   };
   out.notes = sheet_(T.NOTE) ? rows_(T.NOTE).reverse() : [];
+  if (can.money) out.pays = sheet_(T.PAY) ? rows_(T.PAY) : []; // customer payments (Receivables page)
   if (can.bank) out.banks = sheet_(T.BANK) ? rows_(T.BANK) : [];
   if (can.users) out.users = userList_();
   return out;
@@ -996,6 +1044,7 @@ function changes_() {
     po: changedRows_(T.PO), so: changedRows_(T.SO), trucks: changedRows_(T.TR) };
   shape_(out.po, out.so, out.trucks, can);
   if (ch[T.NOTE]) out.notes = rows_(T.NOTE).reverse();
+  if (ch[T.PAY] && can.money) out.pays = rows_(T.PAY);
   if (ch[T.BANK] && can.bank) out.banks = rows_(T.BANK);
   if (ch[T.US] && can.users) out.users = userList_();
   return out;
@@ -1368,27 +1417,64 @@ function derive_(t, po, so, S, today) {
   // Detention is only a suggestion: it counts only when someone enters an amount (decided per truck when paying freight).
   x.det = x.fBuyer || !U ? 0 : (t.detention === '' || t.detention == null ? 0 : n(t.detention));
   x.netFr = U && !x.fBuyer ? r2(x.frAmt - x.shortDed - A + x.det) : 0;
-  x.bal = U && so ? r2(Math.max(0, x.saleTot - R - DED)) : 0;
   // Sales to your own firm: freight and detention are not taken off the margin (shortage recovered from the transporter still counts).
   x.profit = U && so && po ? r2(x.saleEx - x.purEx - (x.ownBuyer ? -x.shortDed : x.frAmt - x.shortDed + x.det)) : 0;
   x.cx = t.status === 'Cancelled' || t.status === 'Returned';
-  var full = U && so && (R > 0 || DED > 0) && R + DED >= x.saleTot - 1;
+  // Customer money is kept per customer (custAcc_), not per truck (Nov 2026). A truck is Closed when it is unloaded,
+  // the supplier is paid and the freight is paid (or the customer pays the freight). Own-plant trucks the same.
   var st;
   if (x.cx) st = -1;
-  else if (plantPO) st = U && t.freightPaid ? 6 : U ? 3 : t.plantPaid ? 2 : L ? 1 : 0;
-  else if (full && (t.freightPaid || x.fBuyer)) st = 6;
-  else if (full) st = 5;
-  else if (R > 0 || DED > 0) st = 4;
+  else if (U && t.plantPaid && (t.freightPaid || x.fBuyer)) st = 6;
   else if (U) st = 3;
   else if (t.plantPaid) st = 2;
   else if (L) st = 1;
   else st = 0;
   x.st = st; x.stage = st < 0 ? (t.status === 'Returned' ? 'Returned' : 'Cancelled') : plantPO && st === 3 ? 'Received' : STAGES_[st];
   x.credit = so ? (so.creditDays === '' || so.creditDays == null ? n(S.defaultCreditDays || 7) : n(so.creditDays)) : 0;
-  x.overdue = U && so && x.bal > 0 && t.unloadDate ? Math.max(0, days_(t.unloadDate, today) - x.credit) : 0;
+  x.due = U && so && t.unloadDate ? days_(t.unloadDate, today) - x.credit : 0; // days past the credit period (above 0 = due)
   x.placed = t.placedOn || t.date;
   x.noSlip = L > 0 && !t.slipPhoto && (!S.slipCheckFrom || String(t.date) >= String(S.slipCheckFrom));
   return x;
+}
+
+/* Customer accounts. Customer money is kept per customer (factory), not per truck (Nitish, Nov 2026).
+   Sales = sale totals of the customer's unloaded trucks; Received / Deducted = its APP_PAYMENTS lines (reversals are negative);
+   Outstanding = Sales − Received − Deducted (below 0 = advance).
+   Overdue = sales past their credit days, less everything received; oldest = most days among trucks not covered
+   (trucks taken oldest unload date first). The screen has the same function (custAcc in Index.html). */
+function custAcc_(trucks, pays, S) {
+  var acc = {}, r2 = function (x) { return Math.round(x * 100) / 100; };
+  var get = function (name) {
+    var k = normName_(name);
+    return acc[k] || (acc[k] = { name: k, own: isFirm_(k, S), trucks: 0, qty: 0, sales: 0, received: 0, deducted: 0, lastPaid: '', list: [] });
+  };
+  trucks.forEach(function (t) {
+    if (t.cx || !t.U || !t.so || t.plantPO || !t.buyer) return;
+    var a = get(t.buyer);
+    a.trucks++; a.qty += t.U; a.sales += t.saleTot; a.list.push(t);
+  });
+  (pays || []).forEach(function (p) {
+    if (!p.buyer) return;
+    var a = get(p.buyer), amt = Number(p.amount) || 0;
+    a.received += amt; a.deducted += Number(p.deduction) || 0;
+    if (amt > 0 && String(p.date) > a.lastPaid) a.lastPaid = String(p.date);
+  });
+  Object.keys(acc).forEach(function (k) {
+    var a = acc[k], pool = a.received + a.deducted, due = 0, run = 0;
+    a.list.sort(function (x, y) { return String(x.unloadDate).localeCompare(String(y.unloadDate)) || String(x.id).localeCompare(String(y.id)); });
+    a.oldest = 0;
+    a.list.forEach(function (t) {
+      if (t.due > 0) due += t.saleTot;
+      run += t.saleTot;
+      if (run > pool + 0.5 && t.due > a.oldest) a.oldest = t.due; // not (fully) covered by the money received
+    });
+    a.sales = r2(a.sales); a.received = r2(a.received); a.deducted = r2(a.deducted); a.qty = r2(a.qty);
+    a.outstanding = r2(a.sales - a.received - a.deducted);
+    a.overdue = r2(Math.max(0, due - pool));
+    if (!a.overdue) a.oldest = 0;
+    delete a.list;
+  });
+  return acc;
 }
 
 /* A driver's advance is adjusted across all trips of the same truck: extra advance on one trip reduces what is paid on its next trips. */
@@ -1416,7 +1502,9 @@ function deriveAll_() {
   var po = {}, so = {}, S = readSettings_(), today = Utilities.formatDate(new Date(), tz_(), 'yyyy-MM-dd');
   rows_(T.PO).forEach(function (r) { po[r.id] = r; });
   rows_(T.SO).forEach(function (r) { so[r.id] = r; });
-  return { po: po, so: so, S: S, today: today, trucks: carry_(rows_(T.TR).map(function (t) { return derive_(t, po[t.po], so[t.so], S, today); })) };
+  var trucks = carry_(rows_(T.TR).map(function (t) { return derive_(t, po[t.po], so[t.so], S, today); }));
+  var pays = sheet_(T.PAY) ? rows_(T.PAY) : [];
+  return { po: po, so: so, S: S, today: today, trucks: trucks, pays: pays, accounts: custAcc_(trucks, pays, S) };
 }
 
 /* ---------------- Excel export ---------------- */
@@ -1426,7 +1514,7 @@ function truckColumns_(can) {
     ['Vehicle No', 'truck'], ['Transporter', 'transporter'], ['Driver', 'driver'], ['RST / Weighment Slip No', 'slip'], ['Slip Photo Link', 'slipPhoto'], ['Dispatch Wt (qtl)', 'L'], ['Supplier Invoice No', 'billNo'], ['Supplier Invoice Qty', 'billQty'],
     ['Unload Date', 'unloadDate'], ['Received Wt (qtl)', 'U'], ['Shortage (qtl)', 'short'], ['Days on trip', 'trip'], ['Stage', 'stage']];
   if (can.money) c = c.concat([['Supplier Amount incl GST', 'purTot'], ['Supplier Paid', 'plantPaid'], ['Supplier Paid Date', 'plantPaidDate'], ['Supplier UTR', 'plantUTR'],
-    ['Sale Rate', 'rateUsed'], ['Sale Total', 'saleTot'], ['Received', 'R'], ['Deduction', 'DED'], ['Outstanding', 'bal'], ['Overdue Days', 'overdue'],
+    ['Sale Rate', 'rateUsed'], ['Sale Total', 'saleTot'],
     ['Freight Rate', 'FR'], ['Freight Amount', 'frAmt'], ['Shortage Deduction', 'shortDed'], ['Detention', 'det'],
     ['Freight Advance', 'A'], ['Trip Net Freight', 'netFr'], ['Earlier Advance Adjusted', 'carryIn'], ['Net Freight Payable', 'netPay'], ['Freight Paid', 'freightPaid'], ['Freight Paid Date', 'freightPaidDate'], ['Freight UTR', 'freightUTR']]);
   if (can.profit) c.push(['Profit before GST', 'profit']);
@@ -1471,6 +1559,19 @@ function exportTabs_(kind, key, ids, can, firm) {
   var oc = [['ID', 'id'], ['Firm', 'firm'], ['Booked in the name of', 'takenIn'], ['Type', 'type'], ['Party', 'party'], ['Sells To SO', 'link'], ['Date', 'date'], ['Quantity', 'qty'], ['Done', 'done'], ['Balance', 'bal'], ['Trucks', 'trucks'], ['Status', 'status']];
   if (can.money) oc = oc.concat([['Rate', 'rate'], ['Terms', 'terms']]);
   var pick = function (list) { return ids ? list.filter(function (t) { return ids.indexOf(t.id) >= 0; }) : list; };
+  // Customer money is kept per customer. With a firm chosen: the payments of that firm's customers, accounts from its trucks.
+  var firmBuyers = {};
+  Object.keys(A.so).forEach(function (id) { firmBuyers[normName_(A.so[id].buyer)] = 1; });
+  var pays = A.pays.filter(function (p) { return !firm || firmBuyers[normName_(p.buyer)]; });
+  var accounts = firm ? custAcc_(A.trucks, pays, A.S) : A.accounts;
+  var accRows = Object.keys(accounts).sort().map(function (k) {
+    var a = accounts[k];
+    return { name: a.name, group: a.own ? 'Yes' : '', trucks: a.trucks, qty: a.qty, sales: a.sales, received: a.received, deducted: a.deducted,
+      outstanding: a.outstanding, overdue: a.overdue, oldest: a.oldest || '', lastPaid: a.lastPaid };
+  });
+  var ac = [['Customer', 'name'], ['Group company', 'group'], ['Trucks unloaded', 'trucks'], ['Qty unloaded (qtl)', 'qty'], ['Sales incl GST', 'sales'], ['Received', 'received'],
+    ['Deductions', 'deducted'], ['Outstanding', 'outstanding'], ['Overdue', 'overdue'], ['Oldest overdue (days)', 'oldest'], ['Last received', 'lastPaid']];
+  var pc = [['Payment ID', 'id'], ['Date', 'date'], ['Dispatch No.', 'truck'], ['SO', 'so'], ['Customer', 'buyer'], ['Amount', 'amount'], ['Deduction', 'deduction'], ['Note', 'note'], ['Entered By', 'by']];
   if (kind === 'full') {
     tabs.push(tab_('Trucks', tc, A.trucks));
     tabs.push(tab_('Purchase Orders', oc, orderRows(A.po, 'po')));
@@ -1484,9 +1585,13 @@ function exportTabs_(kind, key, ids, can, firm) {
         if (t.U && !t.freightPaid) b.payable += t.netPay; if (t.freightPaid) b.paid += t.netPay;
       });
       tabs.push(tab_('Transporters', [['Transporter', 'name'], ['Trucks', 'trucks'], ['Freight', 'freight'], ['Shortage Deduction', 'short'], ['Detention', 'det'], ['Freight Advance', 'adv'], ['Net Paid', 'paid'], ['Net Payable Now', 'payable']], Object.keys(by).map(function (k) { return by[k]; })));
-      var pays = (sheet_(T.PAY) ? rows_(T.PAY) : []).filter(function (p) { return !firm || A.so[p.so]; });
-      tabs.push(tab_('Customer Payments', [['Payment ID', 'id'], ['Date', 'date'], ['Dispatch No.', 'truck'], ['SO', 'so'], ['Customer', 'buyer'], ['Amount', 'amount'], ['Deduction', 'deduction'], ['Note', 'note'], ['Entered By', 'by']], pays));
+      tabs.push(tab_('Customer Accounts', ac, accRows));
+      tabs.push(tab_('Customer Payments', pc, pays));
     }
+  } else if (kind === 'accounts') { // Receivables page: one row per customer, and all customer payments
+    if (!can.money) throw new Error('Your role cannot download money figures.');
+    tabs.push(tab_('Customer Accounts', ac, ids ? accRows.filter(function (r) { return ids.indexOf(r.name) >= 0; }) : accRows));
+    tabs.push(tab_('Customer Payments', pc, pays));
   } else if (kind === 'orders') { // a list of orders shown on screen (e.g. Closed & cancelled page): ids = the order ids
     tabs.push(tab_('Purchase Orders', oc, pick(orderRows(A.po, 'po'))));
     tabs.push(tab_('Sale Orders', oc, pick(orderRows(A.so, 'so'))));
@@ -1502,6 +1607,10 @@ function exportTabs_(kind, key, ids, can, firm) {
     if (kind === 'po') tabs.push(tab_('PO', oc, orderRows(A.po, 'po').filter(function (r) { return r.id === key; })));
     if (kind === 'so') tabs.push(tab_('SO', oc, orderRows(A.so, 'so').filter(function (r) { return r.id === key; })));
     if (kind === 'buyer') tabs.push(tab_('Sale Orders', oc, orderRows(A.so, 'so').filter(function (r) { return normName_(r.party) === normName_(key); })));
+    if (kind === 'buyer' && can.money) {
+      tabs.push(tab_('Account', ac, accRows.filter(function (r) { return r.name === normName_(key); })));
+      tabs.push(tab_('Payments', pc, pays.filter(function (p) { return normName_(p.buyer) === normName_(key); })));
+    }
     if (kind === 'plant') tabs.push(tab_('Purchase Orders', oc, orderRows(A.po, 'po').filter(function (r) { return normName_(r.party) === normName_(key); })));
   }
   return tabs;
@@ -1584,8 +1693,11 @@ function sendDailyReport_() {
   var h = '<div style="font-family:Arial,sans-serif;color:#14201e"><h2 style="color:#0f6b5c">Daily report · ' + today.split('-').reverse().join('-') + '</h2>';
   h += '<p><b>Today:</b> ' + added.length + ' new trucks · ' + unloaded.length + ' unloaded · paid plants ' + money_(sum(plantPaid, function (t) { return t.purTot; })) +
     ' · freight paid ' + money_(sum(frPaid, function (t) { return t.netPay; })) + ' · received from customers ' + money_(sum(pays, function (p) { return Number(p.amount || 0); })) + '</p>';
-  var ownDue = sum(live.filter(function (t) { return t.ownBuyer; }), function (t) { return t.bal; });
-  h += '<p><b>Position now:</b> outside customers owe ' + money_(sum(live.filter(function (t) { return !t.ownBuyer; }), function (t) { return t.bal; })) + (ownDue ? ' · group company owes ' + money_(ownDue) : '') + ' (overdue ' + money_(sum(live.filter(function (t) { return t.overdue > 0; }), function (t) { return t.bal; })) + ') · suppliers unpaid ' +
+  // Customer money is per customer (custAcc_): what each factory owes, not per truck.
+  var accs = Object.keys(A.accounts).map(function (k) { return A.accounts[k]; });
+  var owes = function (a) { return Math.max(0, a.outstanding); };
+  var ownDue = sum(accs.filter(function (a) { return a.own; }), owes);
+  h += '<p><b>Position now:</b> outside customers owe ' + money_(sum(accs.filter(function (a) { return !a.own; }), owes)) + (ownDue ? ' · group company owes ' + money_(ownDue) : '') + ' (overdue ' + money_(sum(accs, function (a) { return a.overdue; })) + ') · suppliers unpaid ' +
     money_(sum(live.filter(function (t) { return t.L && !t.plantPaid; }), function (t) { return t.purTot; })) + ' · freight payable ' +
     money_(sum(live.filter(function (t) { return t.U && !t.freightPaid; }), function (t) { return t.netPay; })) + ' · on the road ' +
     q(sum(live.filter(function (t) { return t.L && !t.U; }), function (t) { return t.L; })) + ' qtl</p>';
@@ -1595,7 +1707,7 @@ function sendDailyReport_() {
   h += '<h3>Money today</h3>' + table(['What', 'Dispatch / Payment', 'Party', 'Amount'],
     plantPaid.map(function (t) { return ['Supplier paid', t.id, t.plant, money_(t.purTot)]; })
       .concat(frPaid.map(function (t) { return ['Freight paid', t.id, t.transporter, money_(t.netPay)]; }))
-      .concat(pays.map(function (p) { return ['Received' + (p.deduction ? ' (+ ' + p.note + ' ' + p.deduction + ')' : ''), p.id + ' / ' + p.truck, p.buyer, money_(Number(p.amount || 0))]; })));
+      .concat(pays.map(function (p) { return [(Number(p.amount) < 0 || Number(p.deduction) < 0 ? 'Reversed' : 'Received') + (p.deduction ? ' (deduction ' + p.deduction + (p.note ? ': ' + p.note : '') + ')' : ''), p.id + (p.truck ? ' / ' + p.truck : ''), p.buyer, money_(Number(p.amount || 0))]; })));
   var bal = function (map, k) {
     return Object.keys(map).filter(function (id) { return map[id].status !== 'Cancelled' && map[id].status !== 'Settled'; }).map(function (id) {
       var o = map[id], done = sum(live.filter(function (t) { return t[k] === id; }), function (t) { return t.L; });
@@ -1605,15 +1717,17 @@ function sendDailyReport_() {
   h += '<h3>Purchase orders</h3>' + table(['PO', 'Firm', 'Supplier', 'Ordered', 'Loaded', 'Outstanding'], bal(A.po, 'po'));
   h += '<h3>Sale orders</h3>' + table(['SO', 'Firm', 'Customer', 'Ordered', 'Dispatched', 'Outstanding'], bal(A.so, 'so'));
   var probs = [];
+  accs.forEach(function (a) {
+    if (a.overdue > 0) probs.push([a.name, '', 'Customer payment overdue ' + money_(a.overdue) + (a.oldest ? ', oldest ' + a.oldest + ' days past credit' : '') + ' · outstanding ' + money_(a.outstanding)]);
+  });
   live.forEach(function (t) {
-    if (t.overdue) probs.push([t.id, t.truck, 'Customer payment overdue ' + t.overdue + ' days, balance ' + money_(t.bal)]);
     if (t.L && !t.U && t.detDays > 0) probs.push([t.id, t.truck, 'On the road ' + t.trip + ' days (over the free days: detention claim possible, ' + money_(t.detSuggest) + ' if agreed)']);
     if (t.L && !t.so && !t.plantPO) probs.push([t.id, t.truck, 'Loaded, no customer assigned']);
     if (t.L && t.billQty !== '' && t.billQty != null && Math.abs(Number(t.billQty) - t.L) >= 0.005) probs.push([t.id, t.truck, 'Slip weight ' + q(t.L) + ' but plant bill ' + q(Number(t.billQty))]);
     if (t.noSlip) probs.push([t.id, t.truck, 'No slip photo']);
     if (t.carryLeft > 0) probs.push([t.id, t.truck, 'Advance ' + money_(t.carryLeft) + ' still to adjust on the next trip of this truck']);
   });
-  h += '<h3>Needs attention</h3>' + table(['Dispatch', 'Truck', 'Problem'], probs);
+  h += '<h3>Needs attention</h3>' + table(['Dispatch / Customer', 'Truck', 'Problem'], probs);
   var staff = {};
   (sheet_(T.LOG) ? rows_(T.LOG) : []).forEach(function (r) {
     if (String(r.time).indexOf(today) !== 0 || ['Created', 'Updated'].indexOf(r.action) < 0) return;

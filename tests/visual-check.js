@@ -63,6 +63,7 @@ const ok = (cond, label) => { console.log((cond ? '  ok    ' : '  FAIL  ') + lab
             on: (document.querySelector('#nav .on') || {}).dataset ? document.querySelector('#nav .on').dataset.tab : '' };
         }, tab);
         ok(v.on === tab && v.home && v.clicked, 'click ' + tab.padEnd(9) + '→ Overview ' + (v.home ? 'visible' : 'HIDDEN') + ', clicked tab ' + (v.clicked ? 'fully visible' : 'CUT OFF'));
+        if (tab === 'settle' || tab === 'receivables') await page.screenshot({ path: path.join(OUT, size.name + '-' + tab + '-page.png') });
         if (tab === 'freight' || tab === 'more') {
           const box = await page.evaluate(() => { const r = document.querySelector('header').getBoundingClientRect(); return { x: 0, y: 0, width: Math.ceil(r.width), height: Math.ceil(r.height) + 60 }; });
           await page.screenshot({ path: path.join(OUT, size.name + '-' + tab + '.png'), clip: box });

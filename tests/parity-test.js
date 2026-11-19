@@ -36,8 +36,18 @@ const trucks = [
 const code = fs.readFileSync(path.join(ROOT, 'Code.js'), 'utf8');
 const sv = { Utilities: {}, console };
 vm.createContext(sv);
-vm.runInContext(code + '\nthis.derive_ = derive_; this.carry_ = carry_;', sv);
+vm.runInContext(code + '\nthis.derive_ = derive_; this.carry_ = carry_; this.custAcc_ = custAcc_;', sv);
 const sOut = sv.carry_(trucks.map(t => sv.derive_(Object.assign({}, t), PO[t.po], SO[t.so], S, today)));
+// Customer payments (money is kept per customer): part payment + TDS, a reversal, the group company, and an advance.
+const PAYS = [
+  { id: 'PAY-00001', date: '2026-11-10', buyer: 'GODREJ AGROVET KHANA', amount: 500000, deduction: '', note: '' },
+  { id: 'PAY-00002', date: '2026-11-12', buyer: 'GODREJ AGROVET KHANA', amount: '', deduction: 802, note: 'TDS' },
+  { id: 'PAY-00003', date: '2026-11-13', buyer: 'GODREJ AGROVET KHANA', amount: 100000, deduction: '', note: '' },
+  { id: 'PAY-00004', date: '2026-11-14', buyer: 'GODREJ AGROVET KHANA', amount: -100000, deduction: '', note: 'Reversal of PAY-00003: entered twice' },
+  { id: 'PAY-00005', date: '2026-11-15', buyer: 'SHREE RAM SOLVEX', amount: 300000, deduction: '', note: '' },
+  { id: 'PAY-00006', date: '2026-11-16', buyer: 'KING FOOD MALERKOTLA', amount: 900000, deduction: '', note: 'Ref UTR1' }
+];
+const sAcc = sv.custAcc_(sOut, PAYS, S);
 
 // screen: everything up to flagIssues (helpers, data, fast saving, derive, CARRY)
 const html = fs.readFileSync(path.join(ROOT, 'Index.html'), 'utf8');
@@ -46,10 +56,10 @@ const calc = js.slice(0, js.indexOf('function flagIssues'));
 const cv = { document: { querySelector() { return null; } }, window: {}, console };
 vm.createContext(cv);
 vm.runInContext(calc + '\nD = ' + JSON.stringify({ settings: S, today }) + '; P = { money: true }; PO = ' + JSON.stringify(PO) + '; SO = ' + JSON.stringify(SO) +
-  '; this.out = CARRY(' + JSON.stringify(trucks) + '.map(derive));', cv);
+  '; this.out = CARRY(' + JSON.stringify(trucks) + '.map(derive)); this.acc = custAcc(this.out, ' + JSON.stringify(PAYS) + ');', cv);
 
 const keys = ['L', 'U', 'R', 'A', 'FR', 'DED', 'purEx', 'purTot', 'saleWt', 'saleEx', 'saleTot', 'soBase', 'short', 'allow', 'shortDed', 'frAmt', 'trip', 'detDays', 'detSuggest', 'det',
-  'netFr', 'netPay', 'carryIn', 'carryOut', 'carryLeft', 'bal', 'profit', 'st', 'credit', 'overdue', 'ownBuyer', 'fBuyer', 'plantPO', 'firm', 'rateUsed', 'noSlip', 'cx', 'placed', 'stage'];
+  'netFr', 'netPay', 'carryIn', 'carryOut', 'carryLeft', 'profit', 'st', 'credit', 'due', 'ownBuyer', 'fBuyer', 'plantPO', 'firm', 'rateUsed', 'noSlip', 'cx', 'placed', 'stage'];
 let bad = 0;
 sOut.forEach((s, i) => {
   const c = cv.out[i];
@@ -57,6 +67,14 @@ sOut.forEach((s, i) => {
     if (JSON.stringify(s[k]) !== JSON.stringify(c[k])) { bad++; console.log('  DIFF ' + s.id + ' ' + k + ': server ' + JSON.stringify(s[k]) + ' screen ' + JSON.stringify(c[k])); }
   });
 });
-sOut.forEach(s => console.log('  ' + s.id + '  purchase ' + s.purTot + '  sale ' + s.saleTot + '  shortDed ' + s.shortDed + '  netFreight ' + s.netFr + '  pay ' + s.netPay + '  balance ' + s.bal + '  profit ' + s.profit + '  ' + s.stage));
-console.log(bad ? '\n' + bad + ' DIFFERENCES between server and screen' : '\nServer and screen give identical numbers on all ' + sOut.length + ' trucks (' + keys.length + ' values each).');
+sOut.forEach(s => console.log('  ' + s.id + '  purchase ' + s.purTot + '  sale ' + s.saleTot + '  shortDed ' + s.shortDed + '  netFreight ' + s.netFr + '  pay ' + s.netPay + '  profit ' + s.profit + '  ' + s.stage));
+// Customer accounts (money per customer) must also be identical
+const ak = ['name', 'own', 'trucks', 'qty', 'sales', 'received', 'deducted', 'outstanding', 'overdue', 'oldest', 'lastPaid'];
+const names = Array.from(new Set(Object.keys(sAcc).concat(Object.keys(cv.acc)))).sort();
+names.forEach(nm => ak.forEach(k => {
+  const a = (sAcc[nm] || {})[k], b = (cv.acc[nm] || {})[k];
+  if (JSON.stringify(a) !== JSON.stringify(b)) { bad++; console.log('  DIFF account ' + nm + ' ' + k + ': server ' + JSON.stringify(a) + ' screen ' + JSON.stringify(b)); }
+}));
+names.forEach(nm => { const a = sAcc[nm]; console.log('  ' + nm.padEnd(22) + ' sales ' + a.sales + '  received ' + a.received + '  deducted ' + a.deducted + '  outstanding ' + a.outstanding + '  overdue ' + a.overdue + (a.oldest ? ' (' + a.oldest + ' days)' : '')); });
+console.log(bad ? '\n' + bad + ' DIFFERENCES between server and screen' : '\nServer and screen give identical numbers on all ' + sOut.length + ' trucks (' + keys.length + ' values each) and all ' + names.length + ' customer accounts.');
 process.exitCode = bad ? 1 : 0;

@@ -41,7 +41,9 @@ Read this file fully before doing any work in this folder.
 - **Order quantity window ±1%** (APP_SETTINGS `qtyTolerancePct`, 0.01), for POs and SOs. Example PO 10,000 qtl: complete from 9,900 → shows "Complete" + **Short-close** button (never closes by itself); limit 10,100. Above the limit, or a new truck on a complete order: staff are refused ("Ask the Owner"), the Owner gets a warning and can accept with Save again. Same check on server (`checkQty_`) and screen (`qtyProblem`).
 - **Dates are shown and typed as DD-MM-YYYY everywhere** (screen, messages, Excel). Stored as yyyy-mm-dd / real dates as before.
 - **Working lists show only open work.** Closed trucks, cancelled/returned trucks, short-closed and cancelled orders are on the **Closed & cancelled** page (nothing is moved or deleted in the sheet). Every list has an S.No. column.
-- Stages: Vehicle placed → Loaded → Supplier paid → Received/Unloaded → Part paid → Customer paid → Closed. Closed needs full payment and freight paid (or customer pays freight).
+- Stages: Vehicle placed → Loaded → Supplier paid → Received/Unloaded → Closed. **Closed = unloaded + supplier paid + freight paid (or customer pays freight)**; own-plant trucks the same (Nov 2026). "Part paid" / "Customer paid" are no longer used.
+- **Customer money is kept per customer (factory), not per truck** (Nov 2026). Entered on the **Receivables** page ("+ Received": amount, date, bank ref optional, deduction + reason), saved in APP_PAYMENTS with Dispatch No. blank. Outstanding = sale totals of the customer's unloaded trucks − received − deductions (below 0 = advance). Overdue = sales past their credit days less everything received. A wrong entry is reversed (a minus line), never deleted; Accounts only same-day entries, Owner any. Same calculation on server (`custAcc_`) and screen (`custAcc`). No per-truck "+ Payment".
+- **Sales** tab = unloaded trucks not yet Closed (sale on the unloaded weight), no money columns. **Receivables** tab = one row per customer (incl. Shree Ram Solvex as group company) with statement per customer.
 - Labels use proper terms (Supplier, Customer, Dispatch Register, Dispatch No., Vehicle No., Dispatch weight, Received weight, Short-closed, Supplier invoice, Outstanding…). Only labels change, never sheet column names.
 
 ## 4. Safety rules (always)
@@ -88,7 +90,7 @@ Read this file fully before doing any work in this folder.
 - Pay popup: amount, payee bank details with Copy, "Open bank" link, UTR or screenshot.
 - Upload slip photo and payment screenshot per truck (Google Drive folder).
 - Flow chart on each PO page (supplier → customers).
-- Party ledgers in the app (customers, suppliers, transporters), Busy import file.
+- Party ledgers in the app: customers done (Receivables + statement, Nov 2026); suppliers, transporters still to do. Busy import file.
 - Later: transporter app + plant board, WhatsApp bot (official API, forwarded slips), other firms' own books.
 
 ## 8. How to talk to Nitish

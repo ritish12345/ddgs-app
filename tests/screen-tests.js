@@ -71,23 +71,23 @@ const openApp = (s, token, storage) => B.openApp(s, token, storage, msg => { con
   ok(A.win.FAILS.length === 0 && A.$('#fails').hidden, 'and the message is cleared');
   A.win.closeForm();
 
-  console.log('Accounts (Keshav): payment, internet lost after the server saved it');
+  console.log('Accounts (Keshav): customer payment, internet lost after the server saved it');
   const B = openApp(s, tokens.acc);
   ok(await idle(B), 'app loads');
-  const before = truckRow(s, 'DISP-0001')['Received From Buyer'];
+  const GOD = 'GODREJ AGROVET KHANA', before = B.win.ACC[GOD].received;
+  const payLines = () => s.store.sheet('APP_PAYMENTS').dump().slice(1).filter(r => r[4] === GOD && r[5] === 1000 && r[2] === '').length;
   let lostOnce = true;
-  B.br.net = fn => (fn === 'api_addPayment' && lostOnce ? (lostOnce = false, 'lost') : 'ok');
+  B.br.net = fn => (fn === 'api_addCustomerPayment' && lostOnce ? (lostOnce = false, 'lost') : 'ok');
   B.br.calls.length = 0;
-  B.win.runAct('receive', 'DISP-0001');
-  fill(B, { amt: '1000', receivedDate: '2026-11-19' });
+  B.win.runAct('custPay', GOD);
+  fill(B, { amt: '1000', date: '19-11-2026' });
   submit(B);
-  ok(B.win.getT('DISP-0001').R === before + 1000, 'received goes up by 1,000 at once (' + before + ' -> ' + B.win.getT('DISP-0001').R + ')');
+  ok(B.win.ACC[GOD].received === before + 1000, 'received goes up by 1,000 at once (' + before + ' -> ' + B.win.ACC[GOD].received + ')');
   await sleep(300);
   ok(B.win.Q.length === 1 && /No internet/.test(B.$('#sync').textContent), 'reply lost: still waiting, header says "No internet?"');
   ok(await idle(B, 15000), 'tries again by itself and finishes');
-  ok(truckRow(s, 'DISP-0001')['Received From Buyer'] === before + 1000, 'the sheet has the payment ONCE (' + truckRow(s, 'DISP-0001')['Received From Buyer'] + ')');
-  ok(s.store.sheet('APP_PAYMENTS').dump().slice(1).filter(r => r[2] === 'DISP-0001' && r[5] === 1000).length === 1, 'one payment line in APP_PAYMENTS');
-  ok(B.br.calls.filter(f => f === 'api_addPayment').length === 2 && B.win.getT('DISP-0001').R === before + 1000, 'sent twice, counted once; screen shows the right total');
+  ok(payLines() === 1, 'the sheet has the payment ONCE (one line in APP_PAYMENTS)');
+  ok(B.br.calls.filter(f => f === 'api_addCustomerPayment').length === 2 && B.win.ACC[GOD].received === before + 1000, 'sent twice, counted once; screen shows the right total');
 
   console.log('Two quick saves on one truck go in order');
   s.run('api_saveTruck', own, { truck: 'PB65QQ4321', po: 'PO-01-BCL', placedOn: '2026-11-19' });
@@ -130,7 +130,7 @@ const openApp = (s, token, storage) => B.openApp(s, token, storage, msg => { con
 
   console.log('Closing the app while a save is waiting (no internet)');
   B.br.net = () => 'offline';
-  B.win.runAct('advance', 'DISP-0005');
+  B.win.runAct('advance', 'DISP-0004');
   fill(B, { advance: '2500' });
   submit(B);
   await sleep(200);
@@ -143,20 +143,20 @@ const openApp = (s, token, storage) => B.openApp(s, token, storage, msg => { con
   const C = openApp(s, null, saved); // the app is opened again later, internet back
   ok(await idle(C, 15000), 'app opens from the saved copy and sends the waiting save');
   ok(C.br.calls[0] === 'api_sync', 'opening with a saved copy only asks "anything new?" first (' + C.br.calls.slice(0, 2).join(',') + ')');
-  ok(truckRow(s, 'DISP-0005')['Freight Advance'] === 2500 && C.win.getT('DISP-0005').A === 2500, 'the advance reached the sheet');
+  ok(truckRow(s, 'DISP-0004')['Freight Advance'] === 2500 && C.win.getT('DISP-0004').A === 2500, 'the advance reached the sheet');
   ok(JSON.parse(C.storage().ddgs_q || '[]').length === 0, 'nothing left waiting');
 
   console.log('Different user on the same phone does not send the old user\'s save');
-  const lost = JSON.stringify([{ rid: 'zzrid0000001', fn: 'api_saveTruck', args: [{ id: 'DISP-0005', advance: '9999', _rid: 'zzrid0000001' }], k: 'truck', data: { id: 'DISP-0005', patch: { advance: '9999' } }, ids: ['DISP-0005'], label: 'PB10K7777 · Freight advance', user: 'keshav12', at: Date.now(), reopen: null }]);
+  const lost = JSON.stringify([{ rid: 'zzrid0000001', fn: 'api_saveTruck', args: [{ id: 'DISP-0004', advance: '9999', _rid: 'zzrid0000001' }], k: 'truck', data: { id: 'DISP-0004', patch: { advance: '9999' } }, ids: ['DISP-0004'], label: 'RJ14C5555 · Freight advance', user: 'keshav12', at: Date.now(), reopen: null }]);
   const E = openApp(s, own, { ddgs_q: lost });
   ok(await idle(E), 'owner opens the app');
-  ok(truckRow(s, 'DISP-0005')['Freight Advance'] === 2500 && E.win.FAILS.length === 1 && /entered it on this device/.test(E.win.FAILS[0].msg), 'not sent; listed for checking');
+  ok(truckRow(s, 'DISP-0004')['Freight Advance'] === 2500 && E.win.FAILS.length === 1 && /entered it on this device/.test(E.win.FAILS[0].msg), 'not sent; listed for checking');
 
   console.log('Old waiting saves are not sent');
-  const old = JSON.stringify([{ rid: 'zzrid0000002', fn: 'api_saveTruck', args: [{ id: 'DISP-0005', advance: '7777', _rid: 'zzrid0000002' }], k: 'truck', data: { id: 'DISP-0005', patch: { advance: '7777' } }, ids: ['DISP-0005'], label: 'PB10K7777 · Freight advance', user: 'nidhish23', at: Date.now() - 6 * 3600e3, reopen: null }]);
+  const old = JSON.stringify([{ rid: 'zzrid0000002', fn: 'api_saveTruck', args: [{ id: 'DISP-0004', advance: '7777', _rid: 'zzrid0000002' }], k: 'truck', data: { id: 'DISP-0004', patch: { advance: '7777' } }, ids: ['DISP-0004'], label: 'RJ14C5555 · Freight advance', user: 'nidhish23', at: Date.now() - 6 * 3600e3, reopen: null }]);
   const F = openApp(s, own, { ddgs_q: old });
   ok(await idle(F), 'app opens');
-  ok(truckRow(s, 'DISP-0005')['Freight Advance'] === 2500 && F.win.FAILS.length === 1, 'a save older than 5 hours is only listed for checking');
+  ok(truckRow(s, 'DISP-0004')['Freight Advance'] === 2500 && F.win.FAILS.length === 1, 'a save older than 5 hours is only listed for checking');
 
   [A, B, C, E, F].forEach(x => { try { x.win.close(); } catch (e) {} });
   console.log(fails ? '\n' + fails + ' FAILED' : '\nAll screen tests passed.');
