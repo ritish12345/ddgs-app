@@ -200,6 +200,7 @@ function api_login(username, password) {
 }
 
 function api_logout(token) {
+  token = tok_(token);
   if (token) PropertiesService.getScriptProperties().deleteProperty('s_' + token);
   return true;
 }
@@ -234,6 +235,17 @@ function api_getData(token) {
   return readAll_();
 }
 
+/** Background refresh from an open screen. v = the data version the screen has.
+    Nothing changed since then: a tiny "same" answer and no tab is read. Otherwise (or full = true) all data, like api_getData. */
+function api_sync(token, v, full) {
+  auth_(token);
+  ensureSetup_();
+  if (ME.role === 'Owner') ensureTriggers_();
+  var cur = dataVersion_();
+  if (!full && !REQ_.upgraded && v && String(v) === cur) return { same: true, v: cur, today: today_(), syncedAt: nowStr_() };
+  return readAll_();
+}
+
 function api_saveTruck(token, obj) {
   auth_(token); need_('trucks');
   obj = obj || {};
@@ -244,7 +256,8 @@ function api_saveTruck(token, obj) {
     TRUCK_MONEY.forEach(function (k) { if (!(keepRate && k === 'frate')) delete obj[k]; });
   }
   var force = obj._force === true && ME.role === 'Owner';
-  delete obj._force;
+  var rid = cleanRid_(obj._rid);
+  delete obj._force; delete obj._rid;
   return withLock_(function () {
     [['po', T.PO], ['so', T.SO]].forEach(function (k) {
       if (!(k[0] in obj) || !obj[k[0]]) return;
@@ -259,7 +272,7 @@ function api_saveTruck(token, obj) {
     linkTruckOrders_(obj);
     if (obj.id) checkTruckRules_(obj);
     return saveRecord_(T.TR, obj);
-  });
+  }, rid);
 }
 
 /** Closed trucks and old payments can only be changed by the Owner. */
@@ -325,7 +338,7 @@ function checkNewTruck_(obj) {
 }
 
 /** Adds a buyer payment (and any TDS/claim deduction) on the server, so two people entering at once never lose an amount. */
-function api_addPayment(token, id, amount, date, deduction, note) {
+function api_addPayment(token, id, amount, date, deduction, note, rid) {
   auth_(token); need_('truckMoney');
   return withLock_(function () {
     var t = rows_(T.TR).filter(function (r) { return r.id === id; })[0];
@@ -346,7 +359,8 @@ function api_addPayment(token, id, amount, date, deduction, note) {
       id: nextId_(T.PAY, rows_(T.PAY), {}), date: upd.receivedDate || Utilities.formatDate(new Date(), tz_(), 'yyyy-MM-dd'),
       truck: id, so: t.so, buyer: so ? so.buyer : '', amount: a || '', deduction: d || '', note: d ? (note || 'Deduction') : ''
     })]);
-  });
+    dropTab_(T.PAY);
+  }, cleanRid_(rid));
 }
 
 function api_savePO(token, obj) {
@@ -454,6 +468,7 @@ function api_addNote(token, area, text) {
     var id = 'NOTE-' + ('000' + n).slice(-4);
     var now = new Date();
     sh.getRange(sh.getLastRow() + 1, 1, 1, 7).setValues([[id, Utilities.formatDate(now, tz_(), 'yyyy-MM-dd'), String(area || 'Other'), text, 'Open', ME.name || ME.id, Utilities.formatDate(now, tz_(), 'yyyy-MM-dd HH:mm')]]);
+    dropTab_(T.NOTE); markChanged_(T.NOTE);
     log_('Design note', id, text.slice(0, 80));
   });
 }
@@ -465,11 +480,12 @@ function api_noteStatus(token, id, status) {
     var r = rows_(T.NOTE).filter(function (x) { return x.id === id; })[0];
     if (!r) throw new Error('Note ' + id + ' not found.');
     sheet_(T.NOTE).getRange(r._row, idx_(T.NOTE, 'status') + 1).setValue(status);
+    dropTab_(T.NOTE); markChanged_(T.NOTE);
   });
 }
 
 /** One bank payment for several trucks: marks each paid with the same date and UTR. */
-function api_payBatch(token, kind, ids, date, utr, amount) {
+function api_payBatch(token, kind, ids, date, utr, amount, rid) {
   auth_(token); need_('truckMoney');
   if (kind !== 'plant' && kind !== 'freight') throw new Error('Unknown payment type.');
   ids = (ids || []).filter(String);
@@ -494,7 +510,7 @@ function api_payBatch(token, kind, ids, date, utr, amount) {
       else saveRecord_(T.TR, { id: id, freightPaid: true, freightPaidDate: date, freightUTR: utr, detention: t.det });
     });
     log_(kind === 'plant' ? 'Plant payment' : 'Freight payment', utr, ids.length + ' trucks: ' + ids.join(', ') + ' | amount entered ' + (amount === '' || amount == null ? '-' : amount));
-  });
+  }, cleanRid_(rid));
 }
 
 function api_restore(token, table, id) {
@@ -617,6 +633,7 @@ function api_verifyEntries(token, items, on) {
     var c = idx_(T.LOG, 'verified') + 1;
     rowsToSet.forEach(function (row) {
       sh.getRange(row, c, 1, 3).setValues([[on === true, on === true ? ME.id : '', on === true ? nowStr_() : '']]);
+      dropTab_(T.LOG);
     });
   });
 }
@@ -640,6 +657,7 @@ function api_saveBank(token, kind, name, accName, accNo, ifsc) {
     var row = rowFor_(T.BANK, { id: id, kind: kind, name: key, accName: accName, accNo: accNo, ifsc: ifsc });
     if (cur) sh.getRange(cur._row, 1, 1, row.length).setValues([row]);
     else sh.getRange(sh.getLastRow() + 1, 1, 1, row.length).setValues([row]);
+    dropTab_(T.BANK); markChanged_(T.BANK);
     log_(cur ? 'Bank updated' : 'Bank added', key, kind === 'supplier' ? 'Supplier bank details' : 'Transporter bank details');
   });
 }
@@ -713,6 +731,8 @@ function createUser_(obj, isNew) {
   row[idx_(T.US, 'at')] = nowStr_();
   if (existing) sh.getRange(existing._row, 1, 1, cols.length).setValues([row]);
   else sh.getRange(sh.getLastRow() + 1, 1, 1, cols.length).setValues([row]);
+  dropTab_(T.US); markChanged_(T.US);
+  CacheService.getScriptCache().remove('users_v1'); // the login check must see this change at once
   log_(isNew ? 'User created' : 'User updated', id, (rec.role ? 'Role ' + rec.role : '') + (rec.hash ? ' (password set)' : '') + ('active' in rec ? ' active=' + rec.active : ''));
 }
 
@@ -729,12 +749,30 @@ function startSession_(u) {
   return { token: token };
 }
 
+/* The new screen sends {t: token, d: 1}: after a save it takes back only what changed.
+   A screen that was opened before this update sends the plain token and still gets everything, as before. */
+function tok_(x) {
+  if (x && typeof x === 'object') { REQ_.delta = x.d === 1; return String(x.t || ''); }
+  return x ? String(x) : '';
+}
+
+/* Users for the login check, kept in Apps Script's cache for 5 minutes (one sheet read less on every call).
+   Saving a user in the app clears it at once. */
+function authUsers_() {
+  var cache = CacheService.getScriptCache(), raw = cache.get('users_v1');
+  if (raw) { try { return JSON.parse(raw); } catch (e) {} }
+  var list = users_().map(function (u) { return { id: u.id, name: u.name, role: u.role, active: u.active }; });
+  try { cache.put('users_v1', JSON.stringify(list), 300); } catch (e) {}
+  return list;
+}
+
 function auth_(token) {
+  token = tok_(token);
   var raw = token ? PropertiesService.getScriptProperties().getProperty('s_' + token) : null;
   if (!raw) throw new Error('LOGIN');
   var s = JSON.parse(raw);
   if (s.exp < Date.now()) { PropertiesService.getScriptProperties().deleteProperty('s_' + token); throw new Error('LOGIN'); }
-  var u = users_().filter(function (x) { return x.id === s.u && x.active; })[0];
+  var u = authUsers_().filter(function (x) { return x.id === s.u && x.active; })[0];
   if (!u) throw new Error('LOGIN');
   ME = { id: u.id, name: u.name, role: u.role, can: ROLES[u.role] || ROLES.Viewer };
   return ME;
@@ -752,57 +790,110 @@ function lockRun_(fn) {
 
 /* ---------------- core ---------------- */
 
-function ss_() { return SpreadsheetApp.getActiveSpreadsheet(); }
-function tz_() { return ss_().getSpreadsheetTimeZone(); }
+/* Memory for ONE server call. Every call from the screen starts with fresh globals, so nothing here can go stale
+   between calls. Inside a call, each tab is read from the sheet at most once; later reads use this copy. */
+var REQ_ = { ss: null, tz: null, v: null, sheets: {}, tabs: {}, dates: {}, changed: {}, delta: false, inLock: false, logBuf: [] };
+
+function ss_() { return REQ_.ss || (REQ_.ss = SpreadsheetApp.getActiveSpreadsheet()); }
+function tz_() { return REQ_.tz || (REQ_.tz = ss_().getSpreadsheetTimeZone()); }
+function today_() { return Utilities.formatDate(new Date(), tz_(), 'yyyy-MM-dd'); }
 function user_() {
   if (ME && ME.id) return ME.id;
   try { return Session.getActiveUser().getEmail() || 'unknown'; } catch (e) { return 'unknown'; }
 }
 function nowStr_() { return Utilities.formatDate(new Date(), tz_(), 'yyyy-MM-dd HH:mm'); }
 
-function withLock_(fn) {
+/* Every save runs here: one at a time (lock), fresh data, log lines written together, then the result for the screen.
+   rid = the screen's id for this save. If the same save arrives twice (the reply was lost and the screen sent it again),
+   the second one changes nothing. */
+function withLock_(fn, rid) {
   var lock = LockService.getScriptLock();
   lock.waitLock(20000);
+  REQ_.inLock = true;
   try {
-    fn();
+    REQ_.tabs = {}; REQ_.changed = {}; // read fresh data now that we hold the lock
+    if (rid && seenRid_(rid)) return readAll_();
+    try { fn(); } finally { flushLog_(); if (dataChanged_()) bumpVersion_(); }
+    if (rid) CacheService.getScriptCache().put('rid_' + rid, '1', 21600);
+    if (REQ_.delta) return changes_();
+    Object.keys(REQ_.changed).forEach(dropTab_); // a screen opened before this update gets everything, read fresh from the sheet
     return readAll_();
   } finally {
+    REQ_.inLock = false;
     lock.releaseLock();
   }
 }
 
-function sheet_(name) { return ss_().getSheetByName(name); }
+function sheet_(name) { return REQ_.sheets[name] || (REQ_.sheets[name] = ss_().getSheetByName(name)); }
 
 function makeTab_(name) {
   var sh = sheet_(name) || ss_().insertSheet(name);
+  REQ_.sheets[name] = sh;
   var heads = SCHEMA[name].map(function (c) { return c[1]; });
   sh.getRange(1, 1, 1, heads.length).setValues([heads])
     .setFontWeight('bold').setBackground('#0f6b5c').setFontColor('#ffffff');
   sh.setFrozenRows(1);
+  dropTab_(name);
   return sh;
 }
 
+/* All rows of a tab as objects. The sheet is read once per call; each caller gets its own copies. */
 function rows_(name) {
+  var list = REQ_.tabs[name] || (REQ_.tabs[name] = readTab_(name));
+  return list.map(function (o) { var c = {}; for (var k in o) c[k] = o[k]; return c; });
+}
+function readTab_(name) {
   var sh = sheet_(name);
-  if (!sh || sh.getLastRow() < 2) return [];
-  var v = sh.getDataRange().getValues();
-  var cols = SCHEMA[name], tz = tz_(), out = [];
+  if (!sh) return [];
+  var v = sh.getDataRange().getValues(), out = [];
   for (var i = 1; i < v.length; i++) {
     if (v[i][0] === '' || v[i][0] === null) continue;
-    var o = { _row: i + 1 };
-    for (var c = 0; c < cols.length; c++) {
-      var x = v[i][c], type = cols[c][2];
-      if (x === undefined || x === null) x = '';
-      if (type === 'date') x = x instanceof Date ? Utilities.formatDate(x, tz, 'yyyy-MM-dd') : String(x);
-      else if (type === 'num') x = x === '' ? '' : num_(x);
-      else if (type === 'bool') x = x === true || String(x).toUpperCase() === 'TRUE';
-      else x = x instanceof Date ? Utilities.formatDate(x, tz, 'yyyy-MM-dd HH:mm') : String(x);
-      o[cols[c][0]] = x;
-    }
-    out.push(o);
+    out.push(rowObj_(name, v[i], i + 1));
   }
   return out;
 }
+/* One sheet row (array) -> object with the SCHEMA keys. */
+function rowObj_(name, v, rowNo) {
+  var cols = SCHEMA[name], o = { _row: rowNo };
+  for (var c = 0; c < cols.length; c++) {
+    var x = v[c], type = cols[c][2];
+    if (x === undefined || x === null) x = '';
+    if (type === 'date') x = x instanceof Date ? fmtDate_(x, 'yyyy-MM-dd') : String(x);
+    else if (type === 'num') x = x === '' ? '' : num_(x);
+    else if (type === 'bool') x = x === true || String(x).toUpperCase() === 'TRUE';
+    else x = x instanceof Date ? fmtDate_(x, 'yyyy-MM-dd HH:mm') : String(x);
+    o[cols[c][0]] = x;
+  }
+  return o;
+}
+/* The same dates repeat on many rows, so each one is formatted only once per call. */
+function fmtDate_(x, pattern) {
+  var key = pattern + x.getTime();
+  return REQ_.dates[key] || (REQ_.dates[key] = Utilities.formatDate(x, tz_(), pattern));
+}
+/* After writing to a tab: forget its copy (the next read gets the sheet again) and remember what changed. */
+function dropTab_(name) { delete REQ_.tabs[name]; }
+function markChanged_(name, id, rowNo) { var c = REQ_.changed[name] || (REQ_.changed[name] = {}); c[id || '*'] = rowNo || 0; }
+/* After saveRecord_ writes a row, the copy in memory is updated too, so several saves in one call need no new read. */
+function cacheRow_(name, row, rowNo) {
+  var list = REQ_.tabs[name];
+  if (!list) return;
+  var o = rowObj_(name, row, rowNo);
+  for (var i = 0; i < list.length; i++) if (list[i].id === o.id) { list[i] = o; return; }
+  list.push(o);
+}
+
+/* ---------------- data version: lets an open screen ask "anything new?" without reading the tabs ---------------- */
+var SCREEN_TABS_ = [T.PO, T.SO, T.TR, T.NOTE, T.BANK, T.US];
+function dataChanged_() { return SCREEN_TABS_.some(function (n) { return !!REQ_.changed[n]; }); }
+function dataVersion_() { return REQ_.v || (REQ_.v = PropertiesService.getScriptProperties().getProperty('data_v') || '0'); }
+function bumpVersion_() {
+  var p = PropertiesService.getScriptProperties();
+  REQ_.v = String(Math.max((Number(p.getProperty('data_v')) || 0) + 1, Date.now()));
+  p.setProperty('data_v', REQ_.v);
+}
+function cleanRid_(rid) { rid = String(rid || ''); return /^[A-Za-z0-9_-]{8,64}$/.test(rid) ? rid : ''; }
+function seenRid_(rid) { return CacheService.getScriptCache().get('rid_' + rid) !== null; }
 
 function readSettings_() {
   var set = {};
@@ -812,24 +903,55 @@ function readSettings_() {
 
 function readAll_() {
   var can = ME && ME.can ? ME.can : ROLES.Viewer;
-  var strip = function (list, keys) { list.forEach(function (r) { keys.forEach(function (k) { delete r[k]; }); }); return list; };
+  var v = dataVersion_(); // read before the tabs, so the data is never older than this version
   var po = rows_(T.PO), so = rows_(T.SO), trucks = rows_(T.TR), S = readSettings_();
-  if (!can.money) {
-    // Staff without money access still need the correct stage, so work it out here before the amounts are removed.
-    var pm = {}, sm = {}, today = Utilities.formatDate(new Date(), tz_(), 'yyyy-MM-dd');
-    po.forEach(function (r) { pm[r.id] = r; }); so.forEach(function (r) { sm[r.id] = r; });
-    trucks.forEach(function (t) { t._st = derive_(t, pm[t.po], sm[t.so], S, today).st; });
-    strip(po, ORDER_MONEY); strip(so, ORDER_MONEY); strip(trucks, TRUCK_HIDE);
-  }
+  shape_(po, so, trucks, can);
   var out = {
     po: po, so: so, trucks: trucks, settings: S,
     me: ME ? { id: ME.id, name: ME.name, role: ME.role } : null, perm: can,
-    today: Utilities.formatDate(new Date(), tz_(), 'yyyy-MM-dd'), syncedAt: nowStr_()
+    today: today_(), syncedAt: nowStr_(), v: v
   };
   out.notes = sheet_(T.NOTE) ? rows_(T.NOTE).reverse() : [];
   if (can.bank) out.banks = sheet_(T.BANK) ? rows_(T.BANK) : [];
-  if (can.users) out.users = users_().map(function (u) { return { id: u.id, name: u.name, role: u.role, active: u.active, at: u.at }; });
+  if (can.users) out.users = userList_();
   return out;
+}
+function userList_() { return users_().map(function (u) { return { id: u.id, name: u.name, role: u.role, active: u.active, at: u.at }; }); }
+
+/* Role rules for what is sent to the screen. Staff without money access still need the correct stage,
+   so it is worked out here before the amounts are removed. */
+function shape_(po, so, trucks, can) {
+  if (can.money || !(po.length || so.length || trucks.length)) return;
+  var S = readSettings_(), today = today_(), pm = {}, sm = {};
+  rows_(T.PO).forEach(function (r) { pm[r.id] = r; });
+  rows_(T.SO).forEach(function (r) { sm[r.id] = r; });
+  trucks.forEach(function (t) { t._st = derive_(t, pm[t.po], sm[t.so], S, today).st; });
+  var strip = function (list, keys) { list.forEach(function (r) { keys.forEach(function (k) { delete r[k]; }); }); };
+  strip(po, ORDER_MONEY); strip(so, ORDER_MONEY); strip(trucks, TRUCK_HIDE);
+}
+
+/* After a save: only the records this call changed (read back from the sheet), with the same role rules.
+   The screen merges them into what it already has, instead of downloading everything again. */
+function changes_() {
+  var can = ME && ME.can ? ME.can : ROLES.Viewer, ch = REQ_.changed;
+  var out = { delta: true, v: dataVersion_(), today: today_(), syncedAt: nowStr_(),
+    po: changedRows_(T.PO), so: changedRows_(T.SO), trucks: changedRows_(T.TR) };
+  shape_(out.po, out.so, out.trucks, can);
+  if (ch[T.NOTE]) out.notes = rows_(T.NOTE).reverse();
+  if (ch[T.BANK] && can.bank) out.banks = rows_(T.BANK);
+  if (ch[T.US] && can.users) out.users = userList_();
+  return out;
+}
+function changedRows_(name) {
+  var c = REQ_.changed[name];
+  if (!c) return [];
+  var ids = Object.keys(c);
+  if (c['*'] !== undefined || ids.length > 5) {
+    dropTab_(name); // many rows: one fresh read of the tab is cheaper than reading them one by one
+    return rows_(name).filter(function (r) { return c['*'] !== undefined || c.hasOwnProperty(r.id); });
+  }
+  var sh = sheet_(name), w = SCHEMA[name].length;
+  return ids.map(function (id) { return rowObj_(name, sh.getRange(c[id], 1, 1, w).getValues()[0], c[id]); });
 }
 
 function toCell_(x, type) {
@@ -867,8 +989,10 @@ function saveRecord_(name, obj) {
   row[idx_(name, 'by')] = user_();
   row[idx_(name, 'at')] = nowStr_();
 
-  if (isNew) sh.getRange(sh.getLastRow() + 1, 1, 1, cols.length).setValues([row]);
-  else sh.getRange(rec._row, 1, 1, cols.length).setValues([row]);
+  var rowNo = isNew ? sh.getLastRow() + 1 : rec._row;
+  sh.getRange(rowNo, 1, 1, cols.length).setValues([row]);
+  cacheRow_(name, row, rowNo);
+  markChanged_(name, obj.id, rowNo);
 
   log_(isNew ? 'Created' : 'Updated', obj.id, isNew ? 'New record' : changes.join('; '));
   return obj.id;
@@ -957,9 +1081,16 @@ function parseDate_(x) {
 }
 
 function log_(action, record, details) {
+  var line = [nowStr_(), user_(), action, record, String(details || '').slice(0, 2000), '', '', ''];
+  if (REQ_.inLock) { REQ_.logBuf.push(line); return; } // written together when the save finishes (withLock_)
+  writeLog_([line]);
+}
+function flushLog_() { if (REQ_.logBuf.length) { var b = REQ_.logBuf; REQ_.logBuf = []; writeLog_(b); } }
+function writeLog_(lines) {
   var sh = sheet_(T.LOG);
   if (!sh) return;
-  sh.getRange(sh.getLastRow() + 1, 1, 1, 8).setValues([[nowStr_(), user_(), action, record, String(details || '').slice(0, 2000), '', '', '']]);
+  sh.getRange(sh.getLastRow() + 1, 1, lines.length, 8).setValues(lines);
+  dropTab_(T.LOG);
 }
 
 /* ---------------- setup and import ---------------- */
@@ -980,6 +1111,7 @@ function ensureSetup_() {
     var set = sheet_(T.SET);
     set.getRange(2, 1, SETTINGS_DEFAULT.length, 3).setValues(SETTINGS_DEFAULT);
     var report = importOld_();
+    REQ_.tabs = {};
     PropertiesService.getScriptProperties().setProperty('schema_v', SCHEMA_V);
     log_('Setup', '-', JSON.stringify(report));
     return report;
@@ -996,6 +1128,7 @@ function upgradeHeaders_() {
     var have = {};
     rows_(T.SET).forEach(function (r) { have[r.key] = 1; });
     SETTINGS_DEFAULT.forEach(function (s) { if (!have[s[0]]) set.getRange(set.getLastRow() + 1, 1, 1, 3).setValues([s]); });
+    dropTab_(T.SET);
     renameFirm_('SRIRAM SOLVEX', 'SHREE RAM SOLVEX');
     // Slip check starts on the day the app is upgraded, unless a date was already set.
     var sdata = set.getDataRange().getValues();
@@ -1016,6 +1149,7 @@ function upgradeHeaders_() {
         .setFontWeight('bold').setBackground('#0f6b5c').setFontColor('#ffffff');
     }
   });
+  REQ_.tabs = {}; REQ_.upgraded = true; // settings or firm names may have changed: read again, and send screens everything
 }
 
 /** One-time rename of a firm everywhere (settings, PO/SO firm, SO buyer). */
