@@ -16,8 +16,9 @@ Read this file fully before doing any work in this folder.
   https://script.google.com/macros/s/AKfycbwkMGpJFppRvc4R3fPReCO5UfXuwAFAqcxLqN87zDuqKNijy7Q1_v6Wug2MnorJkl0STA/exec
 - Files here (synced with `clasp`):
   - `Code.js` – server code. `doGet` serves the screen; staff actions call `api_*` functions through `google.script.run`.
-  - The screen is either `Index.html` or, in the one-file version, the string `var INDEX_HTML = "..."` at the end of `Code.js`. `doGet` uses `INDEX_HTML` if it is defined, otherwise the `Index` HTML file. Preferred: keep the screen in a real `Index.html` and remove `INDEX_HTML`.
+  - `Index.html` – the screen (HTML, CSS and screen code). `doGet` serves it. (The old one-file `INDEX_HTML` string is gone.)
   - `appsscript.json` – manifest (timezone Asia/Kolkata; web app executes as owner).
+  - `.claspignore` – only `Code.js`, `Index.html`, `appsscript.json` are pushed. `tests/` stays local (see section 5).
 - Data lives in sheet tabs: `APP_PO`, `APP_SO`, `APP_TRUCKS`, `APP_LOG`, `APP_SETTINGS`, `APP_USERS`, `APP_PAYMENTS`, `APP_NOTES` (+ any added later). Column lists are in `SCHEMA` in `Code.js`.
 - Old tabs (`MASTER PO`, `SALE ORDER `, `DISPATCH`, `SALE `, `Freight`, Gemini dashboard) are history only; the app imported them once.
 - Roles (`ROLES` in Code.js): **Owner** everything; **Accounts** money, no users/profit/closed-truck edits; **Dispatch** trucks only, no money (money fields are stripped on the server); **Viewer** read only.
@@ -56,6 +57,7 @@ Read this file fully before doing any work in this folder.
 4. Make the change. Keep the existing code style (plain functions, no frameworks, works on phone and laptop, buttons ≥ 44px on phone, no sideways scrolling).
 5. Check syntax: `node -e "new Function(require('fs').readFileSync('Code.js','utf8'))"` (and the screen script if Index.html exists).
 6. Test the logic you touched. Put any test scripts in `tests/` (never pushed – see `.claspignore`). For calculations, test with real-looking numbers from this file.
+   `cd tests && npm install` (once), then `npm test`: old-vs-new comparison on a realistic day (fake sheet in `tests/fake-gas.js`), safety, server speed, the real screen in jsdom, and server/screen calculation parity. All must pass.
 7. `git add . && git commit -m "<what changed>"`
 8. `clasp push` → tell Nitish to test on the **/dev** link (Deploy → Test deployments) before publishing.
 9. Publish only when Nitish says OK:
@@ -70,9 +72,14 @@ Read this file fully before doing any work in this folder.
 - Inside one request, read each tab **once** and reuse it (avoid calling `rows_()` for the same tab many times).
 - After a save, return only what changed where possible instead of all data.
 - Show the change on screen immediately and confirm when the save finishes.
+- How it works now (Nov 2026):
+  - Server: `REQ_` keeps each tab read once per call. The screen sends its token as `{t, d: 1}`, so saves return only the changed records. Older open screens send the plain token and still get all data.
+  - **Any new code that writes to a tab must call `dropTab_(tab)` and `markChanged_(tab, id, row)`** (`saveRecord_` already does both). Otherwise the screen will not see the change.
+  - `api_sync` + script property `data_v`: the background check reads no tabs when nothing changed.
+  - Screen: truck saves and payments go into a queue `Q` and show at once (laid over `D`, the server-confirmed data). Each one carries an id `rid`, so a retried save is never counted twice. Refused saves are listed with "Open again".
 
 ## 7. Backlog (do only when Nitish asks)
-- Faster saving (see section 6).
+- ~~Faster saving~~ – done Nov 2026 (see section 6).
 - Busy invoice no. + e-way bill no. on each truck, with an "Invoice pending" warning.
 - Activity / morning review page (who entered what, Verified tick, red flags).
 - Pay popup: amount, payee bank details with Copy, "Open bank" link, UTR or screenshot.
