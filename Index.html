@@ -295,6 +295,10 @@ table.t tfoot td{font-weight:700;background:var(--soft)}
 #fails .fm b{display:block}
 #fails .fm span{display:block;color:var(--mu);font-size:13px}
 @media (max-width:860px){#fails{bottom:calc(var(--navh) + 10px + env(safe-area-inset-bottom,0px))} #fails .btn{min-height:44px}}
+/* Tab bar: on laptops every tab stays in view (they wrap to a second line when they do not fit); on phones the row
+   swipes sideways with Overview pinned at the left, so it never disappears. */
+@media (min-width:861px){#nav{flex-wrap:wrap;overflow-x:visible;row-gap:2px}}
+@media (max-width:860px){#nav button[data-tab="home"]{position:sticky;left:0;z-index:1;background:var(--card);box-shadow:8px 0 8px -6px rgba(0,0,0,.18)} #nav button[data-tab="home"].on{background:var(--acs)}}
 /* serial numbers (S.No.) */
 .sn{color:var(--mu);font-weight:600;font-variant-numeric:tabular-nums}
 .tc .sn{min-width:22px}
@@ -836,7 +840,15 @@ function render() {
   if (!P.review && ROUTE.v === 'activity') ROUTE = { v: 'home' };
   var tab = { po: 'pos', so: 'sos', buyer: 'sos', plant: 'pos', transporter: P.money ? 'freight' : 'dispatch', truck: 'dispatch', users: 'more' }[ROUTE.v] || ROUTE.v;
   $('#nav').innerHTML = mainTabs().map(function (v) { return '<button type="button" class="' + (tab === v[0] ? 'on' : '') + '" data-tab="' + v[0] + '">' + v[1] + (v[2] != null ? ' <span class="cnt">' + v[2] + '</span>' : '') + '</button>'; }).join('');
-  var on = $('#nav .on'); if (on) { var nv = $('#nav'); if (on.offsetLeft < nv.scrollLeft || on.offsetLeft + on.offsetWidth > nv.scrollLeft + nv.clientWidth) nv.scrollLeft = on.offsetLeft - 16; }
+  // Phones: the tab row swipes sideways. Move it only as much as needed to show the chosen tab
+  // (it used to jump the chosen tab to the far left, which pushed Overview out of view).
+  var on = $('#nav .on'), nv = $('#nav');
+  if (on && nv.scrollWidth > nv.clientWidth + 1) {
+    var r = on.getBoundingClientRect(), b = nv.getBoundingClientRect(), pin = $('#nav [data-tab="home"]');
+    var left = b.left + (pin && pin !== on ? pin.getBoundingClientRect().width : 0); // Overview is pinned there
+    if (r.right > b.right) nv.scrollLeft += r.right - b.right + 12;
+    else if (r.left < left) nv.scrollLeft -= left - r.left + 12;
+  }
   $('#fab').hidden = !(P.trucks && ROUTE.v === 'dispatch');
   var f = { home: vHome, pos: function () { return orderTable('po'); }, sos: function () { return orderTable('so'); }, dispatch: vDispatch, receive: vReceive, settle: vSettle, freight: vFreight, closed: vClosed,
     more: vMore, activity: vActivity, users: P.users ? vUsers : vMore, notes: vNotes, po: function () { return vOrder('po', ROUTE.id); }, so: function () { return vOrder('so', ROUTE.id); },

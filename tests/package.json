@@ -6,6 +6,7 @@
     "test": "node compare-old-new.js && node safety-tests.js && node speed-server-tests.js && node screen-tests.js && node round2-tests.js && node parity-test.js"
   },
   "devDependencies": {
-    "jsdom": "26.1.0"
+    "jsdom": "26.1.0",
+    "puppeteer-core": "^22.15.0"
   }
 }
