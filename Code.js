@@ -104,7 +104,8 @@ var SETTINGS_DEFAULT = [
   ['plantFirm', 'SHREE RAM SOLVEX', 'Your firm that owns the solvent plant: its POs only receive trucks, no sales'],
   ['tradingFirms', 'RAGHAV TRADING AND COMPANY, DEVAN TRADING AND COMPANY, SARASWATI SOLVEX, JAI MAHAVIR TRADING AND COMPANY', 'Firms an order can be taken in (shown on the PO as Booked in the name of)'],
   ['bankUrl', '', 'Internet banking login. The Open bank button on payment popups goes here'],
-  ['slipCheckFrom', '', 'Trucks dispatched on or after this date need a weighment slip photo. Blank = all trucks']
+  ['slipCheckFrom', '', 'Trucks dispatched on or after this date need a weighment slip photo. Blank = all trucks'],
+  ['qtyTolerancePct', 0.01, 'Order quantity tolerance (0.01 = 1%). A PO/SO is complete from 99% of its quantity; going above 101% needs the Owner']
 ];
 
 /* ---------------- firms ---------------- */
@@ -140,6 +141,7 @@ function doGet(e) {
 function setup() {
   editorOnly_();
   PropertiesService.getScriptProperties().deleteProperty('schema_v'); // running setup always re-checks the tabs
+  CacheService.getScriptCache().removeAll(['schema_ok', 'trig_ok', 'tz']);
   var r = ensureSetup_();
   var auto = '';
   try { PropertiesService.getScriptProperties().deleteProperty('triggers_v4'); ensureTriggers_(); auto = ' | Daily 9 pm report and Sunday backup are switched on.'; }
@@ -201,7 +203,7 @@ function api_login(username, password) {
 
 function api_logout(token) {
   token = tok_(token);
-  if (token) PropertiesService.getScriptProperties().deleteProperty('s_' + token);
+  if (token) { PropertiesService.getScriptProperties().deleteProperty('s_' + token); CacheService.getScriptCache().remove('sess_' + token); }
   return true;
 }
 
@@ -268,8 +270,9 @@ function api_saveTruck(token, obj) {
     });
     if (!obj.id) checkNewTruck_(obj);
     var dup = sameDayTruck_(obj);
-    if (dup && !force) throw new Error('Vehicle ' + dup.truck + ' is already entered on ' + dup.date + ' as ' + dup.id + '. A vehicle cannot be entered twice on the same day.' + (ME.role === 'Owner' ? '' : ' Ask the Owner if this is a real second trip.'));
+    if (dup && !force) throw new Error('Vehicle ' + dup.truck + ' is already entered on ' + dmy_(dup.date) + ' as ' + dup.id + '. A vehicle cannot be entered twice on the same day.' + (ME.role === 'Owner' ? '' : ' Ask the Owner if this is a real second trip.'));
     linkTruckOrders_(obj);
+    checkQty_(obj, force);
     if (obj.id) checkTruckRules_(obj);
     return saveRecord_(T.TR, obj);
   }, rid);
@@ -320,10 +323,46 @@ function requireWeight_(obj, cur) {
   if (!String(get('transporter') || '').trim()) throw new Error('Enter the transporter. It is required once the weight is entered.');
   if (!(num_(get('frate')) > 0)) throw new Error('Enter the freight rate per qtl. It is required once the weight is entered.');
 }
-/* Paying the supplier or the freight needs the bank UTR, every time (not only for a single truck). */
+/* Order quantity window (setting qtyTolerancePct, 1%). Example PO-01-BCL of 10,000 qtl: complete from 9,900 qtl,
+   limit 10,100 qtl. Staff cannot take a PO or SO over the limit, or put a new truck on a complete order;
+   the Owner can (the screen warns first, Save again sends force). Same rule on the screen in truckWarn / qtyProblem. */
+function qtyTol_(S) { var x = num_(S.qtyTolerancePct); return x === '' ? 0.01 : x; }
+function checkQty_(obj, force) {
+  if (force) return;
+  var cur = obj.id ? rows_(T.TR).filter(function (r) { return r.id === obj.id; })[0] : null;
+  if (cur && isOff_(cur)) return;
+  var get = function (k) { return (k in obj) ? obj[k] : cur ? cur[k] : ''; };
+  var tol = qtyTol_(readSettings_()), L = num_(get('loadWt')) || 0, trucks = rows_(T.TR);
+  if (L > 1000) return; // looks like kg: the save is refused with the clear "looks like kg" message instead
+  var owner = ME && ME.role === 'Owner';
+  [['po', T.PO, 'loaded'], ['so', T.SO, 'dispatched']].forEach(function (k) {
+    var id = get(k[0]);
+    if (!id) return;
+    var o = rows_(k[1]).filter(function (r) { return r.id === id; })[0], qty = o ? num_(o.qty) : '';
+    if (!o || !(qty > 0) || o.status === 'Cancelled' || o.status === 'Settled') return;
+    var onIt = !!cur && cur[k[0]] === id; // this truck was already on this order before the save
+    var others = 0;
+    trucks.forEach(function (t) { if (t.id !== obj.id && t[k[0]] === id && !isOff_(t)) others += num_(t.loadWt) || 0; });
+    others = Math.round(others * 100) / 100;
+    var before = onIt ? (num_(cur.loadWt) || 0) : 0, limit = qty * (1 + tol), full = qty * (1 - tol);
+    if (L > before && others + L > limit + 0.005) {
+      throw new Error(id + ' would go over its limit of ' + qtl_(limit) + ' qtl (' + qtl_(qty) + ' + ' + Math.round(tol * 10000) / 100 + '%) by ' + qtl_(others + L - limit) + ' qtl.' +
+        (owner ? ' Open it again and tap Save twice to accept.' : ' Ask the Owner.'));
+    }
+    if (!onIt && others >= full - 0.005) {
+      throw new Error(id + ' is complete (' + qtl_(others) + ' of ' + qtl_(qty) + ' qtl ' + k[2] + ').' +
+        (owner ? ' Short-close it, or open this again and tap Save twice to add the truck anyway.' : ' Ask the Owner.'));
+    }
+  });
+}
+function qtl_(x) {
+  var p = (Math.round(x * 100) / 100).toFixed(2).split('.'), i = p[0], last = i.slice(-3), rest = i.slice(0, -3);
+  return (rest ? rest.replace(/\B(?=(\d{2})+(?!\d))/g, ',') + ',' : '') + last + '.' + p[1];
+}
+
+/* Paying the supplier needs the bank UTR, every time. For freight the UTR is optional (Nitish, Nov 2026). */
 function checkPayment_(obj, t) {
   if (obj.plantPaid === true && t.plantPaid !== true && !(obj.plantUTR || t.plantUTR)) throw new Error('Enter the UTR of the payment to the supplier.');
-  if (obj.freightPaid === true && t.freightPaid !== true && !(obj.freightUTR || t.freightUTR)) throw new Error('Enter the UTR of the freight payment.');
 }
 function checkNewTruck_(obj) {
   var today = Utilities.formatDate(new Date(), tz_(), 'yyyy-MM-dd');
@@ -491,7 +530,7 @@ function api_payBatch(token, kind, ids, date, utr, amount, rid) {
   ids = (ids || []).filter(String);
   if (!ids.length) throw new Error('Tick at least one truck.');
   utr = String(utr || '').trim().toUpperCase();
-  if (!utr) throw new Error('Enter the UTR / bank reference.');
+  if (!utr && kind === 'plant') throw new Error('Enter the UTR / bank reference.'); // optional for freight
   if (!/^\d{4}-\d{2}-\d{2}$/.test(String(date || ''))) throw new Error('Enter the payment date.');
   return withLock_(function () {
     var A = deriveAll_(), map = {};
@@ -509,7 +548,7 @@ function api_payBatch(token, kind, ids, date, utr, amount, rid) {
       if (kind === 'plant') saveRecord_(T.TR, { id: id, plantPaid: true, plantPaidDate: date, plantUTR: utr });
       else saveRecord_(T.TR, { id: id, freightPaid: true, freightPaidDate: date, freightUTR: utr, detention: t.det });
     });
-    log_(kind === 'plant' ? 'Plant payment' : 'Freight payment', utr, ids.length + ' trucks: ' + ids.join(', ') + ' | amount entered ' + (amount === '' || amount == null ? '-' : amount));
+    log_(kind === 'plant' ? 'Plant payment' : 'Freight payment', utr || 'no UTR', ids.length + ' trucks: ' + ids.join(', ') + ' | amount entered ' + (amount === '' || amount == null ? '-' : amount));
   }, cleanRid_(rid));
 }
 
@@ -587,7 +626,7 @@ function api_getReview(token, date, person) {
     if (hh >= REVIEW_LATE_FROM_ || hh < REVIEW_LATE_TO_) flags.push('Late-night entry');
     changes.forEach(function (c) {
       if (c.f === 'Status' && (c.n === 'Cancelled' || c.n === 'Returned')) flags.push(c.n === 'Cancelled' ? 'Cancelled' : 'Returned empty');
-      if (REVIEW_DATE_FIELDS_.indexOf(c.f) >= 0 && /^\d{4}-\d{2}-\d{2}$/.test(c.n) && days_(c.n, date) > 1) flags.push('Backdated: ' + c.f + ' set to ' + c.n);
+      if (REVIEW_DATE_FIELDS_.indexOf(c.f) >= 0 && /^\d{4}-\d{2}-\d{2}$/.test(c.n) && days_(c.n, date) > 1) flags.push('Backdated: ' + c.f + ' set to ' + dmy_(c.n));
       if (REVIEW_WEIGHT_RATE_.indexOf(c.f) >= 0 && t && (paidBy_(t.plantPaid, t.plantPaidDate, date) || paidBy_(t.freightPaid, t.freightPaidDate, date) || (Number(t.received) > 0 && t.receivedDate && String(t.receivedDate) <= date))) flags.push('Weight or rate changed after payment (' + c.f + ')');
     });
     if (r.action === 'Updated' && perTruck[r.record] >= REVIEW_MANY_ && r.record.indexOf('DISP-') === 0) flags.push(perTruck[r.record] + ' changes to this truck today');
@@ -768,10 +807,16 @@ function authUsers_() {
 
 function auth_(token) {
   token = tok_(token);
-  var raw = token ? PropertiesService.getScriptProperties().getProperty('s_' + token) : null;
+  // The login is looked up in Apps Script's cache first (10 min): the screen checks for news every 15 s, and
+  // script properties have a daily read limit. Logging out removes it from both.
+  var cache = CacheService.getScriptCache(), raw = token ? cache.get('sess_' + token) : null;
+  if (!raw && token) {
+    raw = PropertiesService.getScriptProperties().getProperty('s_' + token);
+    if (raw) { try { cache.put('sess_' + token, raw, 600); } catch (e) {} }
+  }
   if (!raw) throw new Error('LOGIN');
   var s = JSON.parse(raw);
-  if (s.exp < Date.now()) { PropertiesService.getScriptProperties().deleteProperty('s_' + token); throw new Error('LOGIN'); }
+  if (s.exp < Date.now()) { PropertiesService.getScriptProperties().deleteProperty('s_' + token); cache.remove('sess_' + token); throw new Error('LOGIN'); }
   var u = authUsers_().filter(function (x) { return x.id === s.u && x.active; })[0];
   if (!u) throw new Error('LOGIN');
   ME = { id: u.id, name: u.name, role: u.role, can: ROLES[u.role] || ROLES.Viewer };
@@ -795,7 +840,12 @@ function lockRun_(fn) {
 var REQ_ = { ss: null, tz: null, v: null, sheets: {}, tabs: {}, dates: {}, changed: {}, delta: false, inLock: false, logBuf: [] };
 
 function ss_() { return REQ_.ss || (REQ_.ss = SpreadsheetApp.getActiveSpreadsheet()); }
-function tz_() { return REQ_.tz || (REQ_.tz = ss_().getSpreadsheetTimeZone()); }
+function tz_() {
+  if (REQ_.tz) return REQ_.tz;
+  var c = CacheService.getScriptCache(), z = c.get('tz');
+  if (!z) { z = ss_().getSpreadsheetTimeZone(); try { c.put('tz', z, 21600); } catch (e) {} }
+  return (REQ_.tz = z);
+}
 function today_() { return Utilities.formatDate(new Date(), tz_(), 'yyyy-MM-dd'); }
 function user_() {
   if (ME && ME.id) return ME.id;
@@ -887,11 +937,18 @@ function cacheRow_(name, row, rowNo) {
 /* ---------------- data version: lets an open screen ask "anything new?" without reading the tabs ---------------- */
 var SCREEN_TABS_ = [T.PO, T.SO, T.TR, T.NOTE, T.BANK, T.US];
 function dataChanged_() { return SCREEN_TABS_.some(function (n) { return !!REQ_.changed[n]; }); }
-function dataVersion_() { return REQ_.v || (REQ_.v = PropertiesService.getScriptProperties().getProperty('data_v') || '0'); }
+/* Kept in a script property (lasting) and mirrored in Apps Script's cache (fast, no daily read limit). */
+function dataVersion_() {
+  if (REQ_.v) return REQ_.v;
+  var c = CacheService.getScriptCache(), v = c.get('data_v');
+  if (!v) { v = PropertiesService.getScriptProperties().getProperty('data_v') || '0'; try { c.put('data_v', v, 21600); } catch (e) {} }
+  return (REQ_.v = v);
+}
 function bumpVersion_() {
-  var p = PropertiesService.getScriptProperties();
+  var p = PropertiesService.getScriptProperties(), c = CacheService.getScriptCache();
   REQ_.v = String(Math.max((Number(p.getProperty('data_v')) || 0) + 1, Date.now()));
   p.setProperty('data_v', REQ_.v);
+  try { c.put('data_v', REQ_.v, 21600); } catch (e) { try { c.remove('data_v'); } catch (x) {} }
 }
 function cleanRid_(rid) { rid = String(rid || ''); return /^[A-Za-z0-9_-]{8,64}$/.test(rid) ? rid : ''; }
 function seenRid_(rid) { return CacheService.getScriptCache().get('rid_' + rid) !== null; }
@@ -1056,6 +1113,8 @@ function nextId_(name, existing, obj) {
 }
 
 function normName_(s) { return String(s || '').toUpperCase().replace(/\s+/g, ' ').trim(); }
+/* yyyy-mm-dd -> dd-mm-yyyy for messages (dates are read as day-month-year). Anything else is returned as it is. */
+function dmy_(s) { var m = String(s == null ? '' : s).match(/^(\d{4})-(\d{2})-(\d{2})$/); return m ? m[3] + '-' + m[2] + '-' + m[1] : String(s == null ? '' : s); }
 
 function pad_(n, w) { var s = String(n); while (s.length < w) s = '0' + s; return s; }
 function normTruck_(s) { return String(s || '').toUpperCase().replace(/[^A-Z0-9]/g, ''); }
@@ -1096,12 +1155,15 @@ function writeLog_(lines) {
 
 /* ---------------- setup and import ---------------- */
 
-var SCHEMA_V = '6.4';
+var SCHEMA_V = '6.5'; // 6.5: setting qtyTolerancePct
 function ensureSetup_() {
+  var cache = CacheService.getScriptCache();
+  if (cache.get('schema_ok') === SCHEMA_V) return null; // checked in the last 6 hours (setup clears this)
   if (sheet_(T.TR)) {
     // Checking and upgrading the tabs is slow, so it runs only once after each new version of the code.
     var props = PropertiesService.getScriptProperties();
     if (props.getProperty('schema_v') !== SCHEMA_V) { upgradeHeaders_(); props.setProperty('schema_v', SCHEMA_V); }
+    try { cache.put('schema_ok', SCHEMA_V, 21600); } catch (e) {}
     return null;
   }
   var lock = LockService.getScriptLock();
@@ -1372,10 +1434,19 @@ function truckColumns_(can) {
   return c;
 }
 
+/* One Excel tab. S.No. comes first; yyyy-mm-dd values become real dates, shown as DD-MM-YYYY (format set in buildXlsx_). */
 function tab_(name, cols, list) {
-  return { name: name, rows: [cols.map(function (c) { return c[0]; })].concat(list.map(function (r) {
-    return cols.map(function (c) { var v = r[c[1]]; return v === undefined || v === null ? '' : (typeof v === 'boolean' ? (v ? 'Yes' : 'No') : v); });
-  })) };
+  var dateCols = {};
+  var body = list.map(function (r, i) {
+    return [i + 1].concat(cols.map(function (c, j) {
+      var v = r[c[1]];
+      if (v === undefined || v === null) return '';
+      if (typeof v === 'boolean') return v ? 'Yes' : 'No';
+      if (typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v)) { dateCols[j + 1] = 1; return parseDate_(v); }
+      return v;
+    }));
+  });
+  return { name: name, rows: [['S.No.'].concat(cols.map(function (c) { return c[0]; }))].concat(body), dateCols: Object.keys(dateCols).map(Number) };
 }
 
 function exportTabs_(kind, key, ids, can, firm) {
@@ -1392,7 +1463,7 @@ function exportTabs_(kind, key, ids, can, firm) {
       var o = map[id], tr = live.filter(function (t) { return t[k] === id; }), done = 0;
       tr.forEach(function (t) { done += t.L; });
       var r = { id: id, takenIn: o.takenIn || '', firm: firmOf_(o, A.S), type: k === 'po' ? (o.poType === 'plant' ? 'Own plant' : 'Trading') : (isFirm_(o.buyer, A.S) ? 'To group company' : 'Trading'), link: o.linkSO || '', party: o.plant || o.buyer, date: o.date, qty: o.qty, done: Math.round(done * 100) / 100,
-        bal: Math.round((Number(o.qty || 0) - done) * 100) / 100, trucks: tr.length, status: o.status, rate: o.rate,
+        bal: Math.round((Number(o.qty || 0) - done) * 100) / 100, trucks: tr.length, status: o.status === 'Settled' ? 'Short-closed' : o.status, rate: o.rate,
         terms: o.gstMode ? (o.gstMode === 'incl' ? 'GST incl' : 'GST extra') + ', ' + (o.freightMode === 'buyer' ? 'buyer pays freight' : 'freight incl') : '' };
       return r;
     });
@@ -1416,6 +1487,9 @@ function exportTabs_(kind, key, ids, can, firm) {
       var pays = (sheet_(T.PAY) ? rows_(T.PAY) : []).filter(function (p) { return !firm || A.so[p.so]; });
       tabs.push(tab_('Customer Payments', [['Payment ID', 'id'], ['Date', 'date'], ['Dispatch No.', 'truck'], ['SO', 'so'], ['Customer', 'buyer'], ['Amount', 'amount'], ['Deduction', 'deduction'], ['Note', 'note'], ['Entered By', 'by']], pays));
     }
+  } else if (kind === 'orders') { // a list of orders shown on screen (e.g. Closed & cancelled page): ids = the order ids
+    tabs.push(tab_('Purchase Orders', oc, pick(orderRows(A.po, 'po'))));
+    tabs.push(tab_('Sale Orders', oc, pick(orderRows(A.so, 'so'))));
   } else {
     var match = {
       trucks: function () { return true; },
@@ -1445,6 +1519,7 @@ function buildXlsx_(name, tabs) {
     var w = tb.rows[0].length;
     var rows = tb.rows.map(function (r) { var a = r.slice(0, w); while (a.length < w) a.push(''); return a; });
     sh.getRange(1, 1, rows.length, w).setValues(rows);
+    if (rows.length > 1) (tb.dateCols || []).forEach(function (c) { sh.getRange(2, c + 1, rows.length - 1, 1).setNumberFormat('dd-mm-yyyy'); });
     sh.getRange(1, 1, 1, w).setFontWeight('bold').setBackground('#0f6b5c').setFontColor('#ffffff');
     sh.setFrozenRows(1);
   });
@@ -1471,8 +1546,10 @@ function api_export(token, kind, key, ids, firm) {
 
 function ensureTriggers_() {
   try {
+    var cache = CacheService.getScriptCache();
+    if (cache.get('trig_ok') === 'on') return; // checked in the last 6 hours (setup clears this)
     var props = PropertiesService.getScriptProperties();
-    if (props.getProperty('triggers_v4') === 'on') return;
+    if (props.getProperty('triggers_v4') === 'on') { try { cache.put('trig_ok', 'on', 21600); } catch (x) {} return; }
     var have = {};
     ScriptApp.getProjectTriggers().forEach(function (t) { have[t.getHandlerFunction()] = 1; });
     if (!have.dailyReport) ScriptApp.newTrigger('dailyReport').timeBased().atHour(21).everyDays(1).inTimezone(tz_()).create();

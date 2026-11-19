@@ -295,6 +295,12 @@ table.t tfoot td{font-weight:700;background:var(--soft)}
 #fails .fm b{display:block}
 #fails .fm span{display:block;color:var(--mu);font-size:13px}
 @media (max-width:860px){#fails{bottom:calc(var(--navh) + 10px + env(safe-area-inset-bottom,0px))} #fails .btn{min-height:44px}}
+/* serial numbers (S.No.) */
+.sn{color:var(--mu);font-weight:600;font-variant-numeric:tabular-nums}
+.tc .sn{min-width:22px}
+@media (max-width:860px){.td.sn{grid-column:1/-1;font-size:12px}.td.sn[data-l]::before{display:inline;margin-right:5px}}
+/* orders: complete within the quantity window, short-close button */
+.pill.sc{color:var(--ok);border-color:#b9e2cb;background:var(--oks)}
 </style>
 </head>
 <body>
@@ -337,7 +343,31 @@ function r2(x) { return Math.round(x * 100) / 100; }
 function inr(x) { var neg = x < 0; return (neg ? '-' : '') + '₹' + Math.round(Math.abs(x)).toLocaleString('en-IN'); }
 function qt(x) { return n(x).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
 function dmy(s) { if (!s) return ''; var p = String(s).split('-'); return p.length === 3 ? p[2] + '-' + p[1] + '-' + p[0] : s; }
-function dm(s) { var x = dmy(s); return x ? x.slice(0, 5) : ''; }
+function dm(s) { return dmy(s); } // dates are always shown in full: DD-MM-YYYY
+/* A typed date (DD-MM-YYYY; also D-M-YY, DD/MM/YYYY, DDMMYYYY or yyyy-mm-dd) -> yyyy-mm-dd for the server.
+   '' when blank, '!' + what was typed when it is not a real date. */
+function ymd(s) {
+  s = String(s == null ? '' : s).trim();
+  if (!s) return '';
+  var m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/), d, mo, y;
+  if (m) { y = +m[1]; mo = +m[2]; d = +m[3]; }
+  else if ((m = s.match(/^(\d{1,2})[-\/. ](\d{1,2})[-\/. ](\d{4}|\d{2})$/)) || (m = s.match(/^(\d{2})(\d{2})(\d{4})$/))) { d = +m[1]; mo = +m[2]; y = +m[3]; }
+  else return '!' + s;
+  if (y < 100) y += 2000;
+  var x = new Date(y, mo - 1, d);
+  if (y < 2000 || y > 2099 || x.getMonth() !== mo - 1 || x.getDate() !== d) return '!' + s;
+  return y + '-' + (mo < 10 ? '0' : '') + mo + '-' + (d < 10 ? '0' : '') + d;
+}
+/* While typing a date, the dashes come by themselves (phone number keypads have no dash): 05 -> 05-, 05-11 -> 05-11-. */
+function fmtDateTyping(el, e) {
+  if (e && e.inputType && e.inputType.indexOf('delete') === 0) return;
+  var v = el.value.replace(/--+/g, '-');
+  if (/^\d{8}$/.test(v)) v = v.slice(0, 2) + '-' + v.slice(2, 4) + '-' + v.slice(4);
+  else if (/^\d{2}$/.test(v) || /^\d{1,2}-\d{2}$/.test(v)) v += '-';
+  if (v !== el.value) el.value = v;
+}
+/* Order quantity window (APP_SETTINGS qtyTolerancePct, 1% if not set). Same rule as the server (checkQty_). */
+function tol() { var x = D && D.settings ? D.settings.qtyTolerancePct : ''; return x === '' || x == null || isNaN(Number(x)) ? 0.01 : Number(x); }
 function days(a, b) { if (!a || !b) return 0; return Math.round((new Date(b + 'T12:00:00') - new Date(a + 'T12:00:00')) / 864e5); }
 function normTruck(s) { return String(s || '').toUpperCase().replace(/[^A-Z0-9]/g, ''); }
 function normName(s) { return String(s || '').toUpperCase().replace(/\s+/g, ' ').trim(); }
@@ -497,9 +527,11 @@ function applyResult(d) {
   if (d.users) D.users = d.users;
   if (d.today) D.today = d.today;
   if (d.syncedAt) D.syncedAt = d.syncedAt;
-  if (D.v && D.v === d.pv) D.v = d.v; // only if nobody else saved in between; otherwise the next check fetches everything
+  if (D.v && D.v === d.pv) D.v = d.v; // nobody else saved in between: this screen is up to date
+  else NEEDSYNC = true;               // someone else saved meanwhile: fetch their changes now, not at the next check
   cachePut(D);
   rebuild();
+  if (NEEDSYNC && !Q.length && !QRUN) setTimeout(sync, 0);
 }
 function showSync() {
   var el = $('#sync');
@@ -513,7 +545,7 @@ function showSync() {
    background, one after another in the order they were made. If the internet drops, they wait and try again.
    If the server refuses one (a rule), it drops out (the screen goes back to the server's data) and is listed
    at the bottom with "Open again", which opens the same form with what was typed. */
-var Q = [], QRUN = false, FAILS = [], PEND = {}, SYNCING = false, LASTFULL = 0, LASTACT = null;
+var Q = [], QRUN = false, FAILS = [], PEND = {}, SYNCING = false, LASTFULL = 0, LASTACT = null, NEEDSYNC = false, LASTORDERS = [];
 var RETRY_RE = /NetworkError|Connection failure|HTTP 0|server error occurred|timed out|Lock timeout|Too many simultaneous|invoked too many times|Exceeded maximum execution time/i;
 function newRid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 10); }
 function saveQ() {
@@ -609,7 +641,13 @@ function callSafe() {
 /* Every minute and when the app comes back to the front: "anything new?". Tiny when nothing changed;
    all data when something did, and at least every 10 minutes. */
 function sync() {
-  if (!D || SYNCING || QRUN || Q.length || BUSY || !$('#modal').hidden || (document.activeElement && document.activeElement.id === 'q')) return;
+  if (!D) return;
+  if (SYNCING || QRUN || Q.length || BUSY || !$('#modal').hidden || (document.activeElement && document.activeElement.id === 'q')) {
+    // busy now: if we know someone else saved, try again in a second instead of waiting for the next 15-second check
+    if (NEEDSYNC) { clearTimeout(sync.t); sync.t = setTimeout(sync, 1000); }
+    return;
+  }
+  NEEDSYNC = false;
   SYNCING = true;
   call('api_sync', D.v || '', Date.now() - LASTFULL > 10 * 60e3).then(function (r) {
     SYNCING = false;
@@ -640,7 +678,8 @@ function reopenFail(i) {
   Object.keys(v).forEach(function (k) {
     var el = document.getElementById('f_' + k);
     if (!el || el.readOnly) return;
-    if (el.type === 'checkbox') el.checked = !!v[k]; else el.value = v[k];
+    if (el.type === 'checkbox') el.checked = !!v[k];
+    else el.value = el.dataset && el.dataset.date ? dmy(String(v[k] == null ? '' : v[k]).replace(/^!/, '')) : v[k];
     if (document.getElementById('hint_' + k)) weightHint(k);
   });
 }
@@ -749,9 +788,17 @@ function flagIssues() {
 function orderStats(kind, o) {
   var key = kind === 'po' ? 'po' : 'so';
   var tr = liveAll().filter(function (t) { return t[key] === o.id; });
-  var done = sum(tr, function (t) { return t.L; });
-  return { tr: tr, done: r2(done), unl: r2(sum(tr, function (t) { return t.U; })), short: r2(sum(tr, function (t) { return t.short; })), bal: r2(n(o.qty) - done), pct: n(o.qty) ? Math.min(100, done / n(o.qty) * 100) : 0 };
+  var done = sum(tr, function (t) { return t.L; }), q = n(o.qty), tl = tol();
+  return { tr: tr, done: r2(done), unl: r2(sum(tr, function (t) { return t.U; })), short: r2(sum(tr, function (t) { return t.short; })), bal: r2(q - done), pct: q ? Math.min(100, done / q * 100) : 0,
+    lim: r2(q * (1 + tl)), complete: q > 0 && done >= q * (1 - tl) - 0.005, over: q > 0 && done > q * (1 + tl) + 0.005 };
 }
+/* An open order at 99%+ of its quantity: "Complete" (or "Over the limit") and a Short-close button for those who manage orders. */
+function completeTag(kind, o, s) {
+  if (o.status === 'Cancelled' || o.status === 'Settled' || !(s.complete || s.over)) return '';
+  return (s.over ? ' <span class="tag">Over the limit by ' + qt(s.done - s.lim) + ' qtl</span>' : ' <span class="tag ok">Complete</span>') +
+    (P.orders ? ' <button type="button" class="pill sc" data-act="settle" data-kind="' + kind + '" data-id="' + esc(o.id) + '">Short-close</button>' : '');
+}
+function isOpen(o) { return o.status !== 'Cancelled' && o.status !== 'Settled'; }
 
 /* What this person should do next on this truck */
 function nextStep(t) {
@@ -767,10 +814,11 @@ function nextStep(t) {
 /* ---------- routing ---------- */
 var DETAIL = ['po', 'so', 'buyer', 'plant', 'transporter', 'truck', 'users', 'notes'];
 function mainTabs() {
-  var notCx = function (o) { return o.status !== 'Cancelled'; };
-  var tabs = [['home', 'Overview'], ['pos', 'Purchase Orders', D.po.filter(inFirm).filter(notCx).length], ['sos', 'Sale Orders', D.so.filter(inFirm).filter(notCx).length], ['dispatch', 'Dispatch Register', live().length]];
+  var working = live().filter(function (t) { return t.st !== 6; }).length; // closed trucks are on the Closed & cancelled page
+  var tabs = [['home', 'Overview'], ['pos', 'Purchase Orders', D.po.filter(inFirm).filter(isOpen).length], ['sos', 'Sale Orders', D.so.filter(inFirm).filter(isOpen).length], ['dispatch', 'Dispatch Register', working]];
   if (plantFirm()) tabs.push(['receive', 'Plant Inward (' + shortFirm(plantFirm()) + ')', live().filter(function (t) { return toPlant(t) && t.L && !t.U; }).length]);
   if (P.money) tabs.push(['settle', 'Sales & Receivables', live().filter(function (t) { return t.so && !t.plantPO; }).length], ['freight', 'Freight & Transport', live().filter(function (t) { return t.L && !t.fBuyer; }).length]);
+  tabs.push(['closed', 'Closed & cancelled']);
   if (P.review) tabs.push(['activity', 'Activity']);
   tabs.push(['more', 'More']);
   return tabs;
@@ -790,7 +838,7 @@ function render() {
   $('#nav').innerHTML = mainTabs().map(function (v) { return '<button type="button" class="' + (tab === v[0] ? 'on' : '') + '" data-tab="' + v[0] + '">' + v[1] + (v[2] != null ? ' <span class="cnt">' + v[2] + '</span>' : '') + '</button>'; }).join('');
   var on = $('#nav .on'); if (on) { var nv = $('#nav'); if (on.offsetLeft < nv.scrollLeft || on.offsetLeft + on.offsetWidth > nv.scrollLeft + nv.clientWidth) nv.scrollLeft = on.offsetLeft - 16; }
   $('#fab').hidden = !(P.trucks && ROUTE.v === 'dispatch');
-  var f = { home: vHome, pos: function () { return orderTable('po'); }, sos: function () { return orderTable('so'); }, dispatch: vDispatch, receive: vReceive, settle: vSettle, freight: vFreight,
+  var f = { home: vHome, pos: function () { return orderTable('po'); }, sos: function () { return orderTable('so'); }, dispatch: vDispatch, receive: vReceive, settle: vSettle, freight: vFreight, closed: vClosed,
     more: vMore, activity: vActivity, users: P.users ? vUsers : vMore, notes: vNotes, po: function () { return vOrder('po', ROUTE.id); }, so: function () { return vOrder('so', ROUTE.id); },
     buyer: function () { return vParty('buyer', ROUTE.id); }, plant: function () { return vParty('plant', ROUTE.id); }, transporter: function () { return vParty('transporter', ROUTE.id); }, truck: function () { return vTruck(ROUTE.id); } }[ROUTE.v] || vHome;
   var bar = multiFirm() && DETAIL.indexOf(ROUTE.v) < 0 && ROUTE.v !== 'more' && ROUTE.v !== 'activity' ? firmBar() : '';
@@ -844,27 +892,32 @@ function vHome() {
     h += '<div class="kpis">' + kpi('Trucks in progress', L.filter(function (t) { return t.st < 3; }).length, 'not unloaded yet', '', 'data-filter="todo"') +
       kpi('On the road', qt(sum(L.filter(function (t) { return t.L && !t.U; }), function (t) { return t.L; })) + ' qtl', '', '', 'data-filter="onroad"') + '</div>';
   }
-  h += '<h2>Where the trucks are</h2><div class="stages">' + STAGES.map(function (s, i) { return '<button type="button" data-filter="st' + i + '"><b>' + L.filter(function (t) { return t.st === i; }).length + '</b><span>' + (i === 3 ? 'Unloaded / received' : s) + '</span></button>'; }).join('') + '</div>';
+  h += '<h2>Where the trucks are</h2><div class="stages">' + STAGES.map(function (s, i) { return '<button type="button" ' + (i === 6 ? 'data-tab="closed"' : 'data-filter="st' + i + '"') + '><b>' + L.filter(function (t) { return t.st === i; }).length + '</b><span>' + (i === 3 ? 'Unloaded / received' : s) + '</span></button>'; }).join('') + '</div>';
   var todo = TODO.filter(function (x) { return P[x[3]]; }).map(function (x) { return { k: x[0], l: x[1], c: L.filter(x[2]).length }; }).filter(function (x) { return x.c; });
   if (P.money) { var nt = D.so.filter(inFirm).filter(function (o) { return o.status !== 'Cancelled' && (!o.gstMode || !o.freightMode); }).length; if (nt) todo.push({ k: 'rate', l: 'Set rate type on SO', c: nt }); }
-  h += '<h2>To do</h2>' + (todo.length ? '<div class="todo">' + todo.map(function (x) { return '<button type="button" ' + (x.k === 'rate' ? 'data-tab="sos"' : 'data-filter="' + x.k + '"') + '><b>' + x.c + '</b><span>' + x.l + '</span></button>'; }).join('') + '</div>' : '<div class="panel empty">Nothing pending.</div>');
+  if (P.orders) { // orders at 99%+ of their quantity wait for someone to tap Short-close
+    var cpo = D.po.filter(inFirm).filter(isOpen).filter(function (o) { var s = orderStats('po', o); return s.complete || s.over; }).length;
+    var cso = D.so.filter(inFirm).filter(isOpen).filter(function (o) { var s = orderStats('so', o); return s.complete || s.over; }).length;
+    if (cpo + cso) todo.push({ k: 'complete', l: 'Complete orders: short-close', c: cpo + cso, tab: cpo ? 'pos' : 'sos' });
+  }
+  h += '<h2>To do</h2>' + (todo.length ? '<div class="todo">' + todo.map(function (x) { return '<button type="button" ' + (x.tab ? 'data-tab="' + x.tab + '"' : x.k === 'rate' ? 'data-tab="sos"' : 'data-filter="' + x.k + '"') + '><b>' + x.c + '</b><span>' + x.l + '</span></button>'; }).join('') + '</div>' : '<div class="panel empty">Nothing pending.</div>');
   var probs = [];
   L.forEach(function (t) { var m = t.issues.filter(function (i) { return i.bad; }).map(function (i) { return i.msg; }); if (m.length) probs.push({ t: t, msg: m.join(' · ') }); });
   [['po', D.po], ['so', D.so]].forEach(function (k) {
-    k[1].filter(function (o) { return o.status !== 'Cancelled' && o.status !== 'Settled' && inFirm(o); }).forEach(function (o) { var s = orderStats(k[0], o); if (s.bal < 0) probs.unshift({ o: o, kind: k[0], msg: 'Over the ordered quantity by ' + qt(-s.bal) + ' qtl' }); });
+    k[1].filter(function (o) { return o.status !== 'Cancelled' && o.status !== 'Settled' && inFirm(o); }).forEach(function (o) { var s = orderStats(k[0], o); if (s.over) probs.unshift({ o: o, kind: k[0], msg: 'Over the limit (' + qt(s.lim) + ' qtl = quantity + ' + r2(tol() * 100) + '%) by ' + qt(s.done - s.lim) + ' qtl' }); });
   });
-  h += '<div class="two"><div><h2>Problems (' + probs.length + ')</h2><div class="panel">' + (probs.length ? probs.slice(0, 30).map(function (p) {
-    if (p.o) return '<button type="button" class="prob" data-go="' + p.kind + '" data-id="' + esc(p.o.id) + '"><span class="dot"></span><span><b>' + esc(p.o.id) + ' · ' + esc(p.o.plant || p.o.buyer) + '</b><small>' + esc(p.msg) + '</small></span></button>';
-    return '<button type="button" class="prob" data-go="truck" data-id="' + esc(p.t.id) + '"><span class="dot"></span><span><b>' + esc(p.t.truck) + ' · ' + esc(p.t.id) + '</b> ' + firmTag(p.t.firm) + p.msg.split(' · ').map(function (m) { return '<small>' + esc(m) + '</small>'; }).join('') + '</span></button>';
+  h += '<div class="two"><div><h2>Problems (' + probs.length + ')</h2><div class="panel">' + (probs.length ? probs.slice(0, 30).map(function (p, i) {
+    if (p.o) return '<button type="button" class="prob" data-go="' + p.kind + '" data-id="' + esc(p.o.id) + '"><span class="dot"></span><span><span class="sn">' + (i + 1) + '.</span> <b>' + esc(p.o.id) + ' · ' + esc(p.o.plant || p.o.buyer) + '</b><small>' + esc(p.msg) + '</small></span></button>';
+    return '<button type="button" class="prob" data-go="truck" data-id="' + esc(p.t.id) + '"><span class="dot"></span><span><span class="sn">' + (i + 1) + '.</span> <b>' + esc(p.t.truck) + ' · ' + esc(p.t.id) + '</b> ' + firmTag(p.t.firm) + p.msg.split(' · ').map(function (m) { return '<small>' + esc(m) + '</small>'; }).join('') + '</span></button>';
   }).join('') : '<div class="empty">No problems. All clear.</div>') + '</div></div>';
   h += '<div><h2>Orders</h2><div class="panel">' + orderRows('po', true) + orderRows('so', true) + '</div></div></div>';
   return h;
 }
 /* ---------- Trucks ---------- */
-var FILTERS = [['todo', 'My to do'], ['all', 'All']].concat(TODO.map(function (x) { return [x[0], x[1]]; })).concat([['problems', 'Problems'], ['closed', 'Closed'], ['returned', 'Returned'], ['cx', 'Cancelled']]);
+var FILTERS = [['todo', 'My to do'], ['all', 'All']].concat(TODO.map(function (x) { return [x[0], x[1]]; })).concat([['problems', 'Problems']]); // closed, returned and cancelled trucks are on the "Closed & cancelled" page
 function filterFn(k) {
   if (/^st\d$/.test(k)) return function (t) { return !t.cx && t.st === +k.slice(2); };
-  if (k === 'all') return function (t) { return !t.cx; };
+  if (k === 'all') return function (t) { return !t.cx && t.st !== 6; };
   if (k === 'todo') return function (t) { return !t.cx && !!nextStep(t); };
   if (k === 'problems') return function (t) { return !t.cx && t.issues.some(function (i) { return i.bad; }); };
   if (k === 'closed') return function (t) { return t.st === 6; };
@@ -891,12 +944,12 @@ function vDispatch() {
   if (isPhone()) return h + truckList(list);
   if (!list.length) return h + '<div class="panel empty">No trucks here.</div>';
   var M = P.money;
-  var cols = M ? '112px 1fr 1.15fr 1.35fr .8fr .9fr 98px 128px 150px 40px' : '112px 1fr 1.2fr 1.5fr .9fr 1.1fr 150px 40px';
-  h += '<div class="tbl" style="--cols:' + cols + '"><div class="tr th"><div>Dispatch</div><div>PO / plant</div><div>Truck</div><div>Going to</div><div class="r">Loaded</div>' + (M ? '<div class="r">Supplier amount</div><div>Supplier</div><div>Freight adv.</div>' : '<div>Transporter</div>') + '<div>Next step</div><div></div></div>';
-  h += list.slice(0, LIMIT).map(function (t) {
+  var cols = M ? '44px 112px 1fr 1.15fr 1.35fr .8fr .9fr 98px 128px 150px 40px' : '44px 112px 1fr 1.2fr 1.5fr .9fr 1.1fr 150px 40px';
+  h += '<div class="tbl" style="--cols:' + cols + '"><div class="tr th"><div>S.No.</div><div>Dispatch</div><div>PO / plant</div><div>Truck</div><div>Going to</div><div class="r">Loaded</div>' + (M ? '<div class="r">Supplier amount</div><div>Supplier</div><div>Freight adv.</div>' : '<div>Transporter</div>') + '<div>Next step</div><div></div></div>';
+  h += list.slice(0, LIMIT).map(function (t, i) {
     var lv = !t.cx, ns = nextStep(t);
     var go2 = t.plantPO ? '<span class="tag own">Own plant</span> ' + esc(shortFirm(plantFirm())) : t.so ? lnk('buyer', t.buyer) + '<small>' + lnk('so', t.so) + (t.ownBuyer ? ' · group company' : '') + '</small>' : (lv && P.trucks ? '<button class="pill add" type="button" data-act="assign" data-id="' + esc(t.id) + '">+ Choose customer</button>' : '—');
-    var row = '<div class="td">' + lnk('truck', t.id) + ntsm('truck', t.id) + '<small>' + dmy(t.date) + '</small></div>' +
+    var row = '<div class="td sn" data-l="S.No.">' + (i + 1) + '</div><div class="td">' + lnk('truck', t.id) + ntsm('truck', t.id) + '<small>' + dmy(t.date) + '</small></div>' +
       '<div class="td" data-l="PO">' + lnk('po', t.po) + ' ' + firmTag(t.firm) + '<small>' + lnk('plant', t.plant) + '</small></div>' +
       '<div class="td wide" data-l="Truck"><b>' + esc(t.truck) + '</b> ' + pendTag(t) + (t.noSlip ? '<span class="tag no">No slip</span> ' : '') + (t.billOk ? '<span class="tag ok" title="Slip weight matches supplier invoice">Checked</span> ' : '') + (t.issues.some(function (i) { return i.bad; }) ? '<span class="tag" title="' + esc(t.issues.map(function (i) { return i.msg; }).join(' · ')) + '">Check</span>' : '') +
         '<div style="margin-top:3px"><span class="stage ' + (t.st < 0 ? 'sx' : 's' + t.st) + '">' + t.stage + '</span>' + (t.L && !t.U && t.detDays > 0 && !t.fBuyer ? ' <span class="tag wn">' + t.trip + ' days</span>' : '') + '</div></div>' +
@@ -927,10 +980,10 @@ function vReceive() {
     kpi('Received this month', qt(sum(mon, function (t) { return t.U; })) + ' qtl', trk(mon.length)) +
     kpi('Shortage this month', qt(sum(mon, function (t) { return t.short; })) + ' qtl', '', sum(mon, function (t) { return t.short; }) > 0 ? 'warn' : '') + '</div>';
   h += '<div class="bar">' + searchBox() + (P.exportX ? '<button type="button" class="btn sm" data-act="exportList">Download this list</button>' : '') + '</div>';
-  var cols = '1.3fr 1.2fr .8fr 1fr 1.2fr 160px';
-  var head = '<div class="tr th"><div>Truck</div><div>From</div><div class="r">Loaded</div><div>Dispatched</div><div>Transporter / driver</div><div></div></div>';
-  var row = function (t) {
-    return '<div class="tr"><div class="td wide"><b>' + esc(t.truck) + '</b> ' + firmTag(t.firm) + '<small>' + lnk('truck', t.id) + '</small></div>' +
+  var cols = '44px 1.3fr 1.2fr .8fr 1fr 1.2fr 160px';
+  var head = '<div class="tr th"><div>S.No.</div><div>Truck</div><div>From</div><div class="r">Loaded</div><div>Dispatched</div><div>Transporter / driver</div><div></div></div>';
+  var row = function (t, i) {
+    return '<div class="tr"><div class="td sn" data-l="S.No.">' + (i + 1) + '</div><div class="td wide"><b>' + esc(t.truck) + '</b> ' + firmTag(t.firm) + '<small>' + lnk('truck', t.id) + '</small></div>' +
       '<div class="td" data-l="From">' + lnk('plant', t.plant) + '<small>' + lnk('po', t.po) + '</small></div>' +
       '<div class="td r num" data-l="Loaded">' + (t.L ? '<b>' + qt(t.L) + '</b> qtl' : '—') + '</div>' +
       '<div class="td" data-l="Dispatched">' + dmy(t.date) + '<small class="' + (t.detDays > 0 ? 'over' : '') + '">' + (t.trip === 1 ? '1 day' : t.trip + ' days') + ' on road</small></div>' +
@@ -939,9 +992,9 @@ function vReceive() {
   };
   h += '<h2>On the way (' + arriving.length + ')</h2>' + (arriving.length ? '<div class="tbl" style="--cols:' + cols + '">' + head + arriving.map(row).join('') + '</div>' : '<div class="panel empty">No trucks on the way.</div>');
   if (notLoaded.length) h += '<h2>Booked, weight not entered yet (' + notLoaded.length + ')</h2><div class="tbl" style="--cols:' + cols + '">' + head + notLoaded.map(row).join('') + '</div>';
-  h += '<h2>Received in the last 7 days (' + recent.length + ')</h2>' + (recent.length ? '<div class="tbl" style="--cols:1.3fr .9fr 1.1fr .8fr .8fr .7fr .6fr"><div class="tr th"><div>Truck</div><div>Received</div><div>From</div><div class="r">Loaded</div><div class="r">Received</div><div class="r">Short</div><div class="r">Days</div></div>' +
-    recent.map(function (t) {
-      return '<div class="tr"><div class="td wide"><b>' + esc(t.truck) + '</b> ' + firmTag(t.firm) + '<small>' + lnk('truck', t.id) + '</small></div><div class="td" data-l="Received">' + dmy(t.unloadDate) + '</div>' +
+  h += '<h2>Received in the last 7 days (' + recent.length + ')</h2>' + (recent.length ? '<div class="tbl" style="--cols:44px 1.3fr .9fr 1.1fr .8fr .8fr .7fr .6fr"><div class="tr th"><div>S.No.</div><div>Truck</div><div>Received</div><div>From</div><div class="r">Loaded</div><div class="r">Received</div><div class="r">Short</div><div class="r">Days</div></div>' +
+    recent.map(function (t, i) {
+      return '<div class="tr"><div class="td sn" data-l="S.No.">' + (i + 1) + '</div><div class="td wide"><b>' + esc(t.truck) + '</b> ' + firmTag(t.firm) + '<small>' + lnk('truck', t.id) + '</small></div><div class="td" data-l="Received">' + dmy(t.unloadDate) + '</div>' +
         '<div class="td" data-l="From">' + lnk('plant', t.plant) + '</div><div class="td r num" data-l="Loaded">' + qt(t.L) + '</div><div class="td r num" data-l="Received"><b>' + qt(t.U) + '</b></div>' +
         '<div class="td r num ' + (t.short > t.allow ? 'over' : '') + '" data-l="Short">' + qt(t.short) + '</div><div class="td r num" data-l="Days">' + t.trip + '</div></div>';
     }).join('') + '</div>' : '<div class="panel empty">Nothing received in the last 7 days.</div>');
@@ -952,7 +1005,7 @@ function truckList(list, noLimit) {
   var shown = noLimit ? list : list.slice(0, LIMIT);
   return '<div class="tl">' + shown.map(truckCard).join('') + '</div>' + (shown.length < list.length ? '<button type="button" class="btn showmore" data-act="showmore">Show more (' + (list.length - shown.length) + ' left)</button>' : '');
 }
-function truckCard(t) {
+function truckCard(t, i) {
   var ns = nextStep(t);
   var bad = t.issues.some(function (i) { return i.bad; });
   var money = '';
@@ -961,7 +1014,7 @@ function truckCard(t) {
     else if (t.L) money = '<div class="money hide-phone"><div class="mu">Supplier</div><b>' + inr(t.purTot) + '</b> ' + (t.plantPaid ? '<span class="stage s5">Paid</span>' : '') + '</div>';
   }
   return '<div class="tc ' + (t.cx ? 'cx' : '') + '"><div class="info" data-go="truck" data-id="' + esc(t.id) + '">' +
-    '<div class="l1"><span class="truck">' + esc(t.truck) + '</span>' + pendTag(t) + (t.noSlip ? '<span class="tag no">No slip</span>' : '') + (t.billOk ? '<span class="tag ok">Checked</span>' : '') + '<span class="stage ' + (t.st < 0 ? 'sx' : 's' + t.st) + '">' + t.stage + '</span>' + (bad ? '<span class="tag">Check</span>' : '') + (t.L && !t.U && t.detDays > 0 && !t.fBuyer ? '<span class="tag wn">' + t.trip + ' days</span>' : '') + '</div>' +
+    '<div class="l1">' + (i != null ? '<span class="sn">' + (i + 1) + '.</span>' : '') + '<span class="truck">' + esc(t.truck) + '</span>' + pendTag(t) + (t.noSlip ? '<span class="tag no">No slip</span>' : '') + (t.billOk ? '<span class="tag ok">Checked</span>' : '') + '<span class="stage ' + (t.st < 0 ? 'sx' : 's' + t.st) + '">' + t.stage + '</span>' + (bad ? '<span class="tag">Check</span>' : '') + (t.L && !t.U && t.detDays > 0 && !t.fBuyer ? '<span class="tag wn">' + t.trip + ' days</span>' : '') + '</div>' +
     '<div class="l2">' + esc(t.plant || t.po) + ' → ' + (t.plantPO ? esc(shortFirm(plantFirm())) + ' plant' : t.so ? esc(t.buyer || t.so) : '<span class="mu">no customer yet</span>') + (t.L ? ' · <b>' + qt(t.U || t.L) + '</b> qtl' : '') + '</div>' +
     '<div class="l3"><span>' + esc(t.id) + '</span>' + firmTag(t.firm) + '<span>' + dmy(t.date) + '</span>' + (t.transporter ? '<span>' + esc(t.transporter) + '</span>' : '') + '</div></div>' + money +
     '<div class="acts">' + (ns ? '<button type="button" class="next ' + (ns.m ? 'money' : '') + '" data-act="' + ns.a + '" data-id="' + esc(t.id) + '">' + ns.l + '</button>' : (t.cx ? '' : '<span class="done">' + (t.st === 6 ? '✓ Closed' : '✓ Done') + '</span>')) +
@@ -1023,10 +1076,10 @@ function menuItems(t) {
 function orderRows(kind, compact) {
   var list = (kind === 'po' ? D.po : D.so).filter(inFirm).filter(function (o) { return compact ? o.status !== 'Cancelled' && o.status !== 'Settled' : true; });
   if (!list.length) return compact ? '' : '<div class="empty">No orders yet.</div>';
-  return list.map(function (o) {
+  return list.map(function (o, i) {
     var s = orderStats(kind, o), cx = o.status === 'Cancelled', party = kind === 'po' ? o.plant : o.buyer;
-    return '<div class="oc" style="' + (cx ? 'opacity:.55' : '') + '"><div class="m"><div class="r"><span>' + lnk(kind, o.id) + ' ' + firmTag(firmOf(o)) + ' · ' + lnk(kind === 'po' ? 'plant' : 'buyer', party) + (kind === 'po' && o.poType === 'plant' ? ' <span class="tag own">own plant</span>' : '') + '</span>' +
-      (cx ? '<span class="tag">Cancelled</span>' : '') + (o.status === 'Settled' ? '<span class="tag ok">Short-closed</span>' : '') + (P.money && kind === 'so' && !cx && (!o.gstMode || !o.freightMode) ? '<span class="tag wn">Set rate type</span>' : '') + '</div>' +
+    return '<div class="oc" style="' + (cx ? 'opacity:.55' : '') + '"><div class="m"><div class="r"><span><span class="sn">' + (i + 1) + '.</span> ' + lnk(kind, o.id) + ' ' + firmTag(firmOf(o)) + ' · ' + lnk(kind === 'po' ? 'plant' : 'buyer', party) + (kind === 'po' && o.poType === 'plant' ? ' <span class="tag own">own plant</span>' : '') + '</span>' +
+      (cx ? '<span class="tag">Cancelled</span>' : '') + (o.status === 'Settled' ? '<span class="tag ok">Short-closed</span>' : '') + completeTag(kind, o, s) + (P.money && kind === 'so' && !cx && (!o.gstMode || !o.freightMode) ? '<span class="tag wn">Set rate type</span>' : '') + '</div>' +
       '<div class="prog ' + (s.bal < 0 ? 'over' : '') + '"><i style="width:' + s.pct.toFixed(1) + '%"></i></div>' +
       '<div class="r mu num"><span>' + qt(s.done) + ' of ' + qt(o.qty) + ' qtl · ' + s.tr.length + ' trucks</span><span class="' + (s.bal < 0 ? 'over' : '') + '">Balance <b>' + qt(s.bal) + '</b></span></div>' +
       (!compact && P.money ? '<div class="mu" style="font-size:12.5px;margin-top:3px">' + inr(o.rate) + (kind === 'so' ? ' · ' + terms(o) + (o.creditDays !== '' && o.creditDays != null ? ' · ' + o.creditDays + ' days credit' : '') : ' + GST ' + Math.round(n(o.gst) * 100) + '%') + ' · ' + dmy(o.date) + '</div>' : '') +
@@ -1034,19 +1087,21 @@ function orderRows(kind, compact) {
   }).join('');
 }
 function orderTable(kind) {
-  var list = (kind === 'po' ? D.po : D.so).filter(inFirm), M = P.money, mf = multiFirm();
-  var h = '<div class="bar"><span class="mu">' + list.length + (kind === 'po' ? ' purchase orders' : ' sale orders') + '</span><span class="sp"></span>' + (P.orders ? '<button type="button" class="btn pri" data-act="' + (kind === 'po' ? 'newPO' : 'newSO') + '">+ New ' + (kind === 'po' ? 'purchase order' : 'sale order') + '</button>' : '') + '</div>';
+  // Only open orders here; short-closed and cancelled ones are on the "Closed & cancelled" page.
+  var list = (kind === 'po' ? D.po : D.so).filter(inFirm).filter(isOpen), M = P.money, mf = multiFirm();
+  var h = '<div class="bar"><span class="mu">' + list.length + (kind === 'po' ? ' open purchase orders' : ' open sale orders') + '</span><span class="sp"></span>' +
+    '<button type="button" class="btn sm ghost" data-act="closedOrders">Short-closed & cancelled →</button>' + (P.orders ? '<button type="button" class="btn pri" data-act="' + (kind === 'po' ? 'newPO' : 'newSO') + '">+ New ' + (kind === 'po' ? 'purchase order' : 'sale order') + '</button>' : '') + '</div>';
   if (!list.length) return h + '<div class="panel empty">No orders yet.</div>';
-  var cols = [['ID', '120px'], mf ? ['Firm', '.7fr'] : null, [kind === 'po' ? 'Supplier' : 'Customer', '1.6fr'], [kind === 'po' ? 'Goes to' : 'Terms', '1.2fr'], ['Date', '.8fr'], ['Quantity', '.9fr', 1], M ? ['Rate', '.8fr', 1] : null,
+  var cols = [['S.No.', '44px'], ['ID', '120px'], mf ? ['Firm', '.7fr'] : null, [kind === 'po' ? 'Supplier' : 'Customer', '1.6fr'], [kind === 'po' ? 'Goes to' : 'Terms', '1.2fr'], ['Date', '.8fr'], ['Quantity', '.9fr', 1], M ? ['Rate', '.8fr', 1] : null,
     [kind === 'po' ? 'Loaded' : 'Dispatched', '.9fr', 1], ['Balance', '.9fr', 1], ['Trucks', '.55fr', 1], ['', '40px']].filter(Boolean);
   h += '<div class="tbl" style="--cols:' + cols.map(function (c) { return c[1]; }).join(' ') + '"><div class="tr th">' + cols.map(function (c) { return '<div class="' + (c[2] ? 'r' : '') + '">' + c[0] + '</div>'; }).join('') + '</div>';
-  h += list.map(function (o) {
+  h += list.map(function (o, i) {
     var s = orderStats(kind, o), cx = o.status === 'Cancelled', party = kind === 'po' ? o.plant : o.buyer;
     var via = kind === 'po' && o.takenIn && normName(o.takenIn) !== firmOf(o) ? '<small>' + esc(o.plant) + ' → ' + esc(shortFirm(o.takenIn)) + ' → ' + esc(shortFirm(firmOf(o))) + '</small>' : '';
     var goes = kind === 'po' ? (o.poType === 'plant' ? '<span class="tag own">Own plant</span> ' + esc(shortFirm(plantFirm())) : o.linkSO && SO[o.linkSO] ? 'Sells to ' + lnk('buyer', SO[o.linkSO].buyer) + '<small>' + lnk('so', o.linkSO) + '</small>' : '<span class="mu">Customer per truck</span>') :
       (isFirm(o.buyer) ? '<span class="tag own">Group company</span> ' : '') + (M ? '<span class="sm">' + terms(o) + (o.creditDays !== '' && o.creditDays != null ? ' · ' + o.creditDays + ' days' : '') + '</span>' : '');
-    return '<div class="tr ' + (cx ? 'cx' : '') + '"><div class="td">' + lnk(kind, o.id) + ntsm(kind, o.id) + '</div>' + (mf ? '<div class="td" data-l="Firm">' + firmTag(firmOf(o)) + '</div>' : '') +
-      '<div class="td wide" data-l="' + (kind === 'po' ? 'Supplier' : 'Customer') + '">' + lnk(kind === 'po' ? 'plant' : 'buyer', party) + via + (cx ? ' <span class="tag">Cancelled</span>' : '') + (o.status === 'Settled' ? ' <span class="tag ok">Short-closed</span>' : '') + (M && kind === 'so' && !cx && (!o.gstMode || !o.freightMode) ? ' <span class="tag wn">Set rate type</span>' : '') + (s.bal < 0 && !cx && o.status !== 'Settled' ? ' <span class="tag">Over by ' + qt(-s.bal) + '</span>' : '') + '<div class="prog ' + (s.bal < 0 ? 'over' : '') + '"><i style="width:' + s.pct.toFixed(1) + '%"></i></div></div>' +
+    return '<div class="tr ' + (cx ? 'cx' : '') + '"><div class="td sn" data-l="S.No.">' + (i + 1) + '</div><div class="td">' + lnk(kind, o.id) + ntsm(kind, o.id) + '</div>' + (mf ? '<div class="td" data-l="Firm">' + firmTag(firmOf(o)) + '</div>' : '') +
+      '<div class="td wide" data-l="' + (kind === 'po' ? 'Supplier' : 'Customer') + '">' + lnk(kind === 'po' ? 'plant' : 'buyer', party) + via + (cx ? ' <span class="tag">Cancelled</span>' : '') + (o.status === 'Settled' ? ' <span class="tag ok">Short-closed</span>' : '') + (M && kind === 'so' && !cx && (!o.gstMode || !o.freightMode) ? ' <span class="tag wn">Set rate type</span>' : '') + completeTag(kind, o, s) + '<div class="prog ' + (s.bal < 0 ? 'over' : '') + '"><i style="width:' + s.pct.toFixed(1) + '%"></i></div></div>' +
       '<div class="td" data-l="' + (kind === 'po' ? 'Goes to' : 'Terms') + '">' + goes + '</div>' +
       '<div class="td" data-l="Date">' + dmy(o.date) + '</div><div class="td r num" data-l="Quantity">' + qt(o.qty) + '</div>' +
       (M ? '<div class="td r num" data-l="Rate">' + inr(o.rate) + (kind === 'po' ? '<small>+ GST ' + Math.round(n(o.gst) * 100) + '%</small>' : '') + '</div>' : '') +
@@ -1061,7 +1116,7 @@ function vOrder(kind, id) {
   var s = orderStats(kind, o), tr = s.tr.slice().sort(sortT), party = kind === 'po' ? o.plant : o.buyer;
   var extra = (P.exportX ? '<button type="button" class="btn sm" data-act="exportPage" data-kind="' + kind + '" data-id="' + esc(id) + '">Excel</button>' : '') + (P.orders ? '<button type="button" class="btn sm" data-act="' + (kind === 'po' ? 'editPO' : 'editSO') + '" data-id="' + esc(id) + '">Edit</button>' : '');
   var goes = (kind === 'po' && o.takenIn ? ' · booked in the name of ' + esc(o.takenIn) : '') + (kind === 'po' ? (o.poType === 'plant' ? ' · goes to own plant (' + esc(plantFirm()) + ')' : o.linkSO && SO[o.linkSO] ? ' · sells to ' + lnk('so', o.linkSO) + ' ' + lnk('buyer', SO[o.linkSO].buyer) : '') : (isFirm(o.buyer) ? ' · <span class="tag own">group company</span>' : ''));
-  var h = pageHead(esc(id) + ' ' + firmTag(firmOf(o)), (multiFirm() ? esc(firmOf(o)) + ' · ' : '') + (kind === 'po' ? 'Supplier ' : 'Customer ') + lnk(kind === 'po' ? 'plant' : 'buyer', party) + ' · ' + dmy(o.date) + (P.money ? ' · ' + inr(o.rate) + (kind === 'so' ? ' ' + terms(o) : ' + GST') : '') + goes + (o.status === 'Cancelled' ? ' · <span class="over">Cancelled</span>' : '') + (o.status === 'Settled' ? ' · <span class="tag ok">Short-closed</span>' : ''), extra, newTab(kind, id));
+  var h = pageHead(esc(id) + ' ' + firmTag(firmOf(o)), (multiFirm() ? esc(firmOf(o)) + ' · ' : '') + (kind === 'po' ? 'Supplier ' : 'Customer ') + lnk(kind === 'po' ? 'plant' : 'buyer', party) + ' · ' + dmy(o.date) + (P.money ? ' · ' + inr(o.rate) + (kind === 'so' ? ' ' + terms(o) : ' + GST') : '') + goes + (o.status === 'Cancelled' ? ' · <span class="over">Cancelled</span>' : '') + (o.status === 'Settled' ? ' · <span class="tag ok">Short-closed</span>' : '') + completeTag(kind, o, s), extra, newTab(kind, id));
   h += '<div class="kpis">' + kpi('Ordered', qt(o.qty) + ' qtl') + kpi(kind === 'po' ? 'Loaded' : 'Dispatched', qt(s.done) + ' qtl', trk(s.tr.length)) + kpi('Balance', qt(s.bal) + ' qtl', '', s.bal < 0 ? 'bad' : '') +
     kpi('Unloaded', qt(s.unl) + ' qtl') + kpi('Shortage', qt(s.short) + ' qtl', '', s.short > 0 ? 'warn' : '');
   if (P.money) {
@@ -1077,17 +1132,17 @@ function truckTable(tr, kind) {
   if (!tr.length) return '<div class="panel empty">No trucks yet.</div>';
   var M = P.money;
   var mf = multiFirm() && tr.some(function (t) { return t.firm !== tr[0].firm; });
-  var head = [['Dispatch'], ['Date']].concat(mf ? [['Firm']] : []).concat([['Truck'], [kind === 'po' || kind === 'plant' ? 'Going to' : 'Supplier'], ['Transporter']]).concat([ ['Loaded', 1], ['Unloaded', 1], ['Short', 1], ['Days', 1], ['Stage']]);
+  var head = [['S.No.'], ['Dispatch'], ['Date']].concat(mf ? [['Firm']] : []).concat([['Truck'], [kind === 'po' || kind === 'plant' ? 'Going to' : 'Supplier'], ['Transporter']]).concat([ ['Loaded', 1], ['Unloaded', 1], ['Short', 1], ['Days', 1], ['Stage']]);
   if (M) head = head.concat([['Supplier amt', 1], ['Freight', 1], ['Short ded.', 1], ['Detention', 1], ['Freight adv.', 1], ['Net freight', 1], ['Freight paid'], ['Outstanding', 1]]);
   var cell = function (v, r) { return '<td' + (r ? ' class="r"' : '') + '>' + v + '</td>'; };
-  var body = tr.map(function (t) {
-    var c = cell(lnk('truck', t.id)) + cell(dm(t.date)) + (mf ? cell(firmTag(t.firm)) : '') + cell('<b>' + esc(t.truck) + '</b>') + cell(kind === 'po' || kind === 'plant' ? (t.plantPO ? '<span class="tag own">Own plant</span>' : lnk('buyer', t.buyer)) : lnk('plant', t.plant)) + cell(lnk('transporter', t.transporter)) +
+  var body = tr.map(function (t, i) {
+    var c = cell('<span class="sn">' + (i + 1) + '</span>') + cell(lnk('truck', t.id)) + cell(dm(t.date)) + (mf ? cell(firmTag(t.firm)) : '') + cell('<b>' + esc(t.truck) + '</b>') + cell(kind === 'po' || kind === 'plant' ? (t.plantPO ? '<span class="tag own">Own plant</span>' : lnk('buyer', t.buyer)) : lnk('plant', t.plant)) + cell(lnk('transporter', t.transporter)) +
       cell(t.L ? qt(t.L) : '—', 1) + cell(t.U ? qt(t.U) : '—', 1) + cell(t.U ? qt(t.short) : '—', 1) + cell(t.trip + (t.detDays && !t.fBuyer ? ' <span class="over">+' + t.detDays + '</span>' : ''), 1) + cell('<span class="stage ' + (t.st < 0 ? 'sx' : 's' + t.st) + '">' + t.stage + '</span>');
     if (M) c += cell(t.L ? inr(t.purTot) : '—', 1) + cell(t.fBuyer ? 'customer' : t.U ? inr(t.frAmt) : '—', 1) + cell(t.shortDed ? inr(t.shortDed) : '—', 1) + cell(t.det ? inr(t.det) : '—', 1) + cell(t.A ? inr(t.A) : '—', 1) +
       cell(t.U && !t.fBuyer ? inr(t.netPay) + (t.carryIn || t.carryOut ? ' <span class="mu">*</span>' : '') : '—', 1) + cell(t.fBuyer ? '—' : t.freightPaid ? '✓ ' + dm(t.freightPaidDate) : (t.U ? 'unpaid' : '—')) + cell(t.U ? inr(t.bal) : '—', 1);
     return '<tr>' + c + '</tr>';
   }).join('');
-  var foot = '<tr><td colspan="' + (mf ? 6 : 5) + '">Total ' + trk(tr.length) + '</td>' + cell(qt(sum(tr, function (t) { return t.L; })), 1) + cell(qt(sum(tr, function (t) { return t.U; })), 1) + cell(qt(sum(tr, function (t) { return t.short; })), 1) + '<td></td><td></td>';
+  var foot = '<tr><td colspan="' + (mf ? 7 : 6) + '">Total ' + trk(tr.length) + '</td>' + cell(qt(sum(tr, function (t) { return t.L; })), 1) + cell(qt(sum(tr, function (t) { return t.U; })), 1) + cell(qt(sum(tr, function (t) { return t.short; })), 1) + '<td></td><td></td>';
   if (M) foot += cell(inr(sum(tr, function (t) { return t.purTot; })), 1) + cell(inr(sum(tr, function (t) { return t.frAmt; })), 1) + cell(inr(sum(tr, function (t) { return t.shortDed; })), 1) + cell(inr(sum(tr, function (t) { return t.det; })), 1) +
     cell(inr(sum(tr, function (t) { return t.A; })), 1) + cell(inr(sum(tr, function (t) { return t.netPay; })), 1) + '<td></td>' + cell(inr(sum(tr, function (t) { return t.bal; })), 1);
   return '<div class="tblw"><table class="t"><thead><tr>' + head.map(function (x) { return '<th' + (x[1] ? ' class="r"' : '') + '>' + x[0] + '</th>'; }).join('') + '</tr></thead><tbody>' + body + '</tbody><tfoot>' + foot + '</tr></tfoot></table></div>';
@@ -1116,9 +1171,9 @@ function vParty(kind, name) {
   h += '</div>';
   if (kind !== 'transporter') {
     var ord = (kind === 'buyer' ? D.so : D.po).filter(function (o) { return normName(kind === 'buyer' ? o.buyer : o.plant) === key; });
-    h += '<h2>' + (kind === 'buyer' ? 'Sale orders' : 'Purchase orders') + '</h2><div class="panel">' + (ord.length ? ord.map(function (o) {
+    h += '<h2>' + (kind === 'buyer' ? 'Sale orders' : 'Purchase orders') + '</h2><div class="panel">' + (ord.length ? ord.map(function (o, i) {
       var s = orderStats(kind === 'buyer' ? 'so' : 'po', o);
-      return '<div class="oc"><div class="m"><div class="r"><span>' + lnk(kind === 'buyer' ? 'so' : 'po', o.id) + (P.money ? ' · ' + inr(o.rate) : '') + '</span><span class="mu">Balance <b>' + qt(s.bal) + '</b> of ' + qt(o.qty) + '</span></div><div class="prog"><i style="width:' + s.pct.toFixed(1) + '%"></i></div></div></div>';
+      return '<div class="oc"><div class="m"><div class="r"><span><span class="sn">' + (i + 1) + '.</span> ' + lnk(kind === 'buyer' ? 'so' : 'po', o.id) + (o.status === 'Settled' ? ' <span class="tag ok">Short-closed</span>' : o.status === 'Cancelled' ? ' <span class="tag">Cancelled</span>' : '') + (P.money ? ' · ' + inr(o.rate) : '') + '</span><span class="mu">Balance <b>' + qt(s.bal) + '</b> of ' + qt(o.qty) + '</span></div><div class="prog"><i style="width:' + s.pct.toFixed(1) + '%"></i></div></div></div>';
     }).join('') : '<div class="empty">No orders.</div>') + '</div>';
   }
   if (kind === 'buyer') h += buyerFlow(name, tr);
@@ -1128,9 +1183,10 @@ function vParty(kind, name) {
 
 /* ---------- Money ---------- */
 function vSettle() {
-  var base = T.filter(function (t) { return t.so && !t.plantPO && tInFirm(t); }), lv = base.filter(function (t) { return !t.cx; });
+  // Totals use all trucks; the list shows only open ones (closed / cancelled are on the "Closed & cancelled" page).
+  var all = T.filter(function (t) { return t.so && !t.plantPO && tInFirm(t); }), lv = all.filter(function (t) { return !t.cx; }), base = lv.filter(function (t) { return t.st !== 6; });
   var opts = [['all', 'All', function (t) { return !t.cx; }], ['due', 'To collect', function (t) { return !t.cx && t.bal > 0; }], ['overdue', 'Overdue', function (t) { return !t.cx && t.overdue > 0; }],
-    ['road', 'Not unloaded', function (t) { return !t.cx && !t.U; }], ['done', 'Short-closed', function (t) { return !t.cx && t.U && t.bal <= 0; }], ['cx', 'Cancelled', function (t) { return t.cx; }]];
+    ['road', 'Not unloaded', function (t) { return !t.cx && !t.U; }], ['done', 'Fully paid', function (t) { return !t.cx && t.U && t.bal <= 0; }]];
   var fn = (opts.filter(function (o) { return o[0] === SUBF.settle; })[0] || opts[0])[2];
   var list = base.filter(fn).filter(matchQ).sort(sortT);
   LASTIDS = list.map(function (t) { return t.id; });
@@ -1142,12 +1198,12 @@ function vSettle() {
     kpi('Overdue', inr(sum(out.filter(function (t) { return t.overdue > 0; }), function (t) { return t.bal; })), 'past credit days', 'bad') + '</div>';
   h += '<div class="bar">' + searchBox() + (P.exportX ? '<button type="button" class="btn sm" data-act="exportList">Download this list</button>' : '') + '</div>' + subChips('settle', opts, base);
   if (!list.length) return h + '<div class="panel empty">No trucks here.</div>';
-  var cols = '112px 1.05fr 1.5fr .75fr .75fr .6fr 1fr 1fr .95fr 128px 40px';
-  h += '<div class="tbl" style="--cols:' + cols + '"><div class="tr th"><div>Dispatch</div><div>Truck</div><div>Customer</div><div class="r">Loaded</div><div class="r">Unloaded</div><div class="r">Short</div><div class="r">Sale total</div><div class="r">Received</div><div class="r">Balance</div><div>Next step</div><div></div></div>';
-  h += list.slice(0, LIMIT).map(function (t) {
+  var cols = '44px 112px 1.05fr 1.5fr .75fr .75fr .6fr 1fr 1fr .95fr 128px 40px';
+  h += '<div class="tbl" style="--cols:' + cols + '"><div class="tr th"><div>S.No.</div><div>Dispatch</div><div>Truck</div><div>Customer</div><div class="r">Loaded</div><div class="r">Unloaded</div><div class="r">Short</div><div class="r">Sale total</div><div class="r">Received</div><div class="r">Balance</div><div>Next step</div><div></div></div>';
+  h += list.slice(0, LIMIT).map(function (t, i) {
     var next = t.cx ? '' : !t.U ? (P.trucks ? '<button class="pill wait" type="button" data-act="unload" data-id="' + esc(t.id) + '">' + (toPlant(t) ? '+ Received' : '+ Unloading') + '</button>' : '') :
-      t.bal > 0 ? (P.truckMoney ? '<button class="nx money" type="button" data-act="receive" data-id="' + esc(t.id) + '">+ Payment</button>' : '') + (t.overdue ? '<small class="over">' + t.overdue + ' days overdue</small>' : '') : '<span class="pill ok">✓ Short-closed</span>';
-    return '<div class="tr ' + (t.cx ? 'cx' : '') + '"><div class="td">' + lnk('truck', t.id) + ntsm('truck', t.id) + '<small>' + dmy(t.date) + '</small></div>' +
+      t.bal > 0 ? (P.truckMoney ? '<button class="nx money" type="button" data-act="receive" data-id="' + esc(t.id) + '">+ Payment</button>' : '') + (t.overdue ? '<small class="over">' + t.overdue + ' days overdue</small>' : '') : '<span class="pill ok">✓ Fully paid</span>';
+    return '<div class="tr ' + (t.cx ? 'cx' : '') + '"><div class="td sn" data-l="S.No.">' + (i + 1) + '</div><div class="td">' + lnk('truck', t.id) + ntsm('truck', t.id) + '<small>' + dmy(t.date) + '</small></div>' +
       '<div class="td" data-l="Truck"><b>' + esc(t.truck) + '</b> ' + firmTag(t.firm) + '<div style="margin-top:3px"><span class="stage ' + (t.st < 0 ? 'sx' : 's' + t.st) + '">' + t.stage + '</span></div></div>' +
       '<div class="td wide" data-l="Customer">' + lnk('buyer', t.buyer) + (t.ownBuyer ? ' <span class="tag own">group company</span>' : '') + '<small>' + lnk('so', t.so) + ' · ' + inr(t.rateUsed) + '/qtl' + (t.rateOwn ? ' (this truck)' : '') + '</small></div>' +
       '<div class="td r num" data-l="Loaded">' + (t.L ? qt(t.L) : '—') + '</div><div class="td r num" data-l="Unloaded">' + (t.U ? qt(t.U) : '—') + '</div>' +
@@ -1160,7 +1216,8 @@ function vSettle() {
   return h;
 }
 function vFreight() {
-  var base = T.filter(function (t) { return t.L && tInFirm(t); }), lv = base.filter(function (t) { return !t.cx && !t.fBuyer; });
+  // Transporter totals use all loaded trucks; the list shows only open ones (closed / cancelled are on the "Closed & cancelled" page).
+  var all = T.filter(function (t) { return t.L && tInFirm(t); }), lv = all.filter(function (t) { return !t.cx && !t.fBuyer; }), base = all.filter(function (t) { return !t.cx && t.st !== 6; });
   var opts = [['all', 'All', function (t) { return !t.cx; }], ['topay', 'To pay', function (t) { return !t.cx && t.U && !t.fBuyer && !t.freightPaid; }], ['road', 'On the road', function (t) { return !t.cx && !t.U; }],
     ['paid', 'Paid', function (t) { return !t.cx && t.freightPaid; }], ['neg', 'Advance carried forward', function (t) { return !t.cx && (t.carryOut > 0 || t.carryIn > 0); }], ['buyer', 'Customer pays', function (t) { return !t.cx && t.fBuyer; }]];
   var fn = (opts.filter(function (o) { return o[0] === SUBF.freight; })[0] || opts[0])[2];
@@ -1177,15 +1234,15 @@ function vFreight() {
   }).join('') || '<div class="panel empty">No loaded trucks.</div>') + '</div>';
   h += '<div class="bar">' + searchBox() + (P.truckMoney ? '<button type="button" class="btn" data-act="payFreightBatch">Pay freight (several trucks)</button>' : '') + (P.exportX ? '<button type="button" class="btn sm" data-act="exportList">Download this list</button>' : '') + '</div>' + subChips('freight', opts, base);
   if (!list.length) return h + '<div class="panel empty">No trucks here.</div>';
-  var cols = '112px 1fr 1fr .75fr .6fr .85fr .8fr .8fr .85fr .95fr 112px 40px';
-  h += '<div class="tbl" style="--cols:' + cols + '"><div class="tr th"><div>Dispatch</div><div>Truck</div><div>Transporter</div><div class="r">Unloaded</div><div class="r">Rate</div><div class="r">Freight</div><div class="r">Short ded.</div><div class="r">Detention</div><div class="r">Freight adv.</div><div class="r">Net freight payable</div><div>Freight</div><div></div></div>';
-  h += list.slice(0, LIMIT).map(function (t) {
+  var cols = '44px 112px 1fr 1fr .75fr .75fr .6fr .85fr .8fr .8fr .85fr .95fr 112px 40px';
+  h += '<div class="tbl" style="--cols:' + cols + '"><div class="tr th"><div>S.No.</div><div>Dispatch</div><div>Truck</div><div>Transporter</div><div class="r">Loaded</div><div class="r">Unloaded</div><div class="r">Rate</div><div class="r">Freight</div><div class="r">Short ded.</div><div class="r">Detention</div><div class="r">Freight adv.</div><div class="r">Net freight payable</div><div>Freight</div><div></div></div>';
+  h += list.slice(0, LIMIT).map(function (t, i) {
     var pay = t.cx ? '' : t.fBuyer ? '<span class="pill info">Customer pays</span>' : !t.U ? (P.trucks ? '<button class="pill wait" type="button" data-act="unload" data-id="' + esc(t.id) + '">' + (toPlant(t) ? '+ Received' : '+ Unloading') + '</button>' : '') :
       t.freightPaid ? '<span class="pill ok">✓ Paid</span><small>' + dmy(t.freightPaidDate) + '</small>' : P.truckMoney ? '<button class="nx money" type="button" data-act="fpaid" data-id="' + esc(t.id) + '">Pay freight</button>' : '<span class="pill wait">◷ Unpaid</span>';
-    return '<div class="tr ' + (t.cx ? 'cx' : '') + '"><div class="td">' + lnk('truck', t.id) + ntsm('truck', t.id) + '<small>' + dmy(t.date) + '</small></div>' +
+    return '<div class="tr ' + (t.cx ? 'cx' : '') + '"><div class="td sn" data-l="S.No.">' + (i + 1) + '</div><div class="td">' + lnk('truck', t.id) + ntsm('truck', t.id) + '<small>' + dmy(t.date) + '</small></div>' +
       '<div class="td" data-l="Truck"><b>' + esc(t.truck) + '</b> ' + firmTag(t.firm) + '<small>' + (t.trip === 1 ? '1 day' : t.trip + ' days') + (t.detDays && !t.fBuyer ? ' · <span class="over">+' + t.detDays + ' over free</span>' : '') + '</small></div>' +
       '<div class="td" data-l="Transporter">' + lnk('transporter', t.transporter || '(none)', t.transporter || '—') + '</div>' +
-      '<div class="td r num" data-l="Unloaded">' + (t.U ? qt(t.U) : '—') + '</div><div class="td r num" data-l="Rate">' + (t.FR ? inr(t.FR) : '—') + '</div>' +
+      '<div class="td r num" data-l="Loaded">' + (t.L ? qt(t.L) : '—') + '</div><div class="td r num" data-l="Unloaded">' + (t.U ? qt(t.U) : '—') + '</div><div class="td r num" data-l="Rate">' + (t.FR ? inr(t.FR) : '—') + '</div>' +
       '<div class="td r num" data-l="Freight">' + (t.U && !t.fBuyer ? inr(t.frAmt) : '—') + '</div>' +
       '<div class="td r num" data-l="Short ded.">' + (t.shortDed ? inr(t.shortDed) + '<small>' + qt(t.short) + ' qtl</small>' : '—') + '</div>' +
       '<div class="td r num" data-l="Detention">' + (t.det ? inr(t.det) : t.detSuggest ? '<span class="mu" title="Suggestion only, not added">' + inr(t.detSuggest) + '?</span>' : '—') + '</div>' +
@@ -1195,6 +1252,60 @@ function vFreight() {
   }).join('') + '</div>' + more(list);
   h += '<p class="mu" style="font-size:12.5px;margin-top:10px">Net freight payable = freight − shortage deduction − freight advance + detention. Shortage above ' + (n(D.settings.shortageAllowancePct) * 100).toFixed(2) + '% of loaded weight is cut at the sale rate (at the purchase rate for own-plant trucks). Detention: ' + n(D.settings.freeDays === undefined ? 3 : D.settings.freeDays) + ' free days, then ' + inr(n(D.settings.detentionPerDay === undefined ? 500 : D.settings.detentionPerDay)) + ' a day.</p>';
   return h;
+}
+/* ---------- Closed & cancelled ----------
+   Finished trucks, short-closed orders and cancelled / returned records leave the working lists and are kept here.
+   Nothing is deleted: Restore and Undo short-close are in the ⋯ menu, as before. */
+function vClosed() {
+  var sub = SUBF.closed || 'trucks', q = QS.replace(/\s+/g, '');
+  var orders = function (st) {
+    return [['po', D.po], ['so', D.so]].reduce(function (a, k) {
+      return a.concat(k[1].filter(function (o) { return o.status === st && inFirm(o); }).map(function (o) { return { kind: k[0], o: o }; }));
+    }, []);
+  };
+  var done = T.filter(function (t) { return !t.cx && t.st === 6 && tInFirm(t); }), cxT = T.filter(function (t) { return t.cx && tInFirm(t); });
+  var sc = orders('Settled'), cxO = orders('Cancelled');
+  var chips = [['trucks', 'Completed trucks', done.length], ['orders', 'Short-closed orders', sc.length], ['cx', 'Cancelled / returned', cxT.length + cxO.length]];
+  var trucks = (sub === 'trucks' ? done : sub === 'cx' ? cxT : []).filter(matchQ).sort(sortT);
+  var ords = (sub === 'orders' ? sc : sub === 'cx' ? cxO : []).filter(function (x) {
+    return !q || [x.o.id, x.o.plant, x.o.buyer, firmOf(x.o), x.o.note].join('|').toLowerCase().replace(/\s+/g, '').indexOf(q) >= 0;
+  }).sort(function (a, b) { return String(b.o.date).localeCompare(String(a.o.date)) || String(b.o.id).localeCompare(String(a.o.id)); });
+  LASTIDS = trucks.map(function (t) { return t.id; });
+  LASTORDERS = ords.map(function (x) { return x.o.id; });
+  var h = '<div class="ph" style="margin-bottom:6px"><h1>Closed &amp; cancelled</h1><div class="sub">Finished trucks, short-closed orders and cancelled or returned records. They are kept here, out of the working lists. Nothing is deleted.</div></div>';
+  h += '<div class="bar">' + searchBox() + '</div><div class="chips">' + chips.map(function (c) { return '<button type="button" class="chip ' + (sub === c[0] ? 'on' : '') + '" data-sf="' + c[0] + '">' + c[1] + ' <b>' + c[2] + '</b></button>'; }).join('') + '</div>';
+  var dl = function (act) { return P.exportX ? '<div class="bar"><span class="sp"></span><button type="button" class="btn sm" data-act="' + act + '">Download this list</button></div>' : ''; };
+  if (sub !== 'orders') h += '<h2>Trucks (' + trucks.length + ')</h2>' + (trucks.length ? dl('exportList') + closedTruckRows(trucks) : '<div class="panel empty">No trucks here.</div>');
+  if (sub !== 'trucks') h += '<h2>Orders (' + ords.length + ')</h2>' + (ords.length ? dl('exportOrders') + closedOrderRows(ords) : '<div class="panel empty">No orders here.</div>');
+  return h;
+}
+function closedTruckRows(list) {
+  var M = P.money;
+  var h = '<div class="tbl" style="--cols:44px 112px 1fr 1.6fr .8fr .8fr ' + (M ? '1fr ' : '') + '1.5fr 40px"><div class="tr th"><div>S.No.</div><div>Dispatch</div><div>Truck</div><div>Supplier → customer</div><div class="r">Loaded</div><div class="r">Unloaded</div>' + (M ? '<div class="r">Sale total</div>' : '') + '<div>Status</div><div></div></div>';
+  return h + list.slice(0, LIMIT).map(function (t, i) {
+    var why = t.cx ? String(t.note || '').split(' | ').filter(function (x) { return /^(Cancelled|Returned)/.test(x); }).pop() || '' : '';
+    return '<div class="tr ' + (t.cx ? 'cx' : '') + '"><div class="td sn" data-l="S.No.">' + (i + 1) + '</div>' +
+      '<div class="td">' + lnk('truck', t.id) + '<small>' + dmy(t.date) + '</small></div>' +
+      '<div class="td" data-l="Truck"><b>' + esc(t.truck) + '</b> ' + firmTag(t.firm) + '</div>' +
+      '<div class="td wide" data-l="Supplier → customer">' + lnk('plant', t.plant) + ' → ' + (t.plantPO ? esc(shortFirm(plantFirm())) + ' plant' : t.so ? lnk('buyer', t.buyer) : '<span class="mu">no customer</span>') + '</div>' +
+      '<div class="td r num" data-l="Loaded">' + (t.L ? qt(t.L) : '—') + '</div><div class="td r num" data-l="Unloaded">' + (t.U ? qt(t.U) : '—') + '</div>' +
+      (M ? '<div class="td r num" data-l="Sale total">' + (t.saleTot ? inr(t.saleTot) : '—') + '</div>' : '') +
+      '<div class="td" data-l="Status"><span class="stage ' + (t.st < 0 ? 'sx' : 's' + t.st) + '">' + t.stage + '</span>' + (why ? '<small>' + esc(why) + '</small>' : '') + '</div>' +
+      '<div class="td acts"><button type="button" class="ib" data-act="menu" data-id="' + esc(t.id) + '" aria-label="More actions">⋯</button></div></div>';
+  }).join('') + '</div>' + more(list);
+}
+function closedOrderRows(list) {
+  var h = '<div class="tbl" style="--cols:44px 120px 1.6fr .8fr .9fr .9fr .9fr 1.4fr 40px"><div class="tr th"><div>S.No.</div><div>ID</div><div>Supplier / customer</div><div>Date</div><div class="r">Quantity</div><div class="r">Loaded / dispatched</div><div class="r">Balance</div><div>Status</div><div></div></div>';
+  return h + list.map(function (x, i) {
+    var o = x.o, s = orderStats(x.kind, o), cx = o.status === 'Cancelled', party = x.kind === 'po' ? o.plant : o.buyer;
+    var why = cx ? String(o.note || '').split(' | ').filter(function (y) { return /^Cancelled/.test(y); }).pop() || '' : '';
+    return '<div class="tr ' + (cx ? 'cx' : '') + '"><div class="td sn" data-l="S.No.">' + (i + 1) + '</div><div class="td">' + lnk(x.kind, o.id) + ' ' + firmTag(firmOf(o)) + '</div>' +
+      '<div class="td wide" data-l="' + (x.kind === 'po' ? 'Supplier' : 'Customer') + '">' + lnk(x.kind === 'po' ? 'plant' : 'buyer', party) + '</div>' +
+      '<div class="td" data-l="Date">' + dmy(o.date) + '</div><div class="td r num" data-l="Quantity">' + qt(o.qty) + '</div>' +
+      '<div class="td r num" data-l="Loaded / dispatched">' + qt(s.done) + '</div><div class="td r num" data-l="Balance">' + qt(s.bal) + '</div>' +
+      '<div class="td" data-l="Status">' + (cx ? '<span class="tag">Cancelled</span>' : '<span class="tag ok">Short-closed</span>') + (why ? '<small>' + esc(why) + '</small>' : '') + '</div>' +
+      '<div class="td acts"><button type="button" class="ib" data-act="ordermenu" data-kind="' + x.kind + '" data-id="' + esc(o.id) + '" aria-label="More">⋯</button></div></div>';
+  }).join('') + '</div>';
 }
 /* ---------- More ---------- */
 function vMore() {
@@ -1216,16 +1327,16 @@ function vNotes() {
     '<div class="full"><label for="n_text">Note</label><textarea id="n_text" rows="3" placeholder="e.g. On the phone the Dispatch Register buttons are too small"></textarea></div></div>' +
     '<div style="margin-top:10px;text-align:right"><button type="button" class="btn pri" data-act="addNote">Add note</button></div></div>';
   if (!list.length) return h + '<div class="panel empty">No notes yet.</div>';
-  return h + '<div class="list">' + list.map(function (x) {
+  return h + '<div class="list">' + list.map(function (x, i) {
     var done = x.status === 'Done';
-    return '<div class="row" style="' + (done ? 'opacity:.6' : '') + '"><div class="m"><div><span class="stage ' + (done ? 's5' : 's1') + '">' + (done ? 'Done' : 'Open') + '</span> <b>' + esc(x.area) + '</b> <span class="mu">· ' + esc(x.by) + ' · ' + dmy(x.date) + ' · ' + esc(x.id) + '</span></div>' +
+    return '<div class="row" style="' + (done ? 'opacity:.6' : '') + '"><div class="m"><div><span class="sn">' + (i + 1) + '.</span> <span class="stage ' + (done ? 's5' : 's1') + '">' + (done ? 'Done' : 'Open') + '</span> <b>' + esc(x.area) + '</b> <span class="mu">· ' + esc(x.by) + ' · ' + dmy(x.date) + ' · ' + esc(x.id) + '</span></div>' +
       '<div style="margin-top:4px;white-space:pre-wrap">' + esc(x.text) + '</div></div>' + (owner ? '<button type="button" class="btn sm" data-act="noteStatus" data-id="' + esc(x.id) + '" data-kind="' + (done ? 'Open' : 'Done') + '">' + (done ? 'Reopen' : 'Mark done') + '</button>' : '') + '</div>';
   }).join('') + '</div>';
 }
 function vUsers() {
   var h = pageHead('Users', 'Staff log in with the username and password you set here. They never need the Google Sheet.', '<button type="button" class="btn pri sm" data-act="newUser">+ Add user</button>');
-  h += '<div class="list">' + (D.users || []).map(function (u) {
-    return '<div class="row" style="' + (u.active ? '' : 'opacity:.55') + '"><div class="m"><b>' + esc(u.name) + '</b> <span class="mu">(' + esc(u.id) + ')</span><div class="mu" style="font-size:12.5px"><span class="stage s2">' + esc(u.role) + '</span> ' + esc(ROLE_HELP[u.role] || '') + (u.active ? '' : ' · <span class="over">Blocked</span>') + '</div></div><button type="button" class="btn sm" data-act="editUser" data-id="' + esc(u.id) + '">Edit</button></div>';
+  h += '<div class="list">' + (D.users || []).map(function (u, i) {
+    return '<div class="row" style="' + (u.active ? '' : 'opacity:.55') + '"><div class="m"><span class="sn">' + (i + 1) + '.</span> <b>' + esc(u.name) + '</b> <span class="mu">(' + esc(u.id) + ')</span><div class="mu" style="font-size:12.5px"><span class="stage s2">' + esc(u.role) + '</span> ' + esc(ROLE_HELP[u.role] || '') + (u.active ? '' : ' · <span class="over">Blocked</span>') + '</div></div><button type="button" class="btn sm" data-act="editUser" data-id="' + esc(u.id) + '">Edit</button></div>';
   }).join('') + '</div>';
   return h;
 }
@@ -1249,8 +1360,9 @@ function openForm(cfg) {
     } else if (f.type === 'textarea') {
       h += '<textarea id="' + id + '" rows="2">' + esc(val) + '</textarea>';
     } else {
-      var t = f.type === 'weight' ? 'text' : (f.type || 'text');
-      h += '<input id="' + id + '" name="' + id + '_x" autocomplete="' + (f.type === 'password' ? 'new-password' : 'off') + '" type="' + t + '"' + (f.type === 'number' || f.type === 'weight' ? ' inputmode="decimal"' : '') + (f.type === 'number' ? ' step="any" min="0"' : '') + (f.list ? ' list="dl_' + f.k + '"' : '') + ' value="' + esc(val) + '"' + (f.ph ? ' placeholder="' + esc(f.ph) + '"' : '') + (f.ro ? ' readonly' : '') + '>';
+      var t = f.type === 'weight' || f.type === 'date' ? 'text' : (f.type || 'text');
+      if (f.type === 'date') val = dmy(val); // dates are typed and shown as DD-MM-YYYY on every phone and laptop
+      h += '<input id="' + id + '" name="' + id + '_x" autocomplete="' + (f.type === 'password' ? 'new-password' : 'off') + '" type="' + t + '"' + (f.type === 'number' || f.type === 'weight' ? ' inputmode="decimal"' : '') + (f.type === 'date' ? ' inputmode="numeric" maxlength="10" data-date="1"' : '') + (f.type === 'number' ? ' step="any" min="0"' : '') + (f.list ? ' list="dl_' + f.k + '"' : '') + ' value="' + esc(val) + '"' + (f.ph || f.type === 'date' ? ' placeholder="' + esc(f.ph || 'DD-MM-YYYY') + '"' : '') + (f.ro ? ' readonly' : '') + '>';
       if (f.list) h += '<datalist id="dl_' + f.k + '">' + f.list.map(function (o) { return '<option value="' + esc(o) + '">'; }).join('') + '</datalist>';
       if (f.type === 'weight') h += '<div class="hint" id="hint_' + f.k + '"></div>';
       if (f.fill != null) h += '<button type="button" class="fill" data-fill="' + id + '" data-val="' + esc(f.fill) + '">' + esc(f.fillLabel || 'Fill') + '</button>';
@@ -1279,7 +1391,7 @@ function formVals() {
   (FORM.fields || []).forEach(function (f) {
     if (!f.k) return;
     var el = document.getElementById('f_' + f.k);
-    o[f.k] = f.type === 'check' ? el.checked : f.type === 'weight' ? (el.value.trim() === '' ? '' : String(toQtl(el.value))) : el.value.trim();
+    o[f.k] = f.type === 'check' ? el.checked : f.type === 'weight' ? (el.value.trim() === '' ? '' : String(toQtl(el.value))) : f.type === 'date' ? ymd(el.value) : el.value.trim();
   });
   return o;
 }
@@ -1301,12 +1413,16 @@ function submitForm(ev) {
   var vals = formVals();
   for (var i = 0; i < (FORM.fields || []).length; i++) {
     var f = FORM.fields[i];
+    if (f.type === 'date' && /^!/.test(vals[f.k] || '')) { showErr(f.label + ': type the date as DD-MM-YYYY, e.g. 05-11-2026.'); return; }
     if (f.req && (vals[f.k] === '' || vals[f.k] == null)) { showErr('Fill in ' + f.label + '.'); return; }
     if ((f.type === 'number' || f.type === 'weight') && vals[f.k] !== '' && (isNaN(Number(vals[f.k])) || Number(vals[f.k]) < 0)) { showErr(f.label + ' must be a number.'); return; }
   }
   if (FORM.check) { var c = FORM.check(vals); if (c) { showErr(c); return; } }
   var send = vals;
   if (FORM.onlyChanged) { send = changedOnly(vals); if (!Object.keys(send).length) { closeForm(); toast('No changes'); return; } }
+  // Order quantity window: staff are stopped here (the server checks the same); the Owner gets a warning and can accept it.
+  var qf = FORM.warn && FORM.warn.qty;
+  if (qf && D.me.role !== 'Owner') { var qp = qf(send); if (qp) { showErr(qp + ' Ask the Owner.'); return; } }
   if (!FORM.warned) {
     var w = FORM.warn ? FORM.warn(send) : null;
     if (!w) (FORM.fields || []).forEach(function (f) { if (!w && f.type === 'weight' && send[f.k] !== undefined && send[f.k] !== '' && (n(send[f.k]) < 150 || n(send[f.k]) > 500)) w = qt(send[f.k]) + ' qtl is unusual for one truck (normally 150–500 qtl).'; });
@@ -1336,8 +1452,8 @@ function openMenu(title, sub, items) {
 }
 
 /* ---------- actions ---------- */
-function poOpts() { return D.po.filter(function (p) { return p.status !== 'Cancelled' && p.status !== 'Settled'; }).map(function (p) { var s = orderStats('po', p); return [p.id, p.id + (multiFirm() ? ' · ' + shortFirm(firmOf(p)) : '') + ' · ' + p.plant + (p.takenIn && normName(p.takenIn) !== firmOf(p) ? ' via ' + shortFirm(p.takenIn) : '') + (p.poType === 'plant' ? ' (own plant)' : '') + ' · bal ' + qt(s.bal)]; }); }
-function soOpts() { return D.so.filter(function (s) { return s.status !== 'Cancelled' && s.status !== 'Settled'; }).map(function (o) { var s = orderStats('so', o); return [o.id, o.id + (multiFirm() ? ' · ' + shortFirm(firmOf(o)) : '') + ' · ' + o.buyer + (P.money ? ' · ' + inr(o.rate) + ' ' + terms(o) : '') + ' · bal ' + qt(s.bal)]; }); }
+function poOpts() { return D.po.filter(function (p) { return p.status !== 'Cancelled' && p.status !== 'Settled'; }).map(function (p) { var s = orderStats('po', p); return [p.id, p.id + (multiFirm() ? ' · ' + shortFirm(firmOf(p)) : '') + ' · ' + p.plant + (p.takenIn && normName(p.takenIn) !== firmOf(p) ? ' via ' + shortFirm(p.takenIn) : '') + (p.poType === 'plant' ? ' (own plant)' : '') + ' · bal ' + qt(s.bal) + (s.complete ? ' · complete' : '')]; }); }
+function soOpts() { return D.so.filter(function (s) { return s.status !== 'Cancelled' && s.status !== 'Settled'; }).map(function (o) { var s = orderStats('so', o); return [o.id, o.id + (multiFirm() ? ' · ' + shortFirm(firmOf(o)) : '') + ' · ' + o.buyer + (P.money ? ' · ' + inr(o.rate) + ' ' + terms(o) : '') + ' · bal ' + qt(s.bal) + (s.complete ? ' · complete' : '')]; }); }
 function tradingFirms() { return String(D && D.settings.tradingFirms || '').split(',').map(normName).filter(String); }
 function firmOpts() { return firms().filter(String).map(function (f) { return [f, f]; }); }
 function names(list, key) { var m = {}; list.forEach(function (x) { if (x[key]) m[normName(x[key])] = 1; }); return Object.keys(m).sort(); }
@@ -1345,28 +1461,44 @@ function transporters() { return D ? names(D.trucks, 'transporter') : []; }
 function getT(id) { return T.filter(function (t) { return t.id === id; })[0]; }
 /* Warnings before saving a truck. v = only the fields being saved; orig = the truck as it is now (blank for a new truck). */
 function truckWarn(id, orig) {
-  return function (v) {
-    var cur = function (k) { return k in v ? v[k] : (orig ? orig[k] : ''); };
+  // All warnings are shown together, so one "Save again" accepts exactly what was shown.
+  var f = function (v) {
+    var cur = function (k) { return k in v ? v[k] : (orig ? orig[k] : ''); }, w = [];
     var tn = normTruck(cur('truck')), date = cur('date');
     if (tn && (!orig || 'truck' in v || 'date' in v)) {
       var open = T.filter(function (t) { return !t.cx && t.id !== id && normTruck(t.truck) === tn && (!t.U || t.date === date); });
-      if (open.length) return open[0].date === date ? 'Truck ' + tn + ' is already entered on ' + dmy(date) + ' as ' + open[0].id + '.' : 'Truck ' + tn + ' is already on trip ' + open[0].id + ', which is not unloaded yet.';
+      if (open.length) w.push(open[0].date === date ? 'Truck ' + tn + ' is already entered on ' + dmy(date) + ' as ' + open[0].id + '.' : 'Truck ' + tn + ' is already on trip ' + open[0].id + ', which is not unloaded yet.');
     }
-    var po = cur('po'), so = cur('so'), lw = n(cur('loadWt'));
-    if ('loadWt' in v && lw) { var same = T.filter(function (t) { return !t.cx && t.id !== id && t.L === lw && t.po === po; }); if (same.length) return 'Another truck (' + same[0].id + ') on this PO has the same loaded weight.'; }
-    if (lw && ('loadWt' in v || 'po' in v || 'so' in v || !orig)) {
-      var checks = [['po', po, PO], ['so', so, SO]];
-      for (var i = 0; i < checks.length; i++) {
-        var c = checks[i], o = c[2][c[1]];
-        if (!o) continue;
-        var counted = orig && orig[c[0]] === c[1] ? orig.L : 0;
-        var bal = orderStats(c[0], o).bal + counted - lw;
-        if (bal < 0) return o.id + ' would go over its quantity by ' + qt(-bal) + ' qtl.';
-      }
-    }
-    if (v.transporter && transporters().indexOf(normName(v.transporter)) < 0) return 'New transporter name "' + normName(v.transporter) + '". Check the spelling matches the one you normally use.';
-    return null;
+    var po = cur('po'), lw = n(cur('loadWt'));
+    if ('loadWt' in v && lw) { var same = T.filter(function (t) { return !t.cx && t.id !== id && t.L === lw && t.po === po; }); if (same.length) w.push('Another truck (' + same[0].id + ') on this PO has the same loaded weight.'); }
+    var q = qtyProblem(id, orig, v);
+    if (q) w.push(q);
+    if (v.transporter && transporters().indexOf(normName(v.transporter)) < 0) w.push('New transporter name "' + normName(v.transporter) + '". Check the spelling matches the one you normally use.');
+    return w.length ? w.join(' ') : null;
   };
+  f.qty = function (v) { return qtyProblem(id, orig, v); }; // used to stop staff (submitForm)
+  return f;
+}
+/* Order quantity window, the same rule as the server (checkQty_ in Code.js). PO-01-BCL of 10,000 qtl:
+   complete from 9,900 (no new trucks), limit 10,100. Returns the problem, or null. */
+function qtyProblem(id, orig, v) {
+  var cur = function (k) { return k in v ? v[k] : (orig ? orig[k] : ''); };
+  if (orig && orig.cx) return null;
+  var L = n(cur('loadWt')), tl = tol(), out = null, p = PO[cur('po')];
+  if (L > 1000) return null; // looks like kg: the weight check says so
+  var soId = cur('so');
+  if (p && p.poType === 'plant') soId = '';
+  else if (!soId && p && p.linkSO && SO[p.linkSO] && SO[p.linkSO].status !== 'Cancelled' && SO[p.linkSO].status !== 'Settled') soId = p.linkSO; // filled in by the PO
+  [['po', cur('po'), PO, 'loaded'], ['so', soId, SO, 'dispatched']].forEach(function (c) {
+    var o = c[1] && c[2][c[1]];
+    if (out || !o || !(n(o.qty) > 0) || o.status === 'Cancelled' || o.status === 'Settled') return;
+    var onIt = !!orig && orig[c[0]] === c[1];
+    var others = r2(sum(liveAll().filter(function (t) { return t.id !== id && t[c[0]] === c[1]; }), function (t) { return t.L; }));
+    var before = onIt ? n(orig.loadWt) : 0, limit = n(o.qty) * (1 + tl), full = n(o.qty) * (1 - tl);
+    if (L > before && others + L > limit + 0.005) out = c[1] + ' would go over its limit of ' + qt(limit) + ' qtl (' + qt(o.qty) + ' + ' + r2(tl * 100) + '%) by ' + qt(others + L - limit) + ' qtl.';
+    else if (!onIt && others >= full - 0.005) out = c[1] + ' is complete (' + qt(others) + ' of ' + qt(o.qty) + ' qtl ' + c[3] + ').';
+  });
+  return out;
 }
 function actNewTruck() {
   var recent = live().filter(function (t) { return PO[t.po] && PO[t.po].status !== 'Cancelled'; }).sort(sortT)[0];
@@ -1434,7 +1566,7 @@ function actAdvance(id) {
 }
 function actFPaid(id) {
   var t = getT(id);
-  var fields = [{ k: 'detention', label: 'Detention (₹) – only if you agree to pay', type: 'number', help: t.detDays > 0 ? t.trip + ' days on trip, ' + t.freeDays + ' free, so ' + t.detDays + ' extra day' + (t.detDays > 1 ? 's' : '') + '. Suggestion: ' + inr(t.detSuggest) + ' (' + inr(t.perDay) + '/day). Leave 0 if not paying.' : 'Trip within the ' + t.freeDays + ' free days. Leave 0.', fill: t.detSuggest || null, fillLabel: 'Add suggested ' + inr(t.detSuggest) }, { k: 'freightPaidDate', label: 'Payment date', type: 'date', req: 1 }, { k: 'freightUTR', label: 'UTR (bank reference)', req: 1, ph: 'e.g. SBIN52345678901', full: 1, help: 'Needed for every freight payment.' }];
+  var fields = [{ k: 'detention', label: 'Detention (₹) – only if you agree to pay', type: 'number', help: t.detDays > 0 ? t.trip + ' days on trip, ' + t.freeDays + ' free, so ' + t.detDays + ' extra day' + (t.detDays > 1 ? 's' : '') + '. Suggestion: ' + inr(t.detSuggest) + ' (' + inr(t.perDay) + '/day). Leave 0 if not paying.' : 'Trip within the ' + t.freeDays + ' free days. Leave 0.', fill: t.detSuggest || null, fillLabel: 'Add suggested ' + inr(t.detSuggest) }, { k: 'freightPaidDate', label: 'Payment date', type: 'date', req: 1 }, { k: 'freightUTR', label: 'UTR (bank reference, optional)', ph: 'e.g. SBIN52345678901', full: 1 }];
   openForm({ title: 'Pay freight', sub: esc(t.truck + ' · ' + t.id + ' · ' + (t.transporter || 'no transporter')) + '<br>Freight ' + inr(t.frAmt) + ' − shortage ' + inr(t.shortDed) + ' − advance ' + inr(t.A) + ' + detention' + (t.carryIn ? ' − ' + inr(t.carryIn) + ' extra advance from earlier trip' : '') + '<br>Net to pay <b id="fnet">' + inr(t.netPay) + '</b>' + (t.transporter ? bankBox(bankFor('transporter', t.transporter), 'transporter', t.transporter) : '<div class="mu">No transporter on this truck.</div>') + payPhotoInput('freightPay', t) + (t.carryOut ? '<br><span class="mu">Advance is more than freight: ' + inr(t.carryOut) + ' will be adjusted on this truck\u2019s next trip.</span>' : ''),
     fn: 'api_saveTruck', submit: 'Confirm freight paid', done: 'Freight marked paid', values: { detention: t.det || 0, freightPaidDate: D.today }, fields: fields,
     check: function (v) { return v.detention === '' ? 'Enter the detention amount (0 if none).' : null; },
@@ -1525,8 +1657,8 @@ function actBatch(kind) {
   $('#mform').innerHTML = '<h3>' + (plant ? 'Pay supplier for several trucks' : 'Pay freight for several trucks') + '</h3><div class="sub">Tick the trucks this one bank payment covers.</div>' +
     '<div class="fg"><div class="full"><label for="b_party">' + (plant ? 'Supplier' : 'Transporter') + '</label><select id="b_party">' + parties.map(function (p) { return '<option value="' + esc(p) + '">' + esc(p) + '</option>'; }).join('') + '</select></div></div>' +
     '<div id="b_bank"></div><div class="blist" id="b_list"></div><div class="btot" id="b_tot"></div>' +
-    '<div class="fg"><div><label for="b_amt">Amount paid (₹)</label><input id="b_amt" type="number" inputmode="decimal" step="any" min="0"></div><div><label for="b_date">Payment date</label><input id="b_date" type="date" value="' + D.today + '"></div>' +
-    '<div class="full"><label for="b_utr">UTR / bank reference</label><input id="b_utr" autocomplete="off" placeholder="e.g. SBIN52345678901"></div></div>' +
+    '<div class="fg"><div><label for="b_amt">Amount paid (₹)</label><input id="b_amt" type="number" inputmode="decimal" step="any" min="0"></div><div><label for="b_date">Payment date</label><input id="b_date" type="text" inputmode="numeric" maxlength="10" data-date="1" placeholder="DD-MM-YYYY" value="' + dmy(D.today) + '"></div>'+
+    '<div class="full"><label for="b_utr">UTR / bank reference' + (plant ? '' : ' (optional)') + '</label><input id="b_utr" autocomplete="off" placeholder="e.g. SBIN52345678901"></div></div>' +
     '<div class="msg warn" id="fwarn" hidden></div><div class="msg err" id="ferr" hidden></div><div class="foot"><button type="button" class="btn ghost" data-act="close">Go back</button><button type="submit" class="btn pri" id="fsave">Save payment</button></div>';
   $('#modal').hidden = false;
   var total = function () { var ids = [], q = 0, a = 0; document.querySelectorAll('#b_list input:checked').forEach(function (c) { var t = getT(c.value); ids.push(t.id); q += plant ? t.L : t.U; a += amt(t); }); return { ids: ids, q: r2(q), a: r2(a) }; };
@@ -1542,19 +1674,19 @@ function actBatch(kind) {
   $('#b_party').onchange = list; $('#b_list').onchange = show; $('#b_amt').oninput = function () { FORM.warned = false; $('#fwarn').hidden = true; };
   list();
   FORM.batch = function () {
-    var x = total(), a = $('#b_amt').value.trim(), utr = $('#b_utr').value.trim(), date = $('#b_date').value;
+    var x = total(), a = $('#b_amt').value.trim(), utr = $('#b_utr').value.trim(), date = ymd($('#b_date').value);
     showErr('');
     if (!x.ids.length) return showErr('Tick at least one truck.');
     if (a === '' || isNaN(Number(a))) return showErr('Enter the amount paid.');
-    if (!utr) return showErr('Enter the UTR / bank reference.');
-    if (!date) return showErr('Enter the payment date.');
+    if (!utr && plant) return showErr('Enter the UTR / bank reference.'); // optional for freight
+    if (!date || date.charAt(0) === '!') return showErr('Enter the payment date as DD-MM-YYYY.');
     var diff = r2(Number(a) - x.a);
     if (Math.abs(diff) > 1 && !FORM.warned) { FORM.warned = true; var el = $('#fwarn'); el.textContent = 'Ticked trucks come to ' + inr(x.a) + ' but the amount paid is ' + inr(Number(a)) + ' (difference ' + inr(diff) + '). Check the trucks, or tap Save again if it is correct.'; el.hidden = false; return; }
     // Shows as paid at once; the server confirms in the background (same id if it has to be sent again).
     var rid = newRid(), U = utr.toUpperCase();
     enqueue({ rid: rid, fn: 'api_payBatch', args: [kind, x.ids, date, utr, Number(a), rid], k: 'batch', data: { kind: kind, ids: x.ids, date: date, utr: U }, ids: x.ids.slice(),
-      label: trk(x.ids.length) + ' · ' + (plant ? 'supplier' : 'freight') + ' payment ' + U, reopen: FORM.act && FORM.act.a ? { a: FORM.act.a } : null });
-    closeForm(); toast(trk(x.ids.length) + ' marked paid · UTR ' + U);
+      label: trk(x.ids.length) + ' · ' + (plant ? 'supplier' : 'freight') + ' payment' + (U ? ' ' + U : ''), reopen: FORM.act && FORM.act.a ? { a: FORM.act.a } : null });
+    closeForm(); toast(trk(x.ids.length) + ' marked paid' + (U ? ' · UTR ' + U : ''));
   };
 }
 function actCancel(kind, id) {
@@ -1625,8 +1757,8 @@ function weightNeeds(v) {
 function bankFor(kind, name) { var key = kind + ': ' + normName(name); return (D && D.banks || []).filter(function (b) { return b.id === key; })[0] || null; }
 function bankBox(b, kind, name) {
   var can = !!P.bank, nm = esc(name);
-  if (!b) return '<div class="bank"><div class="mu">No bank details saved for ' + nm + ' yet.' + (can ? ' Add them once; they stay for the next payment.' : ' Ask the Owner or Accounts to add them.') + '</div>' +
-    (can ? '<div class="bank-act"><button type="button" class="btn sm" data-act="bankAdd" data-kind="' + kind + '" data-id="' + nm + '">+ Add bank details</button></div>' : '') + '</div>';
+  // Bank details are never needed to pay: when none are saved there is only a small link to add them.
+  if (!b) return can ? '<div class="bank-act" style="margin:8px 0"><button type="button" class="btn sm" data-act="bankAdd" data-kind="' + kind + '" data-id="' + nm + '">+ Add bank details</button></div>' : '';
   var cp = function (label, val, cls) { return '<div class="bk"><span>' + label + '</span><b class="' + (cls || '') + '">' + esc(val) + '</b><button type="button" class="cp" data-copy="' + esc(val) + '">Copy</button></div>'; };
   return '<div class="bank"><div class="bk-h">Pay to</div>' + cp('Account name', b.accName) + cp('Account no.', b.accNo, 'mono') + cp('IFSC', b.ifsc, 'mono') +
     '<div class="bank-act"><button type="button" class="btn sm" data-act="openBank">Open bank ↗</button>' + (can ? '<button type="button" class="btn sm ghost" data-act="bankAdd" data-kind="' + kind + '" data-id="' + nm + '">Edit details</button>' : '') + '</div></div>';
@@ -1711,13 +1843,14 @@ function loadReview(date, who) {
   call('api_getReview', date, who).then(function (r) { if (REVKEY !== key) return; REV = r; REVOK = key; render(); })
     .catch(function (e) { if (REVKEY !== key) return; REV = { err: e.message }; REVOK = key; render(); });
 }
-function revRow(e) {
+function dv(s) { return /^\d{4}-\d{2}-\d{2}$/.test(String(s)) ? dmy(s) : s; } // a logged value: dates shown as DD-MM-YYYY
+function revRow(e, i) {
   var lk = e.view ? lnk(e.view, e.record) : esc(e.record);
-  var ch = e.changes.length ? '<ul class="chg">' + e.changes.map(function (c) { return '<li><b>' + esc(c.f) + '</b> <s>' + esc(c.o) + '</s> → ' + esc(c.n) + '</li>'; }).join('') + '</ul>' : (e.details && e.details !== 'New record' ? '<div class="mu rd">' + esc(e.details) + '</div>' : '');
+  var ch = e.changes.length ? '<ul class="chg">' + e.changes.map(function (c) { return '<li><b>' + esc(c.f) + '</b> <s>' + esc(dv(c.o)) + '</s> → ' + esc(dv(c.n)) + '</li>'; }).join('') + '</ul>' : (e.details && e.details !== 'New record' ? '<div class="mu rd">' + esc(e.details) + '</div>' : '');
   var fl = e.flags.length ? '<div class="flags">' + e.flags.map(function (f) { return '<span class="tag no">' + esc(f) + '</span>'; }).join('') + '</div>' : '';
   var vf = '<label class="vfy"><input type="checkbox" data-ver="1" data-row="' + e.row + '" data-time="' + esc(e.time) + '" data-user="' + esc(e.user) + '" data-record="' + esc(e.record) + '"' + (e.verified ? ' checked' : '') + '> ' + (e.verified ? 'Checked by ' + esc(e.verifiedBy) : 'Checked') + '</label>';
   var what = e.action === 'Created' ? 'added' : e.action === 'Updated' ? 'changed' : e.action;
-  return '<div class="rv' + (e.flags.length ? ' flag' : '') + '"><div class="rh"><span class="mono">' + esc(String(e.time).slice(11)) + '</span> <b>' + esc(e.user) + '</b> · ' + esc(what) + ' ' + lk + '</div>' + fl + ch + vf + '</div>';
+  return '<div class="rv' + (e.flags.length ? ' flag' : '') + '"><div class="rh">' + (i != null ? '<span class="sn">' + (i + 1) + '.</span> ' : '') + '<span class="mono">' + esc(String(e.time).slice(11)) + '</span> <b>' + esc(e.user) + '</b> · ' + esc(what) + ' ' + lk + '</div>' + fl + ch + vf + '</div>';
 }
 function verifyItems(items, on) {
   if (BUSY) return;
@@ -1733,7 +1866,7 @@ function verifyAllShown() {
 function vActivity() {
   var date = REVDATE || yesterday(D.today), who = REVWHO || '', key = date + '|' + who;
   var head = '<div class="ph" style="margin-bottom:8px"><h1>Activity review</h1><div class="sub">Every entry and change for one day. Red flags come first. Tick each line once you have checked it.</div></div>';
-  var ctl = '<div class="bar"><label class="inl">Day <input type="date" id="rv_date" value="' + date + '" max="' + D.today + '"></label>' +
+  var ctl = '<div class="bar"><label class="inl">Day <input type="text" id="rv_date" inputmode="numeric" maxlength="10" data-date="1" placeholder="DD-MM-YYYY" style="width:120px" value="' + dmy(date) + '"></label>' +
     '<label class="inl">Person <select id="rv_who"><option value="">Everyone</option>' + (D.users || []).filter(function (u) { return u.active; }).map(function (u) { return '<option value="' + esc(u.id) + '"' + (u.id === who ? ' selected' : '') + '>' + esc(u.name || u.id) + '</option>'; }).join('') + '</select></label>' +
     '<span class="sp"></span><button type="button" class="btn sm" data-act="revRefresh">Refresh</button></div>';
   if (REVOK !== key) {
@@ -1807,7 +1940,7 @@ document.addEventListener('change', function (e) {
   var f = e.target;
   if (!f) return;
   if (f.type === 'file' && f.dataset && f.dataset.kind) { if (f.files && f.files[0]) uploadPhoto(f.dataset.kind, f.dataset.id, f.files[0]); f.value = ''; return; }
-  if (f.id === 'rv_date') { REVDATE = f.value; render(); return; }
+  if (f.id === 'rv_date') { var rd = ymd(f.value); if (!rd || rd.charAt(0) === '!' || rd > D.today) { toast('Type the day as DD-MM-YYYY (today or earlier).'); return; } REVDATE = rd; render(); return; }
   if (f.id === 'rv_who') { REVWHO = f.value; render(); return; }
   if (f.dataset && f.dataset.ver) { verifyItems([{ row: +f.dataset.row, time: f.dataset.time, user: f.dataset.user, record: f.dataset.record }], f.checked); }
 });
@@ -1839,6 +1972,8 @@ function runAct(a, id, kind) {
   LASTACT = { a: a, id: id, kind: kind };
   ({
     reopen: function () { reopenFail(id); }, dismiss: function () { FAILS.splice(+id, 1); showFails(); },
+    closedOrders: function () { SUBF.closed = 'orders'; QS = ''; go('closed'); },
+    exportOrders: function () { if (!LASTORDERS.length) { toast('No orders in this list.'); return; } doExport('orders', '', LASTORDERS.slice()); },
     newTruck: actNewTruck, editTruck: function () { actEditTruck(id); }, assign: function () { actAssign(id); }, load: function () { actLoad(id); },
     paid: function () { actPaid(id); }, unpaid: function () { actUnpaid(id); }, advance: function () { actAdvance(id); }, unload: function () { actUnload(id); },
     receive: function () { actReceive(id); }, fpaid: function () { actFPaid(id); }, funpaid: function () { actFUnpaid(id); },
@@ -1874,12 +2009,12 @@ $('#mform').addEventListener('input', function (e) {
   if (FORM && FORM.warned) { FORM.warned = false; $('#fwarn').hidden = true; }
   if (e.target.id && e.target.id.indexOf('f_') === 0 && document.getElementById('hint_' + e.target.id.slice(2))) weightHint(e.target.id.slice(2));
 });
-document.addEventListener('input', function (e) { if (e.target.id === 'q') { QS = e.target.value.trim().toLowerCase(); LIMIT = 60; var pos = e.target.selectionStart; render(); var q = $('#q'); if (q) { q.focus(); try { q.setSelectionRange(pos, pos); } catch (x) {} } } });
+document.addEventListener('input', function (e) { if (e.target.dataset && e.target.dataset.date) { fmtDateTyping(e.target, e); return; } if (e.target.id === 'q') { QS = e.target.value.trim().toLowerCase(); LIMIT = 60; var pos = e.target.selectionStart; render(); var q = $('#q'); if (q) { q.focus(); try { q.setSelectionRange(pos, pos); } catch (x) {} } } });
 document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !$('#modal').hidden && !BUSY) closeForm(); });
 try { window.matchMedia('(max-width:860px)').addEventListener('change', function () { render(); }); } catch (e) {}
 function setHH() { var h = document.querySelector('header'); if (h) document.documentElement.style.setProperty('--hh', h.offsetHeight + 'px'); }
 window.addEventListener('resize', setHH); setInterval(setHH, 1500); setHH();
-setInterval(function () { if (document.visibilityState === 'visible') sync(); }, 60000);
+setInterval(function () { if (document.visibilityState === 'visible') sync(); }, 15000); // others' changes show within ~15 s
 document.addEventListener('visibilitychange', function () { if (document.visibilityState === 'visible') { pump(); sync(); } });
 window.addEventListener('online', function () { pump(); });
 window.addEventListener('beforeunload', function (e) { if (Q.length) { e.preventDefault(); e.returnValue = 'Some entries are still saving.'; return e.returnValue; } });
