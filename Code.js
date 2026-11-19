@@ -811,7 +811,8 @@ function withLock_(fn, rid) {
   lock.waitLock(20000);
   REQ_.inLock = true;
   try {
-    REQ_.tabs = {}; REQ_.changed = {}; // read fresh data now that we hold the lock
+    REQ_.tabs = {}; REQ_.changed = {}; REQ_.v = null; // read fresh data now that we hold the lock
+    REQ_.pv = dataVersion_(); // the version before this save: the screen checks it was up to date
     if (rid && seenRid_(rid)) return readAll_();
     try { fn(); } finally { flushLog_(); if (dataChanged_()) bumpVersion_(); }
     if (rid) CacheService.getScriptCache().put('rid_' + rid, '1', 21600);
@@ -934,7 +935,7 @@ function shape_(po, so, trucks, can) {
    The screen merges them into what it already has, instead of downloading everything again. */
 function changes_() {
   var can = ME && ME.can ? ME.can : ROLES.Viewer, ch = REQ_.changed;
-  var out = { delta: true, v: dataVersion_(), today: today_(), syncedAt: nowStr_(),
+  var out = { delta: true, v: dataVersion_(), pv: REQ_.pv, today: today_(), syncedAt: nowStr_(),
     po: changedRows_(T.PO), so: changedRows_(T.SO), trucks: changedRows_(T.TR) };
   shape_(out.po, out.so, out.trucks, can);
   if (ch[T.NOTE]) out.notes = rows_(T.NOTE).reverse();

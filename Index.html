@@ -284,6 +284,17 @@ table.t tfoot td{font-weight:700;background:var(--soft)}
 .rd{font-size:12.5px;margin-top:4px}
 .vfy{display:inline-flex;align-items:center;gap:6px;margin-top:6px;font-size:13px;color:var(--mu)}
 .inl{display:inline-flex;align-items:center;gap:6px;font-size:13px;color:var(--mu)}
+/* fast saving: saves waiting for the server, and saves the server refused */
+.sync.busy::before{background:var(--wn)}
+.tag.pend{background:var(--infos);color:var(--info)}
+#fails{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(16px + env(safe-area-inset-bottom,0px));width:min(560px,calc(100% - 32px));max-height:45vh;overflow:auto;background:var(--card);border:1px solid #f2c4c0;border-left:4px solid var(--bad);border-radius:12px;box-shadow:0 8px 28px rgba(0,0,0,.18);z-index:65;padding:10px 12px}
+#fails .fh{font-weight:700;color:var(--bad);margin-bottom:2px}
+#fails .fl{display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:8px 0;border-top:1px solid var(--bd)}
+#fails .fh + .fl{border-top:0}
+#fails .fm{flex:1 1 220px;min-width:0;overflow-wrap:anywhere}
+#fails .fm b{display:block}
+#fails .fm span{display:block;color:var(--mu);font-size:13px}
+@media (max-width:860px){#fails{bottom:calc(var(--navh) + 10px + env(safe-area-inset-bottom,0px))} #fails .btn{min-height:44px}}
 </style>
 </head>
 <body>
@@ -301,6 +312,7 @@ table.t tfoot td{font-weight:700;background:var(--soft)}
 <button type="button" class="fab" id="fab" hidden data-act="newTruck">+ New truck</button>
 <div id="modal" hidden><form class="sheet" id="mform" novalidate autocomplete="off"></form></div>
 <div id="toast" hidden></div>
+<div id="fails" hidden></div>
 
 <script>
 var D = null, P = {}, T = [], PO = {}, SO = {}, BUSY = false, TOKEN = null, PENDING_IMPORT = null;
@@ -375,10 +387,10 @@ function lnk(view, id, text) { return id ? '<a href="#" data-go="' + esc(view) +
 /* ---------- server calls and login ---------- */
 function getTok() { try { return localStorage.getItem('ddgs_token'); } catch (e) { return TOKEN; } }
 function setTok(t) { TOKEN = t; try { if (t) localStorage.setItem('ddgs_token', t); else localStorage.removeItem('ddgs_token'); } catch (e) {} }
-var OPEN_CALLS = { api_authState: 1, api_login: 1, api_createOwner: 1 };
+var OPEN_CALLS = { api_authState: 1, api_login: 1, api_createOwner: 1, api_logout: 1 };
 function call(fn) {
   var args = Array.prototype.slice.call(arguments, 1);
-  if (!OPEN_CALLS[fn]) args.unshift(TOKEN || getTok());
+  if (!OPEN_CALLS[fn]) args.unshift({ t: TOKEN || getTok(), d: 1 }); // d: 1 = after a save, send back only what changed
   return new Promise(function (res, rej) {
     var r = google.script.run.withSuccessHandler(res).withFailureHandler(function (e) {
       var msg = (e && e.message) || String(e);
@@ -432,8 +444,11 @@ function load(silent) {
   if (BUSY) return;
   if (!(TOKEN || getTok())) { showAuth(); return; }
   if (!D) { var c = cacheGet(); if (c) { setData(c, true); $('#sync').textContent = 'Updating…'; } }
-  call('api_getData').then(function (d) {
-    setData(d);
+  // With a saved copy: only ask "anything new?" (a tiny answer when nothing changed). Without one: get everything.
+  var p = D && D.v ? call('api_sync', D.v, false) : call('api_getData');
+  p.then(function (d) {
+    if (d && d.same && D) { D.syncedAt = d.syncedAt; if (d.today) D.today = d.today; rebuild(); pump(); }
+    else setData(d);
     if (PENDING_IMPORT) { showImport(PENDING_IMPORT); PENDING_IMPORT = null; }
   }).catch(function (e) {
     if (silent) return;
@@ -441,17 +456,193 @@ function load(silent) {
     else if (!/log in/i.test(e.message)) $('#view').innerHTML = '<div class="note">Could not load data: ' + esc(e.message) + '. Reload the page to try again.</div>';
   });
 }
+/* All data from the server (or the saved copy when the app opens). */
 function setData(d, fromCache) {
-  if (!fromCache) cachePut(d);
-  D = d; P = d.perm || {}; PO = {}; SO = {};
-  d.po.forEach(function (p) { PO[p.id] = p; });
-  d.so.forEach(function (s) { SO[s.id] = s; });
-  T = CARRY(d.trucks.map(derive));
+  if (!fromCache) { cachePut(d); LASTFULL = Date.now(); }
+  D = d; P = d.perm || {};
+  rebuild();
+  if (!fromCache) pump();
+}
+/* Works out every truck again and redraws. D = what the server has confirmed; saves still waiting (Q) are laid on top. */
+function rebuild() {
+  if (!D) return;
+  PO = {}; SO = {}; PEND = {};
+  D.po.forEach(function (p) { PO[p.id] = p; });
+  D.so.forEach(function (s) { SO[s.id] = s; });
+  var list = D.trucks;
+  if (Q.length) {
+    var byId = {};
+    list = list.map(function (t) { var c = Object.assign({}, t); byId[c.id] = c; return c; });
+    Q.forEach(function (op) { opApply(op, byId, list); (op.ids || []).forEach(function (id) { PEND[id] = 1; }); });
+  }
+  T = CARRY(list.map(derive));
   flagIssues();
-  $('#sync').textContent = 'Synced ' + d.syncedAt.slice(11);
-  if (d.settings.company) $('#co').textContent = d.settings.company;
-  $('#who').innerHTML = d.me ? '<button type="button" class="who" data-act="me">' + esc((d.me.name || d.me.id).split(' ')[0]) + ' <span class="hide-phone">· ' + esc(d.me.role) + '</span></button>' : '';
+  showSync();
+  if (D.settings.company) $('#co').textContent = D.settings.company;
+  $('#who').innerHTML = D.me ? '<button type="button" class="who" data-act="me">' + esc((D.me.name || D.me.id).split(' ')[0]) + ' <span class="hide-phone">· ' + esc(D.me.role) + '</span></button>' : '';
   render();
+  showFails();
+}
+/* A reply from a save: only what changed (merged into D), or all data (replaces D). */
+function applyResult(d) {
+  if (!d || typeof d !== 'object' || !D) return;
+  if (!d.delta) { if (d.trucks && d.po && d.settings) setData(d); return; }
+  [['trucks', D.trucks], ['po', D.po], ['so', D.so]].forEach(function (x) {
+    var list = x[1], at = {};
+    list.forEach(function (r, i) { at[r.id] = i; });
+    (d[x[0]] || []).forEach(function (r) { if (at.hasOwnProperty(r.id)) list[at[r.id]] = r; else { at[r.id] = list.length; list.push(r); } });
+  });
+  if (d.notes) D.notes = d.notes;
+  if (d.banks) D.banks = d.banks;
+  if (d.users) D.users = d.users;
+  if (d.today) D.today = d.today;
+  if (d.syncedAt) D.syncedAt = d.syncedAt;
+  if (D.v && D.v === d.pv) D.v = d.v; // only if nobody else saved in between; otherwise the next check fetches everything
+  cachePut(D);
+  rebuild();
+}
+function showSync() {
+  var el = $('#sync');
+  if (!el || !D) return;
+  el.classList.toggle('busy', Q.length > 0);
+  el.textContent = Q.length ? (Q[0].tries ? 'No internet? ' + Q.length + ' waiting to save' : 'Saving ' + Q.length + '…') : 'Synced ' + String(D.syncedAt || '').slice(11);
+}
+
+/* ---------- fast saving ----------
+   Truck saves, customer payments and batch payments show on the screen at once and go to the server in the
+   background, one after another in the order they were made. If the internet drops, they wait and try again.
+   If the server refuses one (a rule), it drops out (the screen goes back to the server's data) and is listed
+   at the bottom with "Open again", which opens the same form with what was typed. */
+var Q = [], QRUN = false, FAILS = [], PEND = {}, SYNCING = false, LASTFULL = 0, LASTACT = null;
+var RETRY_RE = /NetworkError|Connection failure|HTTP 0|server error occurred|timed out|Lock timeout|Too many simultaneous|invoked too many times|Exceeded maximum execution time/i;
+function newRid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 10); }
+function saveQ() {
+  try { localStorage.setItem('ddgs_q', JSON.stringify(Q.map(function (o) { return { rid: o.rid, fn: o.fn, args: o.args, k: o.k, data: o.data, ids: o.ids, label: o.label, user: o.user, at: o.at, reopen: o.reopen }; }))); } catch (e) {}
+}
+/* Saves still waiting when the app was closed go out when it opens again (the server ignores one it already has).
+   Older than 5 hours: not sent, only listed so someone checks them. */
+function loadQ() {
+  var list = [];
+  try { list = JSON.parse(localStorage.getItem('ddgs_q') || '[]') || []; } catch (e) {}
+  var old = Date.now() - 5 * 3600e3;
+  list.forEach(function (o) {
+    if (!(o.at > old)) FAILS.push({ label: o.label, msg: 'Was still saving when the app was closed. Check it and enter it again if it is missing.', reopen: o.reopen });
+    else { o.tries = 0; Q.push(o); }
+  });
+  saveQ();
+}
+function enqueue(op) {
+  op.user = D.me.id; op.at = Date.now(); op.tries = 0;
+  Q.push(op); saveQ(); rebuild(); pump();
+}
+function pump() {
+  if (QRUN || !Q.length || !D || !D.me) return;
+  var op = Q[0];
+  if (op.user !== D.me.id) {
+    Q.shift(); saveQ();
+    FAILS.push({ label: op.label, msg: 'Not sent: ' + op.user + ' entered it on this device before ' + D.me.id + ' logged in. Check it and enter it again if needed.' });
+    rebuild(); pump(); return;
+  }
+  QRUN = true; showSync();
+  call.apply(null, [op.fn].concat(op.args)).then(function (d) {
+    QRUN = false; Q.shift(); saveQ();
+    applyResult(d);
+    pump();
+  }).catch(function (e) {
+    QRUN = false;
+    var m = (e && e.message) || String(e);
+    if (/log in again/i.test(m)) { showSync(); return; } // stays waiting, goes out after logging in again
+    if (RETRY_RE.test(m)) { op.tries++; showSync(); setTimeout(pump, Math.min(60000, 2000 * op.tries)); return; }
+    Q.shift(); saveQ();
+    FAILS.push({ label: op.label, msg: m, reopen: op.reopen });
+    rebuild(); pump();
+  });
+}
+/* How a waiting save looks on screen until the server confirms it. */
+function opApply(op, byId, list) {
+  var d = op.data || {}, t = byId[d.id];
+  if (op.k === 'truck' && t) { Object.assign(t, d.patch); if (!P.money) delete t._st; }
+  else if (op.k === 'newtruck') { var x = Object.assign({ id: d.id, status: '', _new: 1 }, d.patch); byId[d.id] = x; list.push(x); }
+  else if (op.k === 'pay' && t) {
+    var a = n(d.amt), dd = n(d.ded);
+    t.received = r2(n(t.received) + a); if (a) t.receivedDate = d.date;
+    if (dd) t.deduction = r2(n(t.deduction) + dd);
+  } else if (op.k === 'batch') (d.ids || []).forEach(function (id) {
+    var b = byId[id]; if (!b) return;
+    if (d.kind === 'plant') Object.assign(b, { plantPaid: true, plantPaidDate: d.date, plantUTR: d.utr });
+    else Object.assign(b, { freightPaid: true, freightPaidDate: d.date, freightUTR: d.utr });
+  });
+}
+/* A truck form (new truck or any change to one) as a waiting save. p = what the form sends to the server. */
+function fastTruck(p) {
+  var isNew = !p.id, rid = newRid(), id = p.id || 'NEW-' + rid.slice(-4).toUpperCase(), t = isNew ? null : getT(id);
+  if (!isNew && !t) return null;
+  var patch = {};
+  Object.keys(p).forEach(function (k) { if (k !== 'id' && k !== '_force') patch[k] = p[k]; });
+  if ('truck' in patch) patch.truck = normTruck(patch.truck);
+  if ('transporter' in patch) patch.transporter = normName(patch.transporter);
+  if (isNew) { // the same defaults the server fills in
+    if (!patch.placedOn) patch.placedOn = D.today;
+    if (!patch.date) patch.date = patch.placedOn;
+    var po = PO[patch.po], ls = po && po.linkSO && SO[po.linkSO];
+    if (po && po.poType === 'plant') patch.so = '';
+    else if (!patch.so && ls && ls.status !== 'Cancelled' && ls.status !== 'Settled') patch.so = ls.id;
+  }
+  return { rid: rid, fn: 'api_saveTruck', args: [Object.assign({}, p, { _rid: rid })], k: isNew ? 'newtruck' : 'truck', data: { id: id, patch: patch }, ids: [id],
+    label: (isNew ? patch.truck : t.truck) + ' · ' + (FORM && FORM.title || 'Save') };
+}
+function fastPay(id, v) {
+  var t = getT(id), rid = newRid();
+  return { rid: rid, fn: 'api_addPayment', args: [id, v.amt, v.receivedDate, v.deduction, v.deductionNote, rid], k: 'pay',
+    data: { id: id, amt: v.amt, ded: v.deduction, date: v.receivedDate }, ids: [id], label: (t ? t.truck : id) + ' · Payment from customer' };
+}
+/* Other saves (orders, cancel, users…) still wait for the server, but go after the waiting truck saves, so the order stays right. */
+function callSafe() {
+  var a = arguments, t0 = Date.now();
+  return new Promise(function (res, rej) {
+    (function go() {
+      if ((Q.length || QRUN) && !(Q[0] && Q[0].tries) && Date.now() - t0 < 15000) { setTimeout(go, 250); return; }
+      call.apply(null, a).then(res, rej);
+    })();
+  });
+}
+/* Every minute and when the app comes back to the front: "anything new?". Tiny when nothing changed;
+   all data when something did, and at least every 10 minutes. */
+function sync() {
+  if (!D || SYNCING || QRUN || Q.length || BUSY || !$('#modal').hidden || (document.activeElement && document.activeElement.id === 'q')) return;
+  SYNCING = true;
+  call('api_sync', D.v || '', Date.now() - LASTFULL > 10 * 60e3).then(function (r) {
+    SYNCING = false;
+    if (!r || !D) return;
+    if (r.same) { D.syncedAt = r.syncedAt; if (r.today && r.today !== D.today) { D.today = r.today; rebuild(); } else showSync(); return; }
+    if (r.trucks && r.po) setData(r);
+  }).catch(function () { SYNCING = false; });
+}
+function pendTag(t) { return PEND[t.id] ? '<span class="tag pend">Saving…</span> ' : ''; }
+function showFails() {
+  var el = $('#fails');
+  if (!el) return;
+  el.hidden = !FAILS.length;
+  el.innerHTML = !FAILS.length ? '' : '<div class="fh">Not saved (' + FAILS.length + ')</div>' + FAILS.map(function (f, i) {
+    return '<div class="fl"><div class="fm"><b>' + esc(f.label) + '</b><span>' + esc(f.msg) + '</span></div>' +
+      (f.reopen && f.reopen.a ? '<button type="button" class="btn sm" data-act="reopen" data-id="' + i + '">Open again</button>' : '') +
+      '<button type="button" class="btn sm ghost" data-act="dismiss" data-id="' + i + '">OK</button></div>';
+  }).join('');
+}
+/* Opens the same form again with what was typed, so a refused save can be corrected. */
+function reopenFail(i) {
+  var f = FAILS.splice(+i, 1)[0];
+  showFails();
+  if (!f || !f.reopen || !f.reopen.a) return;
+  runAct(f.reopen.a, f.reopen.id, f.reopen.kind);
+  var v = f.reopen.vals;
+  if (!FORM || !v) return;
+  Object.keys(v).forEach(function (k) {
+    var el = document.getElementById('f_' + k);
+    if (!el || el.readOnly) return;
+    if (el.type === 'checkbox') el.checked = !!v[k]; else el.value = v[k];
+    if (document.getElementById('hint_' + k)) weightHint(k);
+  });
 }
 
 function derive(t) {
@@ -707,7 +898,7 @@ function vDispatch() {
     var go2 = t.plantPO ? '<span class="tag own">Own plant</span> ' + esc(shortFirm(plantFirm())) : t.so ? lnk('buyer', t.buyer) + '<small>' + lnk('so', t.so) + (t.ownBuyer ? ' · group company' : '') + '</small>' : (lv && P.trucks ? '<button class="pill add" type="button" data-act="assign" data-id="' + esc(t.id) + '">+ Choose customer</button>' : '—');
     var row = '<div class="td">' + lnk('truck', t.id) + ntsm('truck', t.id) + '<small>' + dmy(t.date) + '</small></div>' +
       '<div class="td" data-l="PO">' + lnk('po', t.po) + ' ' + firmTag(t.firm) + '<small>' + lnk('plant', t.plant) + '</small></div>' +
-      '<div class="td wide" data-l="Truck"><b>' + esc(t.truck) + '</b> ' + (t.noSlip ? '<span class="tag no">No slip</span> ' : '') + (t.billOk ? '<span class="tag ok" title="Slip weight matches supplier invoice">Checked</span> ' : '') + (t.issues.some(function (i) { return i.bad; }) ? '<span class="tag" title="' + esc(t.issues.map(function (i) { return i.msg; }).join(' · ')) + '">Check</span>' : '') +
+      '<div class="td wide" data-l="Truck"><b>' + esc(t.truck) + '</b> ' + pendTag(t) + (t.noSlip ? '<span class="tag no">No slip</span> ' : '') + (t.billOk ? '<span class="tag ok" title="Slip weight matches supplier invoice">Checked</span> ' : '') + (t.issues.some(function (i) { return i.bad; }) ? '<span class="tag" title="' + esc(t.issues.map(function (i) { return i.msg; }).join(' · ')) + '">Check</span>' : '') +
         '<div style="margin-top:3px"><span class="stage ' + (t.st < 0 ? 'sx' : 's' + t.st) + '">' + t.stage + '</span>' + (t.L && !t.U && t.detDays > 0 && !t.fBuyer ? ' <span class="tag wn">' + t.trip + ' days</span>' : '') + '</div></div>' +
       '<div class="td wide" data-l="Going to">' + go2 + '</div>' +
       '<div class="td r num" data-l="Loaded">' + (t.L ? '<b>' + qt(t.L) + '</b>' + (t.U ? '<small>unl. ' + qt(t.U) + '</small>' : '') : (lv && P.trucks ? '<button class="pill wait" type="button" data-act="load" data-id="' + esc(t.id) + '">+ Weight</button>' : '—')) + '</div>';
@@ -770,7 +961,7 @@ function truckCard(t) {
     else if (t.L) money = '<div class="money hide-phone"><div class="mu">Supplier</div><b>' + inr(t.purTot) + '</b> ' + (t.plantPaid ? '<span class="stage s5">Paid</span>' : '') + '</div>';
   }
   return '<div class="tc ' + (t.cx ? 'cx' : '') + '"><div class="info" data-go="truck" data-id="' + esc(t.id) + '">' +
-    '<div class="l1"><span class="truck">' + esc(t.truck) + '</span>' + (t.noSlip ? '<span class="tag no">No slip</span>' : '') + (t.billOk ? '<span class="tag ok">Checked</span>' : '') + '<span class="stage ' + (t.st < 0 ? 'sx' : 's' + t.st) + '">' + t.stage + '</span>' + (bad ? '<span class="tag">Check</span>' : '') + (t.L && !t.U && t.detDays > 0 && !t.fBuyer ? '<span class="tag wn">' + t.trip + ' days</span>' : '') + '</div>' +
+    '<div class="l1"><span class="truck">' + esc(t.truck) + '</span>' + pendTag(t) + (t.noSlip ? '<span class="tag no">No slip</span>' : '') + (t.billOk ? '<span class="tag ok">Checked</span>' : '') + '<span class="stage ' + (t.st < 0 ? 'sx' : 's' + t.st) + '">' + t.stage + '</span>' + (bad ? '<span class="tag">Check</span>' : '') + (t.L && !t.U && t.detDays > 0 && !t.fBuyer ? '<span class="tag wn">' + t.trip + ' days</span>' : '') + '</div>' +
     '<div class="l2">' + esc(t.plant || t.po) + ' → ' + (t.plantPO ? esc(shortFirm(plantFirm())) + ' plant' : t.so ? esc(t.buyer || t.so) : '<span class="mu">no customer yet</span>') + (t.L ? ' · <b>' + qt(t.U || t.L) + '</b> qtl' : '') + '</div>' +
     '<div class="l3"><span>' + esc(t.id) + '</span>' + firmTag(t.firm) + '<span>' + dmy(t.date) + '</span>' + (t.transporter ? '<span>' + esc(t.transporter) + '</span>' : '') + '</div></div>' + money +
     '<div class="acts">' + (ns ? '<button type="button" class="next ' + (ns.m ? 'money' : '') + '" data-act="' + ns.a + '" data-id="' + esc(t.id) + '">' + ns.l + '</button>' : (t.cx ? '' : '<span class="done">' + (t.st === 6 ? '✓ Closed' : '✓ Done') + '</span>')) +
@@ -783,7 +974,7 @@ function vTruck(id) {
   if (!t) return pageHead('Not found') + '<div class="panel empty">Truck ' + esc(id) + ' was not found.</div>';
   var ns = nextStep(t);
   var row = function (l, v) { return '<div><dt>' + l + '</dt><dd>' + v + '</dd></div>'; };
-  var h = pageHead(esc(t.truck) + ' <span class="stage ' + (t.st < 0 ? 'sx' : 's' + t.st) + '" style="vertical-align:4px">' + t.stage + '</span>', esc(t.id) + ' · dispatched ' + dmy(t.date), '', newTab('truck', t.id));
+  var h = pageHead(esc(t.truck) + ' <span class="stage ' + (t.st < 0 ? 'sx' : 's' + t.st) + '" style="vertical-align:4px">' + t.stage + '</span> ' + pendTag(t), esc(t.id) + ' · dispatched ' + dmy(t.date), '', newTab('truck', t.id));
   if (ns) h += '<div style="margin-bottom:12px"><button type="button" class="next ' + (ns.m ? 'money' : '') + '" style="width:100%;max-width:360px" data-act="' + ns.a + '" data-id="' + esc(t.id) + '">' + ns.l + '</button></div>';
   if (t.issues.length) h += '<div class="panel" style="margin-bottom:12px">' + t.issues.map(function (i) { return '<div class="prob"><span class="dot" style="' + (i.bad ? '' : 'background:var(--wn)') + '"></span><span>' + esc(i.msg) + '</span></div>'; }).join('') + '</div>';
   h += '<h2>Trip</h2><dl class="dl">' + (multiFirm() ? row('Firm', esc(t.firm)) : '') + row('Purchase order', lnk('po', t.po)) + row('Supplier', lnk('plant', t.plant)) +
@@ -1043,6 +1234,8 @@ function vUsers() {
 var FORM = null;
 function openForm(cfg) {
   FORM = cfg; FORM.warned = false;
+  FORM.act = FORM.act || LASTACT; // which button opened it, for "Open again"
+  if (!FORM.fast && !FORM.custom && FORM.fn === 'api_saveTruck') FORM.fast = fastTruck; // truck saves show at once
   var v = cfg.values || {};
   var h = '<h3>' + esc(cfg.title) + '</h3>' + (cfg.sub ? '<div class="sub">' + cfg.sub + '</div>' : '') + '<div class="fg">';
   (cfg.fields || []).forEach(function (f) {
@@ -1121,10 +1314,19 @@ function submitForm(ev) {
   }
   var payload = FORM.build ? FORM.build(send) : send;
   if (FORM.warned && FORM.fn === 'api_saveTruck' && D.me.role === 'Owner' && payload && typeof payload === 'object') payload._force = true;
+  if (FORM.fast) { // shows on screen at once; the server confirms in the background
+    var op = FORM.fast(payload, vals);
+    if (op) {
+      var act = FORM.act || {}, msg = op.toast || FORM.done || 'Saved';
+      op.reopen = act.a ? { a: act.a, id: act.id, kind: act.kind, vals: vals } : null;
+      closeForm(); enqueue(op); toast(msg);
+      return;
+    }
+  }
   BUSY = true; $('#fsave').disabled = true; $('#fsave').textContent = 'Saving…'; showErr('');
   var done = FORM.done || 'Saved';
-  var p = FORM.custom ? FORM.custom(payload) : call(FORM.fn, payload);
-  p.then(function (d) { BUSY = false; closeForm(); if (d && d.trucks) setData(d); toast(done); })
+  var p = FORM.custom ? FORM.custom(payload) : callSafe(FORM.fn, payload);
+  p.then(function (d) { BUSY = false; closeForm(); applyResult(d); toast(done); })
     .catch(function (e) { BUSY = false; if (!FORM) return; $('#fsave').disabled = false; $('#fsave').textContent = FORM.submit || 'Save'; showErr(e.message || String(e)); });
 }
 function openMenu(title, sub, items) {
@@ -1210,6 +1412,7 @@ function actAssign(id) {
 function actLoad(id) {
   var t = getT(id);
   quick(id, 'Dispatch weight', esc(t.truck + ' · ' + t.id), [{ k: 'loadWt', label: 'Weight on the slip', type: 'weight', req: 1, full: 1 }, { k: 'date', label: 'Date out (from the slip)', type: 'date', req: 1 }, { k: 'transporter', label: 'Transporter', list: transporters(), req: 1 }, { k: 'frate', label: 'Freight rate per qtl', type: 'number' }, { k: 'slip', label: 'RST / Weighment Slip No.' }], 'Weight saved', Object.assign({}, t, { date: t.date || D.today, frate: t.frate === '' || t.frate == null ? (D.settings.defaultFreightRate || '') : t.frate }), truckWarn(id, t), weightNeeds);
+  FORM.onlyChanged = false; // the suggested freight rate and date are sent as shown (before, keeping the suggested 85 was refused)
 }
 function actUnload(id) {
   var t = getT(id);
@@ -1255,7 +1458,7 @@ function actReceive(id) {
       return null;
     },
     warn: function (v) { var over = n(v.amt) + n(v.deduction) - t.bal; return over > 1 ? 'This is ' + inr(over) + ' more than the balance.' : null; },
-    custom: function (v) { return call('api_addPayment', id, v.amt, v.receivedDate, v.deduction, v.deductionNote); }
+    fast: function (v) { return fastPay(id, v); }
   });
 }
 function actOrder(kind, id) {
@@ -1304,12 +1507,12 @@ function actBill(id) {
     fn: 'api_saveTruck', done: 'Supplier invoice saved', values: { billNo: t.billNo || '', billQty: t.billQ === null ? '' : t.billQ },
     fields: [{ k: 'billNo', label: 'Bill / invoice no.', req: 1 }, { k: 'billQty', label: 'Quantity on the bill', type: 'weight', req: 1 }],
     build: function (v) { return { id: id, billNo: v.billNo, billQty: v.billQty }; },
-    custom: function (v) { return call('api_saveTruck', v).then(function (d) { var x = d.trucks.filter(function (r) { return r.id === id; })[0]; if (x && Math.abs(n(x.billQty) - n(x.loadWt)) >= 0.005) setTimeout(function () { toast('Bill ' + qt(x.billQty) + ' does not match slip ' + qt(x.loadWt) + '. Marked red.'); }, 50); return d; }); } });
+    fast: function (p) { var op = fastTruck(p); if (op && Math.abs(n(p.billQty) - n(t.loadWt)) >= 0.005) op.toast = 'Bill ' + qt(p.billQty) + ' does not match slip ' + qt(t.loadWt) + '. Marked red.'; return op; } });
 }
 function actReturned(id) {
   var t = getT(id);
   openForm({ title: 'Returned empty?', sub: esc(t.truck + ' · ' + t.id + ' · ' + t.plant) + '<br>The truck stays on record as Returned and stops counting against ' + esc(t.po) + '.', danger: 1, submit: 'Yes, mark returned', done: 'Marked returned',
-    fields: [{ k: 'reason', label: 'Reason', full: 1, ph: 'e.g. waited 3 days, not called inside', req: 1 }], custom: function (v) { return call('api_returned', id, v.reason); } });
+    fields: [{ k: 'reason', label: 'Reason', full: 1, ph: 'e.g. waited 3 days, not called inside', req: 1 }], custom: function (v) { return callSafe('api_returned', id, v.reason); } });
 }
 function actBatch(kind) {
   var plant = kind === 'plant';
@@ -1318,7 +1521,7 @@ function actBatch(kind) {
   var party = function (t) { return plant ? t.plant : (t.transporter || '(none)'); };
   var parties = names(elig.map(function (t) { return { p: party(t) }; }), 'p');
   if (!parties.length) { toast(plant ? 'No loaded trucks waiting for supplier payment.' : 'No unloaded trucks waiting for freight payment.'); return; }
-  FORM = { batchKind: kind, warned: false };
+  FORM = { batchKind: kind, warned: false, act: LASTACT };
   $('#mform').innerHTML = '<h3>' + (plant ? 'Pay supplier for several trucks' : 'Pay freight for several trucks') + '</h3><div class="sub">Tick the trucks this one bank payment covers.</div>' +
     '<div class="fg"><div class="full"><label for="b_party">' + (plant ? 'Supplier' : 'Transporter') + '</label><select id="b_party">' + parties.map(function (p) { return '<option value="' + esc(p) + '">' + esc(p) + '</option>'; }).join('') + '</select></div></div>' +
     '<div id="b_bank"></div><div class="blist" id="b_list"></div><div class="btot" id="b_tot"></div>' +
@@ -1347,18 +1550,20 @@ function actBatch(kind) {
     if (!date) return showErr('Enter the payment date.');
     var diff = r2(Number(a) - x.a);
     if (Math.abs(diff) > 1 && !FORM.warned) { FORM.warned = true; var el = $('#fwarn'); el.textContent = 'Ticked trucks come to ' + inr(x.a) + ' but the amount paid is ' + inr(Number(a)) + ' (difference ' + inr(diff) + '). Check the trucks, or tap Save again if it is correct.'; el.hidden = false; return; }
-    BUSY = true; $('#fsave').disabled = true; $('#fsave').textContent = 'Saving…';
-    call('api_payBatch', kind, x.ids, date, utr, Number(a)).then(function (d) { BUSY = false; closeForm(); setData(d); toast(trk(x.ids.length) + ' marked paid · UTR ' + utr.toUpperCase()); })
-      .catch(function (e) { BUSY = false; if (!FORM) return; $('#fsave').disabled = false; $('#fsave').textContent = 'Save payment'; showErr(e.message || String(e)); });
+    // Shows as paid at once; the server confirms in the background (same id if it has to be sent again).
+    var rid = newRid(), U = utr.toUpperCase();
+    enqueue({ rid: rid, fn: 'api_payBatch', args: [kind, x.ids, date, utr, Number(a), rid], k: 'batch', data: { kind: kind, ids: x.ids, date: date, utr: U }, ids: x.ids.slice(),
+      label: trk(x.ids.length) + ' · ' + (plant ? 'supplier' : 'freight') + ' payment ' + U, reopen: FORM.act && FORM.act.a ? { a: FORM.act.a } : null });
+    closeForm(); toast(trk(x.ids.length) + ' marked paid · UTR ' + U);
   };
 }
 function actCancel(kind, id) {
   openForm({ title: 'Cancel ' + (kind === 'truck' ? 'truck ' + (getT(id) || {}).truck : id) + '?', sub: 'It stays in the sheet marked Cancelled and stops counting in totals. You can restore it later.', danger: 1, submit: 'Yes, cancel it', done: 'Cancelled',
-    fields: [{ k: 'reason', label: 'Reason', full: 1, ph: 'e.g. duplicate entry', req: 1 }], custom: function (v) { return call('api_cancel', kind, id, v.reason); } });
+    fields: [{ k: 'reason', label: 'Reason', full: 1, ph: 'e.g. duplicate entry', req: 1 }], custom: function (v) { return callSafe('api_cancel', kind, id, v.reason); } });
 }
 function actRestore(kind, id) {
   BUSY = true; closeForm();
-  call('api_restore', kind, id).then(function (d) { BUSY = false; setData(d); toast('Restored'); }).catch(function (e) { BUSY = false; toast(e.message || 'Could not restore'); });
+  callSafe('api_restore', kind, id).then(function (d) { BUSY = false; applyResult(d); toast('Restored'); }).catch(function (e) { BUSY = false; toast(e.message || 'Could not restore'); });
 }
 function actUser(id) {
   var u = id ? D.users.filter(function (x) { return x.id === id; })[0] : { role: 'Dispatch', active: true };
@@ -1378,7 +1583,9 @@ function actMe() {
     check: function (v) { return v.pw !== v.pw2 ? 'The new passwords do not match.' : v.pw.length < 6 ? 'New password must be at least 6 characters.' : null; },
     custom: function (v) { return call('api_changePassword', v.old, v.pw); } });
 }
-function logout() { var t = TOKEN || getTok(); closeForm(); cacheClear(); setTok(null); ROUTE = { v: 'home' }; HIST = []; QS = ''; FILTER = 'todo'; FIRM = 'all'; call('api_logout', t).catch(function () {}); showAuth('You are logged out.'); }
+function logout() {
+  if (Q.length) { closeForm(); toast('Wait a moment: ' + (Q.length === 1 ? '1 entry is' : Q.length + ' entries are') + ' still saving.'); return; }
+  var t = TOKEN || getTok(); closeForm(); cacheClear(); setTok(null); ROUTE = { v: 'home' }; HIST = []; QS = ''; FILTER = 'todo'; FIRM = 'all'; call('api_logout', t).catch(function () {}); showAuth('You are logged out.'); }
 function doExport(kind, key, ids) {
   if (BUSY) return;
   BUSY = true; closeForm(); toast('Preparing Excel… this takes a few seconds');
@@ -1473,7 +1680,7 @@ function actBank(kind, name) {
   openForm({ title: 'Bank details: ' + name, sub: 'Saved once for this ' + (k === 'supplier' ? 'supplier' : 'transporter') + '. Only the Owner and Accounts can see them.', submit: 'Save bank details', done: 'Bank details saved', fn: 'api_saveBank',
     values: { accName: b.accName || '', accNo: b.accNo || '', ifsc: b.ifsc || '' },
     fields: [{ k: 'accName', label: 'Account name', req: 1, full: 1 }, { k: 'accNo', label: 'Account number', req: 1, ph: '6 to 20 digits' }, { k: 'ifsc', label: 'IFSC', req: 1, ph: 'SBIN0001234' }],
-    custom: function (v) { return call('api_saveBank', k, name, v.accName, v.accNo, v.ifsc); } });
+    custom: function (v) { return callSafe('api_saveBank', k, name, v.accName, v.accNo, v.ifsc); } });
 }
 function shrinkImage(file, cb) {
   var img = new Image(), url = URL.createObjectURL(file);
@@ -1493,7 +1700,7 @@ function uploadPhoto(kind, id, file) {
   shrinkImage(file, function (err, b64) {
     if (err) { toast(err.message); return; }
     BUSY = true;
-    call('api_savePhoto', id, kind, b64, 'image/jpeg').then(function (d) { BUSY = false; setData(d); toast('Photo saved'); })
+    callSafe('api_savePhoto', id, kind, b64, 'image/jpeg').then(function (d) { BUSY = false; applyResult(d); toast('Photo saved'); })
       .catch(function (e) { BUSY = false; toast(e.message); });
   });
 }
@@ -1613,6 +1820,7 @@ document.addEventListener('click', function (e) {
   if (b.hasAttribute('data-flow')) { FLOWSEL = b.dataset.flow === FLOWSEL ? '' : b.dataset.flow; LIMIT = 60; render(); return; }
   if (b.dataset.fill) { var inp = document.getElementById(b.dataset.fill); inp.value = b.dataset.val; inp.dispatchEvent(new Event('input', { bubbles: true })); return; }
   if (b.tagName === 'A' && b.target === '_blank') return;
+  if (/^NEW-/.test(b.dataset.id || '') && (b.dataset.go || b.dataset.act)) { e.preventDefault(); toast('This truck is still saving. Try again in a moment.'); return; }
   if (b.dataset.go) { e.preventDefault(); closeForm(); go(b.dataset.go, b.dataset.id); return; }
   if (b.dataset.firm) { FIRM = b.dataset.firm; LIMIT = 60; render(); return; }
   if (b.dataset.filter && !b.dataset.act) { FILTER = b.dataset.filter; if (ROUTE.v !== 'dispatch') { QS = ''; go('dispatch'); } else { LIMIT = 60; render(); } return; }
@@ -1624,16 +1832,22 @@ document.addEventListener('click', function (e) {
   if (a === 'back') { back(); return; }
   if (!D) return;
   if (FORM && FORM.noSave && a !== 'menu' && a !== 'ordermenu') closeForm();
+  runAct(a, id, kind);
+});
+/* Runs the action of a button. Also used by "Open again" on a refused save. */
+function runAct(a, id, kind) {
+  LASTACT = { a: a, id: id, kind: kind };
   ({
+    reopen: function () { reopenFail(id); }, dismiss: function () { FAILS.splice(+id, 1); showFails(); },
     newTruck: actNewTruck, editTruck: function () { actEditTruck(id); }, assign: function () { actAssign(id); }, load: function () { actLoad(id); },
     paid: function () { actPaid(id); }, unpaid: function () { actUnpaid(id); }, advance: function () { actAdvance(id); }, unload: function () { actUnload(id); },
     receive: function () { actReceive(id); }, fpaid: function () { actFPaid(id); }, funpaid: function () { actFUnpaid(id); },
     newPO: function () { actOrder('po'); }, newSO: function () { actOrder('so'); }, editPO: function () { actOrder('po', id); }, editSO: function () { actOrder('so', id); },
     addNote: function () {
       var t = $('#n_text').value.trim(); if (!t) { toast('Write the note first.'); return; }
-      BUSY = true; call('api_addNote', $('#n_area').value, t).then(function (d) { BUSY = false; setData(d); toast('Note added'); }).catch(function (e) { BUSY = false; toast(e.message); });
+      BUSY = true; callSafe('api_addNote', $('#n_area').value, t).then(function (d) { BUSY = false; applyResult(d); toast('Note added'); }).catch(function (e) { BUSY = false; toast(e.message); });
     },
-    noteStatus: function () { BUSY = true; call('api_noteStatus', id, kind).then(function (d) { BUSY = false; setData(d); toast(kind === 'Done' ? 'Marked done' : 'Reopened'); }).catch(function (e) { BUSY = false; toast(e.message); }); },
+    noteStatus: function () { BUSY = true; callSafe('api_noteStatus', id, kind).then(function (d) { BUSY = false; applyResult(d); toast(kind === 'Done' ? 'Marked done' : 'Reopened'); }).catch(function (e) { BUSY = false; toast(e.message); }); },
     bill: function () { actBill(id); }, returned: function () { actReturned(id); }, payPlantBatch: function () { actBatch('plant'); }, payFreightBatch: function () { actBatch('freight'); },
     cancelTruck: function () { actCancel('truck', id); }, cancelOrder: function () { actCancel(kind, id); }, restore: function () { actRestore(kind || 'truck', id); }, restoreOrder: function () { actRestore(kind, id); },
     newUser: function () { actUser(); }, editUser: function () { actUser(id); }, me: actMe, showmore: function () { LIMIT += 60; render(); },
@@ -1648,13 +1862,13 @@ document.addEventListener('click', function (e) {
       openMenu(esc(id), esc(o.plant || o.buyer), it);
     },
     openOrder: function () { go(kind, id); },
-    settle: function () { var o = (kind === 'po' ? PO : SO)[id], st = orderStats(kind, o); openForm({ title: 'Mark ' + id + ' short-closed?', sub: 'Ordered ' + qt(o.qty) + ' qtl, ' + (kind === 'po' ? 'loaded ' : 'dispatched ') + qt(st.done) + ' qtl (' + (st.bal >= 0 ? qt(st.bal) + ' short' : qt(-st.bal) + ' over') + '). The order is closed: no new trucks, and the difference is accepted.', submit: 'Yes, short-close', done: id + ' settled', fields: [], custom: function () { return call('api_settle', kind, id, true); } }); },
-    unsettle: function () { BUSY = true; closeForm(); call('api_settle', kind, id, false).then(function (d) { BUSY = false; setData(d); toast(id + ' open again'); }).catch(function (e) { BUSY = false; toast(e.message); }); },
+    settle: function () { var o = (kind === 'po' ? PO : SO)[id], st = orderStats(kind, o); openForm({ title: 'Mark ' + id + ' short-closed?', sub: 'Ordered ' + qt(o.qty) + ' qtl, ' + (kind === 'po' ? 'loaded ' : 'dispatched ') + qt(st.done) + ' qtl (' + (st.bal >= 0 ? qt(st.bal) + ' short' : qt(-st.bal) + ' over') + '). The order is closed: no new trucks, and the difference is accepted.', submit: 'Yes, short-close', done: id + ' settled', fields: [], custom: function () { return callSafe('api_settle', kind, id, true); } }); },
+    unsettle: function () { BUSY = true; closeForm(); callSafe('api_settle', kind, id, false).then(function (d) { BUSY = false; applyResult(d); toast(id + ' open again'); }).catch(function (e) { BUSY = false; toast(e.message); }); },
     openBank: openBank, bankAdd: function () { actBank(kind, id); }, verifyAll: verifyAllShown, revRefresh: function () { REVKEY = ''; REVOK = ''; render(); },
     exportFull: function () { doExport('full'); }, exportPage: function () { doExport(kind, id); },
     exportList: function () { if (!LASTIDS.length) { toast('No trucks in this list.'); return; } doExport('trucks', '', LASTIDS.slice()); }
   }[a] || function () {})();
-});
+}
 $('#mform').addEventListener('submit', submitForm);
 $('#mform').addEventListener('input', function (e) {
   if (FORM && FORM.warned) { FORM.warned = false; $('#fwarn').hidden = true; }
@@ -1665,12 +1879,16 @@ document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !$
 try { window.matchMedia('(max-width:860px)').addEventListener('change', function () { render(); }); } catch (e) {}
 function setHH() { var h = document.querySelector('header'); if (h) document.documentElement.style.setProperty('--hh', h.offsetHeight + 'px'); }
 window.addEventListener('resize', setHH); setInterval(setHH, 1500); setHH();
-setInterval(function () { if (D && document.visibilityState === 'visible' && $('#modal').hidden && !BUSY && !(document.activeElement && document.activeElement.id === 'q')) load(true); }, 60000);
+setInterval(function () { if (document.visibilityState === 'visible') sync(); }, 60000);
+document.addEventListener('visibilitychange', function () { if (document.visibilityState === 'visible') { pump(); sync(); } });
+window.addEventListener('online', function () { pump(); });
+window.addEventListener('beforeunload', function (e) { if (Q.length) { e.preventDefault(); e.returnValue = 'Some entries are still saving.'; return e.returnValue; } });
 (function boot() {
   var init = window.INIT || {};
   if (init.view && ['po', 'so', 'buyer', 'plant', 'transporter', 'truck'].indexOf(init.view) >= 0) { ROUTE = { v: init.view, id: init.id }; HIST = [{ v: 'home' }]; }
   else if (init.view && ['pos', 'sos', 'dispatch', 'receive', 'settle', 'freight'].indexOf(init.view) >= 0) ROUTE = { v: init.view };
   TOKEN = getTok();
+  loadQ(); // saves that were still waiting when the app was last closed
   if (TOKEN) load(); else showAuth();
 })();
 </script>
