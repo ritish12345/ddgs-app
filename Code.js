@@ -36,6 +36,8 @@ var TRUCK_MONEY = ['plantPaid', 'plantPaidDate', 'frate', 'advance', 'freightPai
 var ORDER_MONEY = ['rate', 'gst', 'gstMode', 'freightMode', 'creditDays'];
 // Amounts hidden from roles without money access (paid / not paid status stays visible).
 var TRUCK_HIDE = ['frate', 'advance', 'received', 'receivedDate', 'deduction', 'deductionNote', 'detention', 'saleRate', 'plantUTR', 'freightUTR', 'zohoBill', 'zohoInvoice', 'zohoFreight'];
+// Changed only through their own actions (Cancel, Returned, Restore, photo upload), which check the role. A normal truck save ignores them.
+var TRUCK_LOCKED = ['status', 'returnedDate', 'slipPhoto', 'plantPayPhoto', 'freightPayPhoto'];
 var ME = null;
 
 // [key, header, type]  type: text | date | num | bool
@@ -136,6 +138,7 @@ function doGet(e) {
 
 /** Run once from the editor to create the tabs and import data. Safe to run again: it does nothing if the tabs exist. */
 function setup() {
+  editorOnly_();
   PropertiesService.getScriptProperties().deleteProperty('schema_v'); // running setup always re-checks the tabs
   var r = ensureSetup_();
   var auto = '';
@@ -146,9 +149,22 @@ function setup() {
 
 /** Run from the editor to get today's report by email right now (to check it works). */
 function testDailyReport() {
+  editorOnly_();
   ensureSetup_();
-  dailyReport({ triggerUid: 'manual-test' });
+  sendDailyReport_();
   Logger.log('Report sent to ' + (readSettings_().reportEmail || Session.getEffectiveUser().getEmail()));
+}
+
+/* Every function without "_" at the end can be called from a browser through the app link.
+   These two checks keep the editor-only and timer-only functions from being started that way. */
+function editorOnly_() {
+  if (!isOwnerGoogle_()) throw new Error('Run this from the Apps Script editor with the owner account.');
+}
+function fromTrigger_(e) {
+  if (!e || !e.triggerUid) return false;
+  try {
+    return ScriptApp.getProjectTriggers().some(function (t) { return String(t.getUniqueId()) === String(e.triggerUid); });
+  } catch (x) { return false; }
 }
 
 /* ---------------- API called by the page ---------------- */
@@ -221,6 +237,7 @@ function api_getData(token) {
 function api_saveTruck(token, obj) {
   auth_(token); need_('trucks');
   obj = obj || {};
+  TRUCK_LOCKED.forEach(function (k) { delete obj[k]; });
   if (!ME.can.truckMoney) {
     // Dispatch may enter the freight rate together with the weight (it is required then). Other money fields stay hidden.
     var keepRate = num_(obj.loadWt) > 0;
@@ -334,6 +351,8 @@ function api_addPayment(token, id, amount, date, deduction, note) {
 
 function api_savePO(token, obj) {
   auth_(token); need_('orders');
+  obj = obj || {};
+  delete obj.status; // Cancel / Short-close / Restore have their own checks
   return withLock_(function () {
     checkOrderFirm_(T.PO, obj);
     var id = saveRecord_(T.PO, obj);
@@ -343,7 +362,12 @@ function api_savePO(token, obj) {
     }
   });
 }
-function api_saveSO(token, obj) { auth_(token); need_('orders'); return withLock_(function () { checkOrderFirm_(T.SO, obj); return saveRecord_(T.SO, obj); }); }
+function api_saveSO(token, obj) {
+  auth_(token); need_('orders');
+  obj = obj || {};
+  delete obj.status; // Cancel / Short-close / Restore have their own checks
+  return withLock_(function () { checkOrderFirm_(T.SO, obj); return saveRecord_(T.SO, obj); });
+}
 function checkOrderFirm_(name, obj) {
   var S = readSettings_(), cur = obj.id ? rows_(name).filter(function (r) { return r.id === obj.id; })[0] : null;
   var get = function (k) { return (k in obj) ? obj[k] : cur ? cur[k] : ''; };
@@ -479,7 +503,15 @@ function api_restore(token, table, id) {
   need_(table === 'truck' ? (ret ? 'trucks' : 'cancelTruck') : 'orders');
   return withLock_(function () {
     var name = { truck: T.TR, po: T.PO, so: T.SO }[table];
-    if (ret) { var dup = sameDayTruck_({ id: id, truck: rows_(T.TR).filter(function (r) { return r.id === id; })[0].truck }); if (dup && ME.role !== 'Owner') throw new Error('This truck is already entered again that day as ' + dup.id + '. Only the Owner can undo this.'); return saveRecord_(name, { id: id, status: '', returnedDate: '' }); }
+    if (!name) throw new Error('Unknown record type');
+    if (table === 'truck') {
+      // Restoring a returned or cancelled truck must not create a second entry of the same vehicle on the same day.
+      var t = rows_(T.TR).filter(function (r) { return r.id === id; })[0];
+      if (!t) throw new Error('Truck ' + id + ' not found.');
+      var dup = sameDayTruck_({ id: id, truck: t.truck });
+      if (dup && ME.role !== 'Owner') throw new Error('This truck is already entered again that day as ' + dup.id + '. Only the Owner can undo this.');
+      return saveRecord_(name, ret ? { id: id, status: '', returnedDate: '' } : { id: id, status: '' });
+    }
     return saveRecord_(name, { id: id, status: '' });
   });
 }
@@ -1107,7 +1139,7 @@ function days_(a, b) {
   return Math.round((new Date(+pb[0], +pb[1] - 1, +pb[2], 12) - new Date(+pa[0], +pa[1] - 1, +pa[2], 12)) / 864e5);
 }
 
-var STAGES_ = ['Placed', 'Loaded', 'Paid to plant', 'Unloaded', 'Part paid', 'Buyer paid', 'Closed'];
+var STAGES_ = ['Vehicle placed', 'Loaded', 'Supplier paid', 'Unloaded', 'Part paid', 'Customer paid', 'Closed']; // same words as the screen
 
 function derive_(t, po, so, S, today) {
   var n = function (x) { var v = parseFloat(x); return isNaN(v) ? 0 : v; };
@@ -1318,7 +1350,10 @@ function money_(x) { var s = Math.round(Math.abs(x)).toString(), last = s.slice(
 
 /** Runs every evening around 9 pm (time trigger). Sends the owner a summary and the full Excel. */
 function dailyReport(e) {
-  if (!e || !e.triggerUid) return;
+  if (!fromTrigger_(e)) return;
+  sendDailyReport_();
+}
+function sendDailyReport_() {
   ME = { id: 'auto-report', role: 'Owner', can: ROLES.Owner };
   var A = deriveAll_(), today = A.today, live = A.trucks.filter(function (t) { return !t.cx; });
   var esc = function (s) { return String(s == null ? '' : s).replace(/[&<>]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]; }); };
@@ -1384,7 +1419,7 @@ function dailyReport(e) {
 
 /** Runs every Sunday night (time trigger). Keeps the last 12 copies in Drive > DDGS Backups. */
 function weeklyBackup(e) {
-  if (!e || !e.triggerUid) return;
+  if (!fromTrigger_(e)) return;
   var folder = folder_('DDGS Backups');
   var name = 'DDGS Backup ' + Utilities.formatDate(new Date(), tz_(), 'yyyy-MM-dd');
   DriveApp.getFileById(ss_().getId()).makeCopy(name, folder);
