@@ -37,7 +37,10 @@ Read this file fully before doing any work in this folder.
 - Raghav's margin on sales to own group companies (e.g. to Shree Ram) is not reduced by freight.
 - Same vehicle number cannot be entered twice on the same day (spaces ignored). Only Owner can override.
 - Trucks are never deleted: **Cancel** (with reason) or **Returned empty**. Orders can be **Short-closed** (Settled) when quantity is slightly over/under.
-- Payments: plant (supplier) and freight payments are done in internet banking outside the app; the app works out the amount and records the **UTR** (required). One payment may cover several trucks.
+- Payments: plant (supplier) and freight payments are done in internet banking outside the app; the app works out the amount and records the **UTR**. UTR is **required for supplier payments, optional for freight** (Nov 2026). The payment photo stays optional. Bank details never block a payment. One payment may cover several trucks.
+- **Order quantity window ±1%** (APP_SETTINGS `qtyTolerancePct`, 0.01), for POs and SOs. Example PO 10,000 qtl: complete from 9,900 → shows "Complete" + **Short-close** button (never closes by itself); limit 10,100. Above the limit, or a new truck on a complete order: staff are refused ("Ask the Owner"), the Owner gets a warning and can accept with Save again. Same check on server (`checkQty_`) and screen (`qtyProblem`).
+- **Dates are shown and typed as DD-MM-YYYY everywhere** (screen, messages, Excel). Stored as yyyy-mm-dd / real dates as before.
+- **Working lists show only open work.** Closed trucks, cancelled/returned trucks, short-closed and cancelled orders are on the **Closed & cancelled** page (nothing is moved or deleted in the sheet). Every list has an S.No. column.
 - Stages: Vehicle placed → Loaded → Supplier paid → Received/Unloaded → Part paid → Customer paid → Closed. Closed needs full payment and freight paid (or customer pays freight).
 - Labels use proper terms (Supplier, Customer, Dispatch Register, Dispatch No., Vehicle No., Dispatch weight, Received weight, Short-closed, Supplier invoice, Outstanding…). Only labels change, never sheet column names.
 
@@ -57,7 +60,7 @@ Read this file fully before doing any work in this folder.
 4. Make the change. Keep the existing code style (plain functions, no frameworks, works on phone and laptop, buttons ≥ 44px on phone, no sideways scrolling).
 5. Check syntax: `node -e "new Function(require('fs').readFileSync('Code.js','utf8'))"` (and the screen script if Index.html exists).
 6. Test the logic you touched. Put any test scripts in `tests/` (never pushed – see `.claspignore`). For calculations, test with real-looking numbers from this file.
-   `cd tests && npm install` (once), then `npm test`: old-vs-new comparison on a realistic day (fake sheet in `tests/fake-gas.js`), safety, server speed, the real screen in jsdom, and server/screen calculation parity. All must pass.
+   `cd tests && npm install` (once), then `npm test`: old-vs-new comparison on a realistic day (fake sheet in `tests/fake-gas.js`; intended changes are listed in `EXPECTED` there), safety, server speed, the real screen in jsdom (`tests/browser.js`), round-2 rules, and server/screen calculation parity. All must pass.
 7. `git add . && git commit -m "<what changed>"`
 8. `clasp push` → tell Nitish to test on the **/dev** link (Deploy → Test deployments) before publishing.
 9. Publish only when Nitish says OK:
@@ -75,7 +78,7 @@ Read this file fully before doing any work in this folder.
 - How it works now (Nov 2026):
   - Server: `REQ_` keeps each tab read once per call. The screen sends its token as `{t, d: 1}`, so saves return only the changed records. Older open screens send the plain token and still get all data.
   - **Any new code that writes to a tab must call `dropTab_(tab)` and `markChanged_(tab, id, row)`** (`saveRecord_` already does both). Otherwise the screen will not see the change.
-  - `api_sync` + script property `data_v`: the background check reads no tabs when nothing changed.
+  - `api_sync` + script property `data_v`: the background check reads no tabs when nothing changed. The screen checks every **15 s** (and at once after its own save if someone else saved meanwhile). To stay inside the free-account daily limits (script properties: 50,000 reads/day), the session, `data_v`, the setup check and the time zone are read from CacheService first; a "nothing new" check reads no properties.
   - Screen: truck saves and payments go into a queue `Q` and show at once (laid over `D`, the server-confirmed data). Each one carries an id `rid`, so a retried save is never counted twice. Refused saves are listed with "Open again".
 
 ## 7. Backlog (do only when Nitish asks)
