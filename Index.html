@@ -382,7 +382,11 @@ function liveAll() { return T.filter(function (t) { return !t.cx; }); }
 function live() { return T.filter(function (t) { return !t.cx && (FIRM === 'all' || t.firm === FIRM); }); }
 /* ---------- firms ---------- */
 function firms() { var l = String(D && D.settings.firms || '').split(',').map(normName).filter(String); return l.length ? l : ['']; }
-function multiFirm() { return firms().filter(String).length > 1; }
+/* Firms kept out of this app (setting hiddenFirms, e.g. Shree Ram Solvex): the server does not send their orders and trucks.
+   They still count as your group companies when they are a customer (isFirm). */
+function hiddenFirms() { return String(D && D.settings.hiddenFirms || '').split(',').map(normName).filter(String); }
+function visFirms() { var h = hiddenFirms(); return firms().filter(function (f) { return f && h.indexOf(f) < 0; }); }
+function multiFirm() { return visFirms().length > 1; }
 function plantFirm() { return normName(D && D.settings.plantFirm || ''); }
 function firmOf(o) { return o && o.firm ? normName(o.firm) : firms()[0]; }
 function isFirm(name) { return !!name && firms().indexOf(normName(name)) >= 0; }
@@ -858,7 +862,6 @@ var DETAIL = ['po', 'so', 'buyer', 'plant', 'transporter', 'truck', 'users', 'no
 function mainTabs() {
   var working = live().filter(function (t) { return t.st !== 6; }).length; // closed trucks are on the Closed & cancelled page
   var tabs = [['home', 'Overview'], ['pos', 'Purchase Orders', D.po.filter(inFirm).filter(isOpen).length], ['sos', 'Sale Orders', D.so.filter(inFirm).filter(isOpen).length], ['dispatch', 'Dispatch Register', working]];
-  if (plantFirm()) tabs.push(['receive', 'Plant Inward (' + shortFirm(plantFirm()) + ')', live().filter(function (t) { return toPlant(t) && t.L && !t.U; }).length]);
   if (P.money) tabs.push(['settle', 'Sales', live().filter(function (t) { return t.so && !t.plantPO && t.U && t.st !== 6; }).length],
     ['receivables', 'Receivables', Object.keys(ACC).filter(function (k) { return ACC[k].outstanding > 0.5; }).length],
     ['freight', 'Freight & Transport', live().filter(function (t) { return t.L && !t.fBuyer; }).length]);
@@ -890,14 +893,14 @@ function render() {
     else if (r.left < left) nv.scrollLeft -= left - r.left + 12;
   }
   $('#fab').hidden = !(P.trucks && ROUTE.v === 'dispatch');
-  var f = { home: vHome, pos: function () { return orderTable('po'); }, sos: function () { return orderTable('so'); }, dispatch: vDispatch, receive: vReceive, settle: vSettle, receivables: vReceivables, freight: vFreight, closed: vClosed,
+  var f = { home: vHome, pos: function () { return orderTable('po'); }, sos: function () { return orderTable('so'); }, dispatch: vDispatch, settle: vSettle, receivables: vReceivables, freight: vFreight, closed: vClosed,
     more: vMore, activity: vActivity, users: P.users ? vUsers : vMore, notes: vNotes, po: function () { return vOrder('po', ROUTE.id); }, so: function () { return vOrder('so', ROUTE.id); },
     buyer: function () { return vParty('buyer', ROUTE.id); }, plant: function () { return vParty('plant', ROUTE.id); }, transporter: function () { return vParty('transporter', ROUTE.id); }, truck: function () { return vTruck(ROUTE.id); } }[ROUTE.v] || vHome;
   var bar = multiFirm() && DETAIL.indexOf(ROUTE.v) < 0 && ROUTE.v !== 'more' && ROUTE.v !== 'activity' && ROUTE.v !== 'receivables' ? firmBar() : '';
   $('#view').innerHTML = bar + f();
 }
 function firmBar() {
-  var f = firms();
+  var f = visFirms();
   return '<div class="firmbar"><span class="mu">Firm</span><div class="seg"><button type="button" class="' + (FIRM === 'all' ? 'on' : '') + '" data-firm="all">' + (f.length > 2 ? 'All' : 'Both') + '</button>' +
     f.map(function (x) { return '<button type="button" class="' + (FIRM === x ? 'on' : '') + '" data-firm="' + esc(x) + '" title="' + esc(x) + '">' + esc(shortFirm(x)) + '</button>'; }).join('') + '</div></div>';
 }
@@ -1019,41 +1022,6 @@ function vDispatch() {
       '<div class="td acts"><button type="button" class="ib" data-act="menu" data-id="' + esc(t.id) + '" aria-label="More actions">⋯</button></div>';
     return '<div class="tr ' + (t.cx ? 'cx' : '') + '">' + row + '</div>';
   }).join('') + '</div>' + more(list);
-  return h;
-}
-function vReceive() {
-  var pf = plantFirm(), base = T.filter(function (t) { return toPlant(t) && tInFirm(t); });
-  var arriving = base.filter(function (t) { return t.L && !t.U; }).filter(matchQ).sort(function (a, b) { return (a.date || '').localeCompare(b.date || ''); });
-  var notLoaded = base.filter(function (t) { return !t.L; }).filter(matchQ);
-  var month = D.today.slice(0, 7);
-  var recd = base.filter(function (t) { return t.U && t.unloadDate; });
-  var recent = recd.filter(function (t) { return days(t.unloadDate, D.today) <= 7; }).filter(matchQ).sort(function (a, b) { return (b.unloadDate || '').localeCompare(a.unloadDate || '') || b.id.localeCompare(a.id); });
-  var mon = recd.filter(function (t) { return t.unloadDate.slice(0, 7) === month; }), tod = recd.filter(function (t) { return t.unloadDate === D.today; });
-  LASTIDS = arriving.concat(recent).map(function (t) { return t.id; });
-  var h = '<div class="ph" style="margin-bottom:6px"><h1>Plant Inward (' + esc(pf) + ')</h1><div class="sub">Every truck coming to the plant, whichever firm bought it. Tap Mark received and type the weighbridge weight.</div></div>';
-  h += '<div class="kpis" style="margin-bottom:14px">' + kpi('Arriving', trk(arriving.length), qt(sum(arriving, function (t) { return t.L; })) + ' qtl loaded') +
-    kpi('Received today', qt(sum(tod, function (t) { return t.U; })) + ' qtl', trk(tod.length)) +
-    kpi('Received this month', qt(sum(mon, function (t) { return t.U; })) + ' qtl', trk(mon.length)) +
-    kpi('Shortage this month', qt(sum(mon, function (t) { return t.short; })) + ' qtl', '', sum(mon, function (t) { return t.short; }) > 0 ? 'warn' : '') + '</div>';
-  h += '<div class="bar">' + searchBox() + (P.exportX ? '<button type="button" class="btn sm" data-act="exportList">Download this list</button>' : '') + '</div>';
-  var cols = '44px 1.3fr 1.2fr .8fr 1fr 1.2fr 160px';
-  var head = '<div class="tr th"><div>S.No.</div><div>Truck</div><div>From</div><div class="r">Loaded</div><div>Dispatched</div><div>Transporter / driver</div><div></div></div>';
-  var row = function (t, i) {
-    return '<div class="tr"><div class="td sn" data-l="S.No.">' + (i + 1) + '</div><div class="td wide"><b>' + esc(t.truck) + '</b> ' + firmTag(t.firm) + '<small>' + lnk('truck', t.id) + '</small></div>' +
-      '<div class="td" data-l="From">' + lnk('plant', t.plant) + '<small>' + lnk('po', t.po) + '</small></div>' +
-      '<div class="td r num" data-l="Loaded">' + (t.L ? '<b>' + qt(t.L) + '</b> qtl' : '—') + '</div>' +
-      '<div class="td" data-l="Dispatched">' + dmy(t.date) + '<small class="' + (t.detDays > 0 ? 'over' : '') + '">' + (t.trip === 1 ? '1 day' : t.trip + ' days') + ' on road</small></div>' +
-      '<div class="td" data-l="Transporter">' + (esc(t.transporter) || '<span class="mu">—</span>') + (t.driver ? '<small>' + esc(t.driver) + '</small>' : '') + '</div>' +
-      '<div class="td acts">' + (P.trucks && t.L ? '<button type="button" class="nx" data-act="unload" data-id="' + esc(t.id) + '">Mark received</button>' : P.trucks ? '<button type="button" class="pill wait" data-act="load" data-id="' + esc(t.id) + '">+ Weight</button>' : '') + '</div></div>';
-  };
-  h += '<h2>On the way (' + arriving.length + ')</h2>' + (arriving.length ? '<div class="tbl" style="--cols:' + cols + '">' + head + arriving.map(row).join('') + '</div>' : '<div class="panel empty">No trucks on the way.</div>');
-  if (notLoaded.length) h += '<h2>Booked, weight not entered yet (' + notLoaded.length + ')</h2><div class="tbl" style="--cols:' + cols + '">' + head + notLoaded.map(row).join('') + '</div>';
-  h += '<h2>Received in the last 7 days (' + recent.length + ')</h2>' + (recent.length ? '<div class="tbl" style="--cols:44px 1.3fr .9fr 1.1fr .8fr .8fr .7fr .6fr"><div class="tr th"><div>S.No.</div><div>Truck</div><div>Received</div><div>From</div><div class="r">Loaded</div><div class="r">Received</div><div class="r">Short</div><div class="r">Days</div></div>' +
-    recent.map(function (t, i) {
-      return '<div class="tr"><div class="td sn" data-l="S.No.">' + (i + 1) + '</div><div class="td wide"><b>' + esc(t.truck) + '</b> ' + firmTag(t.firm) + '<small>' + lnk('truck', t.id) + '</small></div><div class="td" data-l="Received">' + dmy(t.unloadDate) + '</div>' +
-        '<div class="td" data-l="From">' + lnk('plant', t.plant) + '</div><div class="td r num" data-l="Loaded">' + qt(t.L) + '</div><div class="td r num" data-l="Received"><b>' + qt(t.U) + '</b></div>' +
-        '<div class="td r num ' + (t.short > t.allow ? 'over' : '') + '" data-l="Short">' + qt(t.short) + '</div><div class="td r num" data-l="Days">' + t.trip + '</div></div>';
-    }).join('') + '</div>' : '<div class="panel empty">Nothing received in the last 7 days.</div>');
   return h;
 }
 function truckList(list, noLimit) {
@@ -1609,7 +1577,7 @@ function openMenu(title, sub, items) {
 function poOpts() { return D.po.filter(function (p) { return p.status !== 'Cancelled' && p.status !== 'Settled'; }).map(function (p) { var s = orderStats('po', p); return [p.id, p.id + (multiFirm() ? ' · ' + shortFirm(firmOf(p)) : '') + ' · ' + p.plant + (p.takenIn && normName(p.takenIn) !== firmOf(p) ? ' via ' + shortFirm(p.takenIn) : '') + (p.poType === 'plant' ? ' (own plant)' : '') + ' · bal ' + qt(s.bal) + (s.complete ? ' · complete' : '')]; }); }
 function soOpts() { return D.so.filter(function (s) { return s.status !== 'Cancelled' && s.status !== 'Settled'; }).map(function (o) { var s = orderStats('so', o); return [o.id, o.id + (multiFirm() ? ' · ' + shortFirm(firmOf(o)) : '') + ' · ' + o.buyer + (P.money ? ' · ' + inr(o.rate) + ' ' + terms(o) : '') + ' · bal ' + qt(s.bal) + (s.complete ? ' · complete' : '')]; }); }
 function tradingFirms() { return String(D && D.settings.tradingFirms || '').split(',').map(normName).filter(String); }
-function firmOpts() { return firms().filter(String).map(function (f) { return [f, f]; }); }
+function firmOpts() { return visFirms().map(function (f) { return [f, f]; }); }
 function names(list, key) { var m = {}; list.forEach(function (x) { if (x[key]) m[normName(x[key])] = 1; }); return Object.keys(m).sort(); }
 function transporters() { return D ? names(D.trucks, 'transporter') : []; }
 function getT(id) { return T.filter(function (t) { return t.id === id; })[0]; }
@@ -1738,7 +1706,7 @@ function actOrder(kind, id) {
   var poExtra = kind === 'po' ? [
     { sec: 'Where the goods go' },
     { k: 'takenIn', label: 'Booked in the name of (whose name the plant gave the order)', type: 'select', options: tradingFirms().map(function (f) { return [f, f]; }), blank: 'Same as the firm above' },
-    { k: 'poType', label: 'This PO is for', type: 'select', options: [['trade', 'Trading – we sell it to a customer'], ['plant', 'Own plant – ' + (plantFirm() || 'our plant') + ' (no sale)']], req: 1 },
+    { k: 'poType', label: 'This PO is for', type: 'select', options: [['trade', 'Trading – we sell it to a customer']].concat(hiddenFirms().indexOf(plantFirm()) >= 0 ? [] /* the plant firm is kept out of this app */ : [['plant', 'Own plant – ' + (plantFirm() || 'our plant') + ' (no sale)']]), req: 1 },
     { k: 'linkSO', label: 'Sells to (sale order)', type: 'select', options: soOpts(), blank: 'Choose customer on each truck', help: 'Trucks on this PO get this buyer automatically. Not used for own-plant POs.' }
   ] : [];
   openForm({
@@ -2155,7 +2123,7 @@ window.addEventListener('beforeunload', function (e) { if (Q.length) { e.prevent
 (function boot() {
   var init = window.INIT || {};
   if (init.view && ['po', 'so', 'buyer', 'plant', 'transporter', 'truck'].indexOf(init.view) >= 0) { ROUTE = { v: init.view, id: init.id }; HIST = [{ v: 'home' }]; }
-  else if (init.view && ['pos', 'sos', 'dispatch', 'receive', 'settle', 'receivables', 'freight', 'closed'].indexOf(init.view) >= 0) ROUTE = { v: init.view };
+  else if (init.view && ['pos', 'sos', 'dispatch', 'settle', 'receivables', 'freight', 'closed'].indexOf(init.view) >= 0) ROUTE = { v: init.view };
   TOKEN = getTok();
   loadQ(); // saves that were still waiting when the app was last closed
   if (TOKEN) load(); else showAuth();

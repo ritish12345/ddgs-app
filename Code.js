@@ -105,7 +105,8 @@ var SETTINGS_DEFAULT = [
   ['tradingFirms', 'RAGHAV TRADING AND COMPANY, DEVAN TRADING AND COMPANY, SARASWATI SOLVEX, JAI MAHAVIR TRADING AND COMPANY', 'Firms an order can be taken in (shown on the PO as Booked in the name of)'],
   ['bankUrl', '', 'Internet banking login. The Open bank button on payment popups goes here'],
   ['slipCheckFrom', '', 'Trucks dispatched on or after this date need a weighment slip photo. Blank = all trucks'],
-  ['qtyTolerancePct', 0.01, 'Order quantity tolerance (0.01 = 1%). A PO/SO is complete from 99% of its quantity; going above 101% needs the Owner']
+  ['qtyTolerancePct', 0.01, 'Order quantity tolerance (0.01 = 1%). A PO/SO is complete from 99% of its quantity; going above 101% needs the Owner'],
+  ['hiddenFirms', 'SHREE RAM SOLVEX', 'Firms whose own POs/SOs and trucks are kept out of this app (their rows stay in the sheet). Clear to show them again']
 ];
 
 /* ---------------- firms ---------------- */
@@ -118,11 +119,46 @@ function sameDayTruck_(obj) {
   var cur = obj.id ? rows_(T.TR).filter(function (r) { return r.id === obj.id; })[0] : null;
   var no = normTruck_('truck' in obj ? obj.truck : cur && cur.truck), date = 'date' in obj ? obj.date : cur && cur.date;
   if (!no || !date || (cur && !('truck' in obj) && !('date' in obj))) return null;
-  var key = String(no).replace(/[^A-Z0-9]/g, '');
-  return rows_(T.TR).filter(function (t) { return t.id !== obj.id && !isOff_(t) && String(t.truck).replace(/[^A-Z0-9]/g, '') === key && String(t.date) === String(date); })[0] || null;
+  var key = String(no).replace(/[^A-Z0-9]/g, ''), H = hiddenSets_();
+  return rows_(T.TR).filter(function (t) { return t.id !== obj.id && !isOff_(t) && !hidTruck_(t, H) && String(t.truck).replace(/[^A-Z0-9]/g, '') === key && String(t.date) === String(date); })[0] || null;
 }
 function firmOf_(o, S) { return o && o.firm ? normName_(o.firm) : firms_(S)[0]; }
 function isFirm_(name, S) { return !!name && firms_(S).indexOf(normName_(name)) >= 0; }
+
+/* ---------------- firms kept out of this app (setting hiddenFirms) ----------------
+   Nov 2026: Shree Ram Solvex's own business (its POs/SOs and the trucks on them) will get its own Apps Script.
+   Those rows stay in the sheet untouched; this app neither shows, counts nor changes them.
+   Raghav's sales TO Shree Ram are Raghav's business and stay (Shree Ram remains a group-company customer). */
+function hiddenFirms_(S) { return String((S || readSettings_()).hiddenFirms || '').split(',').map(function (f) { return normName_(f); }).filter(String); }
+/* The hidden firms and the ids of their POs and SOs (tabs are read once per call, so this is cheap). */
+function hiddenSets_(S) {
+  S = S || readSettings_();
+  var H = { firms: hiddenFirms_(S), po: {}, so: {} };
+  if (!H.firms.length) return H;
+  rows_(T.PO).forEach(function (o) { if (H.firms.indexOf(firmOf_(o, S)) >= 0) H.po[o.id] = 1; });
+  rows_(T.SO).forEach(function (o) { if (H.firms.indexOf(firmOf_(o, S)) >= 0) H.so[o.id] = 1; });
+  return H;
+}
+function hidTruck_(t, H) { return !!t && (!!H.po[t.po] || !!H.so[t.so]); }
+function hiddenErr_(what, H) { return new Error(what + ' belongs to ' + H.firms.join(', ') + ', which is kept out of this app.'); }
+/* POs, SOs and trucks without the hidden ones. */
+function visibleRows_(S) {
+  var H = hiddenSets_(S);
+  return {
+    po: rows_(T.PO).filter(function (o) { return !H.po[o.id]; }),
+    so: rows_(T.SO).filter(function (o) { return !H.so[o.id]; }),
+    trucks: rows_(T.TR).filter(function (t) { return !hidTruck_(t, H); })
+  };
+}
+/* Refuses any change to a hidden truck / order. */
+function guardTruck_(id) {
+  var H = hiddenSets_(), t = rows_(T.TR).filter(function (r) { return r.id === id; })[0];
+  if (hidTruck_(t, H)) throw hiddenErr_(id, H);
+}
+function guardOrder_(table, id) {
+  var H = hiddenSets_();
+  if ((table === 'po' && H.po[id]) || (table === 'so' && H.so[id])) throw hiddenErr_(id, H);
+}
 
 /* ---------------- web app entry ---------------- */
 
@@ -261,6 +297,11 @@ function api_saveTruck(token, obj) {
   var rid = cleanRid_(obj._rid);
   delete obj._force; delete obj._rid;
   return withLock_(function () {
+    // Trucks and orders of a firm kept out of this app (hiddenFirms) cannot be changed or used here.
+    var H = hiddenSets_(), was = obj.id ? rows_(T.TR).filter(function (r) { return r.id === obj.id; })[0] : null;
+    if (hidTruck_(was, H)) throw hiddenErr_(obj.id, H);
+    if (obj.po && H.po[obj.po]) throw hiddenErr_(obj.po, H);
+    if (obj.so && H.so[obj.so]) throw hiddenErr_(obj.so, H);
     [['po', T.PO], ['so', T.SO]].forEach(function (k) {
       if (!(k[0] in obj) || !obj[k[0]]) return;
       var cur = obj.id ? rows_(T.TR).filter(function (r) { return r.id === obj.id; })[0] : null;
@@ -331,7 +372,7 @@ function checkQty_(obj, force) {
   var cur = obj.id ? rows_(T.TR).filter(function (r) { return r.id === obj.id; })[0] : null;
   if (cur && isOff_(cur)) return;
   var get = function (k) { return (k in obj) ? obj[k] : cur ? cur[k] : ''; };
-  var tol = qtyTol_(readSettings_()), L = num_(get('loadWt')) || 0, trucks = rows_(T.TR);
+  var H = hiddenSets_(), tol = qtyTol_(readSettings_()), L = num_(get('loadWt')) || 0, trucks = rows_(T.TR).filter(function (t) { return !hidTruck_(t, H); });
   if (L > 1000) return; // looks like kg: the save is refused with the clear "looks like kg" message instead
   var owner = ME && ME.role === 'Owner';
   [['po', T.PO, 'loaded'], ['so', T.SO, 'dispatched']].forEach(function (k) {
@@ -377,6 +418,7 @@ function api_addPayment(token, id, amount, date, deduction, note, rid) {
   return withLock_(function () {
     var t = rows_(T.TR).filter(function (r) { return r.id === id; })[0];
     if (!t) throw new Error('Truck ' + id + ' was not found.');
+    guardTruck_(id);
     var a = num_(amount) || 0, d = num_(deduction) || 0;
     if (a < 0 || d < 0) throw new Error('Amounts must be 0 or more.');
     if (!a && !d) throw new Error('Enter an amount received or a deduction.');
@@ -470,7 +512,11 @@ function checkOrderFirm_(name, obj) {
     obj.firm = normName_(obj.firm);
     if (obj.firm && !isFirm_(obj.firm, S)) throw new Error('Unknown firm "' + obj.firm + '". Your firms are: ' + firms_(S).join(', ') + '.');
   }
-  var firm = get('firm') ? normName_(get('firm')) : firms_(S)[0];
+  var firm = get('firm') ? normName_(get('firm')) : firms_(S)[0], H = hiddenSets_(S);
+  // Orders of a firm kept out of this app: no changes, no new ones; no own-plant POs when the plant firm is kept out.
+  if (cur && ((name === T.PO && H.po[cur.id]) || (name === T.SO && H.so[cur.id]))) throw hiddenErr_(cur.id, H);
+  if (H.firms.indexOf(firm) >= 0) throw new Error('Orders in ' + firm + ' are kept out of this app.');
+  if (name === T.PO && get('poType') === 'plant' && H.firms.indexOf(normName_(S.plantFirm)) >= 0) throw new Error('Own-plant POs belong to ' + normName_(S.plantFirm) + ', which is kept out of this app.');
   if (name === T.PO && 'takenIn' in obj && obj.takenIn) {
     obj.takenIn = normName_(obj.takenIn);
     var tf = String(S.tradingFirms || '').split(',').map(function (f) { return normName_(f); }).filter(String);
@@ -494,6 +540,7 @@ function checkOrderFirm_(name, obj) {
 function api_cancel(token, table, id, reason) {
   auth_(token); need_(table === 'truck' ? 'cancelTruck' : 'orders');
   return withLock_(function () {
+    if (table === 'truck') guardTruck_(id); else guardOrder_(table, id); // kept-out firms (hiddenFirms)
     var name = { truck: T.TR, po: T.PO, so: T.SO }[table];
     if (!name) throw new Error('Unknown record type');
     if (table !== 'truck') {
@@ -517,6 +564,7 @@ function api_settle(token, table, id, on) {
   var name = { po: T.PO, so: T.SO }[table];
   if (!name) throw new Error('Unknown order type.');
   return withLock_(function () {
+    guardOrder_(table, id);
     var o = rows_(name).filter(function (r) { return r.id === id; })[0];
     if (!o) throw new Error(id + ' not found.');
     if (o.status === 'Cancelled') throw new Error(id + ' is cancelled.');
@@ -528,6 +576,7 @@ function api_settle(token, table, id, on) {
 function api_returned(token, id, reason) {
   auth_(token); need_('trucks');
   return withLock_(function () {
+    guardTruck_(id);
     var t = rows_(T.TR).filter(function (r) { return r.id === id; })[0];
     if (!t) throw new Error('Truck ' + id + ' not found.');
     if (num_(t.loadWt) > 0) throw new Error('This truck already has a loaded weight. Use Cancel instead.');
@@ -598,6 +647,7 @@ function api_restore(token, table, id) {
   var ret = table === 'truck' && rows_(T.TR).some(function (r) { return r.id === id && r.status === 'Returned'; });
   need_(table === 'truck' ? (ret ? 'trucks' : 'cancelTruck') : 'orders');
   return withLock_(function () {
+    if (table === 'truck') guardTruck_(id); else guardOrder_(table, id);
     var name = { truck: T.TR, po: T.PO, so: T.SO }[table];
     if (!name) throw new Error('Unknown record type');
     if (table === 'truck') {
@@ -751,6 +801,7 @@ function api_savePhoto(token, id, kind, b64, mime) {
   b64 = String(b64 || '');
   if (!b64 || b64.length > 3000000) throw new Error('The photo is too large. Take it again, or use a smaller picture.');
   return withLock_(function () {
+    guardTruck_(id);
     var t = rows_(T.TR).filter(function (r) { return r.id === id; })[0];
     if (!t) throw new Error('Truck ' + id + ' was not found.');
     var root = folder_('DDGS Slips'), it = root.getFoldersByName(id), sub = it.hasNext() ? it.next() : root.createFolder(id);
@@ -1003,7 +1054,8 @@ function readSettings_() {
 function readAll_() {
   var can = ME && ME.can ? ME.can : ROLES.Viewer;
   var v = dataVersion_(); // read before the tabs, so the data is never older than this version
-  var po = rows_(T.PO), so = rows_(T.SO), trucks = rows_(T.TR), S = readSettings_();
+  var S = readSettings_(), V = visibleRows_(S); // firms kept out of this app (hiddenFirms) are not sent
+  var po = V.po, so = V.so, trucks = V.trucks;
   shape_(po, so, trucks, can);
   var out = {
     po: po, so: so, trucks: trucks, settings: S,
@@ -1036,6 +1088,10 @@ function changes_() {
   var can = ME && ME.can ? ME.can : ROLES.Viewer, ch = REQ_.changed;
   var out = { delta: true, v: dataVersion_(), pv: REQ_.pv, today: today_(), syncedAt: nowStr_(),
     po: changedRows_(T.PO), so: changedRows_(T.SO), trucks: changedRows_(T.TR) };
+  var H = hiddenSets_(); // never send records of firms kept out of this app
+  out.po = out.po.filter(function (o) { return !H.po[o.id]; });
+  out.so = out.so.filter(function (o) { return !H.so[o.id]; });
+  out.trucks = out.trucks.filter(function (t) { return !hidTruck_(t, H); });
   shape_(out.po, out.so, out.trucks, can);
   if (ch[T.NOTE]) out.notes = rows_(T.NOTE).reverse();
   if (ch[T.PAY] && can.money) out.pays = rows_(T.PAY);
@@ -1198,7 +1254,7 @@ function writeLog_(lines) {
 
 /* ---------------- setup and import ---------------- */
 
-var SCHEMA_V = '6.5'; // 6.5: setting qtyTolerancePct
+var SCHEMA_V = '6.6'; // 6.5: setting qtyTolerancePct; 6.6: setting hiddenFirms
 function ensureSetup_() {
   var cache = CacheService.getScriptCache();
   if (cache.get('schema_ok') === SCHEMA_V) return null; // checked in the last 6 hours (setup clears this)
@@ -1494,9 +1550,10 @@ function carry_(list) {
 
 function deriveAll_() {
   var po = {}, so = {}, S = readSettings_(), today = Utilities.formatDate(new Date(), tz_(), 'yyyy-MM-dd');
-  rows_(T.PO).forEach(function (r) { po[r.id] = r; });
-  rows_(T.SO).forEach(function (r) { so[r.id] = r; });
-  var trucks = carry_(rows_(T.TR).map(function (t) { return derive_(t, po[t.po], so[t.so], S, today); }));
+  var V = visibleRows_(S); // firms kept out of this app (hiddenFirms) are not counted anywhere
+  V.po.forEach(function (r) { po[r.id] = r; });
+  V.so.forEach(function (r) { so[r.id] = r; });
+  var trucks = carry_(V.trucks.map(function (t) { return derive_(t, po[t.po], so[t.so], S, today); }));
   var pays = sheet_(T.PAY) ? rows_(T.PAY) : [];
   return { po: po, so: so, S: S, today: today, trucks: trucks, pays: pays, accounts: custAcc_(trucks, pays, S) };
 }

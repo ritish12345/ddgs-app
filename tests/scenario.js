@@ -4,6 +4,16 @@
  */
 'use strict';
 
+/* Test helper: sets an APP_SETTINGS value directly in the fake sheet (only if the row exists — older code has fewer settings). */
+function setSetting(store, key, value) {
+  const sh = store.sheet('APP_SETTINGS');
+  if (!sh) return false;
+  const i = sh.dump().findIndex(r => r[0] === key);
+  if (i < 1) return false;
+  sh.getRange(i + 1, 2).setValue(value);
+  return true;
+}
+
 /* Runs every step; a step that throws is recorded with its error message (that is part of the comparison). */
 function runScenario(s) {
   const st = s.store, log = [];
@@ -16,6 +26,7 @@ function runScenario(s) {
 
   st.activeEmail = st.ownerEmail; // the owner opens the editor / the app with his own Google account
   step('setup', () => call('setup'));
+  setSetting(st, 'hiddenFirms', ''); // this day covers Raghav + own-plant trucks; hiding a firm has its own tests (hidden-firm-tests.js)
   step('authState', () => call('api_authState'));
   const own = step('create owner', () => call('api_createOwner', 'nidhish23', 'Nitish', 'secret1')).token;
   st.activeEmail = '';            // staff open the link from their own phones
@@ -87,4 +98,4 @@ function runScenario(s) {
   return { log, tokens: { own, acc, dis } };
 }
 
-module.exports = { runScenario };
+module.exports = { runScenario, setSetting };
