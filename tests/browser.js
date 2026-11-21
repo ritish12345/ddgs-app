@@ -57,7 +57,8 @@ async function idle(app, ms) {
   const t0 = Date.now();
   while (Date.now() - t0 < (ms || 10000)) {
     await sleep(25);
-    if (!app.win.Q.length && !app.win.QRUN && !app.win.BUSY && !app.br.inflight && !app.win.SYNCING && app.win.D) return true;
+    // NEEDSYNC: a fetch of others' changes is queued right after a save (it starts a moment later)
+    if (!app.win.Q.length && !app.win.QRUN && !app.win.BUSY && !app.br.inflight && !app.win.SYNCING && !app.win.NEEDSYNC && app.win.D) return true;
   }
   return false;
 }

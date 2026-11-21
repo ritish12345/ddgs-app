@@ -50,17 +50,16 @@ const lastId = (s, truck) => s.store.sheet('APP_TRUCKS').dump().slice(1).filter(
   ok(err(() => s.run('api_settle', own, 'po', 'PO-04-TEST', true)) === '', 'Short-close works as before');
   ok(err(() => s.run('api_saveTruck', dis, { id: tc, loadWt: '250' })) === '', 'a short-closed PO is not checked any more');
 
-  console.log('2. Freight UTR optional, supplier UTR still required');
+  console.log('2. UTR optional for freight and (since 21-11-2026) for supplier payments');
   const tf = newTruck(dis, { truck: 'PB08UT0001', po: 'PO-01-BCL', date: '2026-11-19', loadWt: '380', transporter: 'Sharma Roadlines', frate: '85', so: 'SO-0001' });
   s.run('api_saveTruck', dis, { id: tf, unloadDate: '2026-11-19', unloadWt: '379' });
   ok(err(() => s.run('api_saveTruck', acc, { id: tf, freightPaid: true, freightPaidDate: '2026-11-19', detention: '0' })) === '' && truckRow(s, tf)['Freight Paid'] === true, 'one truck: freight marked paid without UTR');
-  ok(/UTR of the payment to the supplier/.test(err(() => s.run('api_saveTruck', acc, { id: tf, plantPaid: true, plantPaidDate: '2026-11-19' }))), 'supplier payment without UTR is still refused');
+  ok(err(() => s.run('api_saveTruck', acc, { id: tf, plantPaid: true, plantPaidDate: '2026-11-19' })) === '' && truckRow(s, tf)['Supplier Paid'] === true, 'one truck: supplier marked paid without UTR');
   const tg = newTruck(dis, { truck: 'PB08UT0002', po: 'PO-01-BCL', date: '2026-11-19', loadWt: '381', transporter: 'Sharma Roadlines', frate: '85', so: 'SO-0001' });
   s.run('api_saveTruck', dis, { id: tg, unloadDate: '2026-11-19', unloadWt: '380' });
   ok(err(() => s.run('api_payBatch', acc, 'freight', [tg], '2026-11-19', '', 0)) === '' && truckRow(s, tg)['Freight Paid'] === true, 'several trucks: freight paid without UTR');
   ok(s.store.sheet('APP_LOG').dump().some(r => r[2] === 'Freight payment' && r[3] === 'no UTR'), 'the log says "no UTR"');
-  ok(/Enter the UTR/.test(err(() => s.run('api_payBatch', acc, 'plant', [tg], '2026-11-19', '', 0))), 'several trucks, supplier: UTR still required');
-
+  ok(err(() => s.run('api_payBatch', acc, 'plant', [tg], '2026-11-19', '', 0)) === '' && truckRow(s, tg)['Supplier Paid'] === true, 'several trucks: supplier paid without UTR');
   console.log('3. Dates as DD-MM-YYYY');
   e = err(() => s.run('api_saveTruck', dis, { truck: 'HR 55 A 1234', po: 'PO-01-BCL', placedOn: '2026-11-12', date: '2026-11-12' }));
   ok(/already entered on 12-11-2026/.test(e), 'messages: "' + e.slice(0, 60) + '…"');
@@ -155,6 +154,14 @@ const lastId = (s, truck) => s.store.sheet('APP_TRUCKS').dump().slice(1).filter(
   submit(A);
   ok(A.$('#modal').hidden, 'saved without UTR');
   ok(await idle(A) && truckRow(s, th)['Freight Paid'] === true, 'the sheet has it paid');
+  console.log('Screen: pay supplier without UTR (Dispatch Register, Accounts)');
+  A.win.runAct('paid', th);
+  ok(/optional/.test(A.$('label[for="f_plantUTR"]').textContent) && !/\*/.test(A.$('label[for="f_plantUTR"]').textContent), 'supplier UTR is marked optional');
+  submit(A);
+  ok(A.$('#modal').hidden && await idle(A) && truckRow(s, th)['Supplier Paid'] === true && A.win.FAILS.length === 0, 'saved without UTR');
+  A.win.runAct('payPlantBatch');
+  ok(/UTR \/ bank reference \(optional\)/.test(A.$('#mform').innerHTML), '"Pay supplier (several trucks)": UTR optional too');
+  A.win.closeForm();
 
   console.log('Screen: quantity window');
   s.run('api_savePO', own, { plant: 'Qty Plant', date: '2026-11-19', qty: 1000, rate: 2000, gst: 0.05, poType: 'trade', commodity: 'DDGS' }); // PO-05-QTY
@@ -197,7 +204,8 @@ const lastId = (s, truck) => s.store.sheet('APP_TRUCKS').dump().slice(1).filter(
   fill(A, { advance: '12000' });
   submit(A);
   ok(await idle(A), 'saved');
-  ok(A.win.getT('DISP-0005').note === 'owner checked the bill' && A.br.calls.join(',') === 'api_saveTruck,api_sync', 'the owner\'s note is already on this screen (' + A.br.calls.join(',') + '), no waiting');
+  ok(A.win.getT('DISP-0005').note === 'owner checked the bill' && A.br.calls.join(',') === 'api_saveTruck,api_sync', 'the owner\'s note is already on this screen (' + A.br.calls.join(',') + '), no waiting' +
+    (A.win.getT('DISP-0005').note === 'owner checked the bill' ? '' : ' [note "' + A.win.getT('DISP-0005').note + '", refused ' + JSON.stringify(A.win.FAILS.map(f => f.msg)) + ', screen v ' + A.win.D.v + ']'));
   O.win.go('activity'); await idle(O);
   ok(/^\d{2}-\d{2}-\d{4}$/.test(O.$('#rv_date').value), 'Activity day box is DD-MM-YYYY too (' + O.$('#rv_date').value + ')');
 

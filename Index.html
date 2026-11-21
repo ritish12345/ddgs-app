@@ -1792,7 +1792,7 @@ function actBatch(kind) {
     '<div class="fg"><div class="full"><label for="b_party">' + (plant ? 'Supplier' : 'Transporter') + '</label><select id="b_party">' + parties.map(function (p) { return '<option value="' + esc(p) + '">' + esc(p) + '</option>'; }).join('') + '</select></div></div>' +
     '<div id="b_bank"></div><div class="blist" id="b_list"></div><div class="btot" id="b_tot"></div>' +
     '<div class="fg"><div><label for="b_amt">Amount paid (₹)</label><input id="b_amt" type="number" inputmode="decimal" step="any" min="0"></div><div><label for="b_date">Payment date</label><input id="b_date" type="text" inputmode="numeric" maxlength="10" data-date="1" placeholder="DD-MM-YYYY" value="' + dmy(D.today) + '"></div>'+
-    '<div class="full"><label for="b_utr">UTR / bank reference' + (plant ? '' : ' (optional)') + '</label><input id="b_utr" autocomplete="off" placeholder="e.g. SBIN52345678901"></div></div>' +
+    '<div class="full"><label for="b_utr">UTR / bank reference (optional)</label><input id="b_utr" autocomplete="off" placeholder="e.g. SBIN52345678901"></div></div>' +
     '<div class="msg warn" id="fwarn" hidden></div><div class="msg err" id="ferr" hidden></div><div class="foot"><button type="button" class="btn ghost" data-act="close">Go back</button><button type="submit" class="btn pri" id="fsave">Save payment</button></div>';
   $('#modal').hidden = false;
   var total = function () { var ids = [], q = 0, a = 0; document.querySelectorAll('#b_list input:checked').forEach(function (c) { var t = getT(c.value); ids.push(t.id); q += plant ? t.L : t.U; a += amt(t); }); return { ids: ids, q: r2(q), a: r2(a) }; };
@@ -1812,7 +1812,6 @@ function actBatch(kind) {
     showErr('');
     if (!x.ids.length) return showErr('Tick at least one truck.');
     if (a === '' || isNaN(Number(a))) return showErr('Enter the amount paid.');
-    if (!utr && plant) return showErr('Enter the UTR / bank reference.'); // optional for freight
     if (!date || date.charAt(0) === '!') return showErr('Enter the payment date as DD-MM-YYYY.');
     var diff = r2(Number(a) - x.a);
     if (Math.abs(diff) > 1 && !FORM.warned) { FORM.warned = true; var el = $('#fwarn'); el.textContent = 'Ticked trucks come to ' + inr(x.a) + ' but the amount paid is ' + inr(Number(a)) + ' (difference ' + inr(diff) + '). Check the trucks, or tap Save again if it is correct.'; el.hidden = false; return; }
@@ -1938,7 +1937,7 @@ function actPaid(id) {
   if (!t.L) { toast('Enter the dispatch weight first.'); return; }
   openForm({ title: 'Pay supplier', sub: payHead(t, 'Amount to pay (incl. GST)', t.purTot, qt(t.L) + ' qtl · ' + t.plant) + bankBox(bankFor('supplier', t.plant), 'supplier', t.plant) + payPhotoInput('plantPay', t),
     fn: 'api_saveTruck', submit: 'Confirm paid', done: t.truck + ' marked paid', values: { plantPaidDate: D.today },
-    fields: [{ k: 'plantPaidDate', label: 'Payment date', type: 'date', req: 1 }, { k: 'plantUTR', label: 'UTR (bank reference)', req: 1, ph: 'e.g. SBIN52345678901', full: 1, help: 'Copy it from the bank confirmation. Needed for every supplier payment.' }],
+    fields: [{ k: 'plantPaidDate', label: 'Payment date', type: 'date', req: 1 }, { k: 'plantUTR', label: 'UTR (bank reference, optional)', ph: 'e.g. SBIN52345678901', full: 1 }],
     build: function (v) { return { id: id, plantPaid: true, plantPaidDate: v.plantPaidDate, plantUTR: v.plantUTR }; } });
 }
 function actBank(kind, name) {

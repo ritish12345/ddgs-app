@@ -309,7 +309,6 @@ function checkTruckRules_(obj) {
     if ('received' in obj || 'deduction' in obj) throw new Error('Only the Owner can correct customer payments. Use + Payment to add money received.');
   }
   requireWeight_(obj, t);
-  checkPayment_(obj, t);
   if (get('plantPaid') === true && !(num_(get('loadWt')) > 0)) throw new Error('Enter the dispatch weight before marking the supplier paid.');
   var tpo = rows_(T.PO).filter(function (r) { return r.id === get('po'); })[0];
   if (num_(get('unloadWt')) > 0 && !get('so') && !(tpo && tpo.poType === 'plant')) throw new Error('Choose the customer (sale order) before recording unloading.');
@@ -360,10 +359,7 @@ function qtl_(x) {
   return (rest ? rest.replace(/\B(?=(\d{2})+(?!\d))/g, ',') + ',' : '') + last + '.' + p[1];
 }
 
-/* Paying the supplier needs the bank UTR, every time. For freight the UTR is optional (Nitish, Nov 2026). */
-function checkPayment_(obj, t) {
-  if (obj.plantPaid === true && t.plantPaid !== true && !(obj.plantUTR || t.plantUTR)) throw new Error('Enter the UTR of the payment to the supplier.');
-}
+/* The bank UTR is optional for supplier and freight payments (Nitish, Nov 2026). It is saved when it is entered. */
 function checkNewTruck_(obj) {
   var today = Utilities.formatDate(new Date(), tz_(), 'yyyy-MM-dd');
   if (!obj.placedOn) obj.placedOn = today;
@@ -373,7 +369,6 @@ function checkNewTruck_(obj) {
   }
   requireWeight_(obj, {});
   if (obj.plantPaid === true && !(num_(obj.loadWt) > 0)) throw new Error('Enter the dispatch weight before marking the supplier paid.');
-  checkPayment_(obj, {});
 }
 
 /** Adds a buyer payment (and any TDS/claim deduction) on the server, so two people entering at once never lose an amount. */
@@ -577,7 +572,6 @@ function api_payBatch(token, kind, ids, date, utr, amount, rid) {
   ids = (ids || []).filter(String);
   if (!ids.length) throw new Error('Tick at least one truck.');
   utr = String(utr || '').trim().toUpperCase();
-  if (!utr && kind === 'plant') throw new Error('Enter the UTR / bank reference.'); // optional for freight
   if (!/^\d{4}-\d{2}-\d{2}$/.test(String(date || ''))) throw new Error('Enter the payment date.');
   return withLock_(function () {
     var A = deriveAll_(), map = {};

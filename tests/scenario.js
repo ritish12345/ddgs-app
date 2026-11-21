@@ -54,7 +54,6 @@ function runScenario(s) {
   // Accounts: payments and freight
   step('advance T1', () => call('api_saveTruck', acc, { id: 'DISP-0001', advance: '10000' }));
   step('advance T3', () => call('api_saveTruck', acc, { id: 'DISP-0003', advance: '30000' }));
-  step('supplier paid without UTR refused', () => call('api_saveTruck', acc, { id: 'DISP-0001', plantPaid: true, plantPaidDate: '2026-11-11' }));
   step('supplier paid T1', () => call('api_saveTruck', acc, { id: 'DISP-0001', plantPaid: true, plantPaidDate: '2026-11-11', plantUTR: 'SBIN111' }));
   step('batch supplier pay T2 T4', () => call('api_payBatch', acc, 'plant', ['DISP-0002', 'DISP-0004'], '2026-11-16', 'hdfc222', 1517000));
   step('batch pay again refused', () => call('api_payBatch', acc, 'plant', ['DISP-0002'], '2026-11-16', 'X', ''));
