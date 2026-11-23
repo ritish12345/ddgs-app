@@ -1584,8 +1584,11 @@ function openMenu(title, sub, items) {
 }
 
 /* ---------- actions ---------- */
-function poOpts() { return D.po.filter(function (p) { return p.status !== 'Cancelled' && p.status !== 'Settled'; }).map(function (p) { var s = orderStats('po', p); return [p.id, p.id + (multiFirm() ? ' · ' + shortFirm(firmOf(p)) : '') + ' · ' + p.plant + (p.takenIn && normName(p.takenIn) !== firmOf(p) ? ' via ' + shortFirm(p.takenIn) : '') + (p.poType === 'plant' ? ' (own plant)' : '') + ' · bal ' + qt(s.bal) + (s.complete ? ' · complete' : '')]; }); }
-function soOpts() { return D.so.filter(function (s) { return s.status !== 'Cancelled' && s.status !== 'Settled'; }).map(function (o) { var s = orderStats('so', o); return [o.id, o.id + (multiFirm() ? ' · ' + shortFirm(firmOf(o)) : '') + ' · ' + o.buyer + (P.money ? ' · ' + inr(o.rate) + ' ' + terms(o) : '') + ' · bal ' + qt(s.bal) + (s.complete ? ' · complete' : '')]; }); }
+/* Open orders to choose from. cur = the order a truck is on now: kept in the list even when it is short-closed or cancelled,
+   so editing such a truck shows its PO / SO instead of an empty box (Nitish, 23-11-2026). */
+function closedMark(o) { return o.status === 'Settled' ? ' · short-closed' : o.status === 'Cancelled' ? ' · cancelled' : ''; }
+function poOpts(cur) { return D.po.filter(function (p) { return (p.status !== 'Cancelled' && p.status !== 'Settled') || (!!cur && p.id === cur); }).map(function (p) { var s = orderStats('po', p); return [p.id, p.id + (multiFirm() ? ' · ' + shortFirm(firmOf(p)) : '') + ' · ' + p.plant + (p.takenIn && normName(p.takenIn) !== firmOf(p) ? ' via ' + shortFirm(p.takenIn) : '') + (p.poType === 'plant' ? ' (own plant)' : '') + ' · bal ' + qt(s.bal) + (s.complete ? ' · complete' : '') + closedMark(p)]; }); }
+function soOpts(cur) { return D.so.filter(function (s) { return (s.status !== 'Cancelled' && s.status !== 'Settled') || (!!cur && s.id === cur); }).map(function (o) { var s = orderStats('so', o); return [o.id, o.id + (multiFirm() ? ' · ' + shortFirm(firmOf(o)) : '') + ' · ' + o.buyer + (P.money ? ' · ' + inr(o.rate) + ' ' + terms(o) : '') + ' · bal ' + qt(s.bal) + (s.complete ? ' · complete' : '') + closedMark(o)]; }); }
 function tradingFirms() { return String(D && D.settings.tradingFirms || '').split(',').map(normName).filter(String); }
 function firmOpts() { return visFirms().map(function (f) { return [f, f]; }); }
 function names(list, key) { var m = {}; list.forEach(function (x) { if (x[key]) m[normName(x[key])] = 1; }); return Object.keys(m).sort(); }
@@ -1651,7 +1654,7 @@ function actEditTruck(id) {
   var t = getT(id);
   var fields = [
     { k: 'truck', label: 'Vehicle No', req: 1 }, { k: 'placedOn', label: 'Vehicle placed on', type: 'date' }, { k: 'date', label: 'Date out (from the slip)', type: 'date', help: 'Needed once the weight is entered.' },
-    { k: 'po', label: 'Purchase order', type: 'select', options: poOpts(), blank: 'Choose PO', req: 1 }, { k: 'so', label: 'Customer (sale order)', type: 'select', options: soOpts(), blank: 'No customer yet' },
+    { k: 'po', label: 'Purchase order', type: 'select', options: poOpts(t.po), blank: 'Choose PO', req: 1 }, { k: 'so', label: 'Customer (sale order)', type: 'select', options: soOpts(t.so), blank: 'No customer yet' },
     { k: 'transporter', label: 'Transporter', list: transporters() }, { k: 'driver', label: 'Driver name / phone' },
     { sec: 'Loading' }, { k: 'loadWt', label: 'Dispatch weight', type: 'weight' }, { k: 'slip', label: 'RST / Weighment Slip No.' },
     { sec: 'Unloading' }, { k: 'unloadDate', label: 'Unloading date', type: 'date' }, { k: 'unloadWt', label: 'Received weight', type: 'weight' }
@@ -1671,7 +1674,7 @@ function quick(id, title, sub, fields, done, values, warn, check) {
 }
 function actAssign(id) {
   var t = getT(id);
-  quick(id, t.so ? 'Change customer' : 'Choose customer', esc(t.truck + ' · ' + t.id + (t.L ? ' · ' + qt(t.L) + ' qtl' : '')), [{ k: 'so', label: 'Sale order', type: 'select', options: soOpts(), blank: 'Choose sale order', req: 1, full: 1 }], 'Customer saved', null, truckWarn(id, t));
+  quick(id, t.so ? 'Change customer' : 'Choose customer', esc(t.truck + ' · ' + t.id + (t.L ? ' · ' + qt(t.L) + ' qtl' : '')), [{ k: 'so', label: 'Sale order', type: 'select', options: soOpts(t.so), blank: 'Choose sale order', req: 1, full: 1 }], 'Customer saved', null, truckWarn(id, t));
 }
 function actLoad(id) {
   var t = getT(id);

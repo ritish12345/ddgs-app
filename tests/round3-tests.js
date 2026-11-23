@@ -70,6 +70,23 @@ const lastId = (s, truck) => s.store.sheet('APP_TRUCKS').dump().slice(1).filter(
   ok(!!st && /₹20,146 \(from earlier trip\)/.test(st.textContent) && /₹45,000 given/.test(st.querySelector('tfoot').textContent), 'transporter statement: trip 2 shows it too; the total counts the advance once (₹45,000 given)');
   K.win.close();
 
+  console.log('3. Editing a truck on a short-closed PO / SO shows its PO and SO (like DISP-0006…0008 on PO-02-OASIS / SO-0004)');
+  const own = s.run('api_login', 'nidhish23', 'secret1').token;
+  s.run('api_settle', own, 'po', 'PO-03-MG', true); // DISP-0004 is on PO-03-MG and SO-0001; SO-0002 (DISP-0002) is short-closed in the day already
+  const O = openApp(s, own);
+  ok(await idle(O), 'Owner screen loads');
+  O.win.runAct('editTruck', 'DISP-0004');
+  const po = O.win.document.getElementById('f_po'), so = O.win.document.getElementById('f_so');
+  ok(po.value === 'PO-03-MG' && /short-closed/.test(po.options[po.selectedIndex].text), 'DISP-0004: PO box shows PO-03-MG (short-closed), not empty');
+  ok(!Array.from(po.options).some(o => o.value === 'PO-01-BCL' && /short-closed/.test(o.text)) && Array.from(po.options).filter(o => /short-closed/.test(o.text)).length === 1, 'other short-closed orders are still not offered');
+  O.win.closeForm();
+  O.win.runAct('editTruck', 'DISP-0002');
+  ok(O.win.document.getElementById('f_so').value === 'SO-0002' && O.win.document.getElementById('f_po').value === 'PO-01-BCL', 'DISP-0002: SO box shows SO-0002 (short-closed), PO shows PO-01-BCL');
+  fill(O, { note: 'checked weights' });
+  submit(O);
+  ok(await idle(O) && O.win.FAILS.length === 0 && truckRow(s, 'DISP-0002').Note === 'checked weights' && truckRow(s, 'DISP-0002')['SO ID'] === 'SO-0002', 'saving a change keeps PO and SO; no error');
+  O.win.close();
+
   console.log(fails ? '\n' + fails + ' FAILED' : '\nAll round 3 tests passed.');
   process.exit(fails ? 1 : 0);
 })().catch(e => { console.log('CRASH ' + (e && e.stack || e)); process.exit(1); });
