@@ -1064,8 +1064,8 @@ function vTruck(id) {
       (t.plantPO ? '' : row('Invoice rate', t.so ? inr(t.rateUsed) + '/qtl' + (t.rateOwn ? ' <span class="tag wn">this truck only</span>' : '') : '—') + row('Sale total', t.so ? inr(t.saleTot) + (t.U ? '' : ' <span class="mu">(on loaded wt)</span>') : '—') +
       row('Customer money', t.so ? 'kept per customer · ' + lnk('buyer', t.buyer, t.buyer + ' account') : '—')) +
       (t.fBuyer ? row('Freight', 'Paid by buyer') : row('Freight', t.U ? inr(t.frAmt) + ' (' + inr(t.FR) + '/qtl)' : (t.FR ? inr(t.FR) + '/qtl' : '—')) + row('Shortage deduction', inr(t.shortDed)) +
-        row('Detention', (t.det ? inr(t.det) : '₹0') + (t.detSuggest && !t.det ? ' <span class="mu">(suggested ' + inr(t.detSuggest) + ' if you agree to pay)</span>' : '')) + row('Freight advance', inr(t.A)) +
-        row('Net freight', t.U ? '<span class="' + (t.netFr < 0 ? 'over' : '') + '">' + inr(t.netFr) + '</span>' + (t.carryIn ? ' − ' + inr(t.carryIn) + ' earlier advance = <b>' + inr(t.netPay) + '</b>' : '') + (t.carryOut ? ' <span class="mu">(' + inr(t.carryOut) + ' carried to next trip)</span>' : '') + (t.freightPaid ? ' · <span style="color:var(--ok)">paid ' + dmy(t.freightPaidDate) + '</span>' : '') : '—')) +
+        row('Detention', (t.det ? inr(t.det) : '₹0') + (t.detSuggest && !t.det ? ' <span class="mu">(suggested ' + inr(t.detSuggest) + ' if you agree to pay)</span>' : '')) + row('Freight advance', inr(t.A + t.carryIn) + (t.carryIn ? ' <span class="mu">(' + (t.A ? inr(t.A) + ' this trip + ' : '') + inr(t.carryIn) + ' extra advance from an earlier trip of this truck)</span>' : '')) +
+        row('Net freight', t.U ? '<b>' + inr(t.netPay) + '</b>' + (t.carryOut ? ' <span class="mu">(' + inr(t.carryOut) + ' extra advance carried to the next trip)</span>' : '') + (t.freightPaid ? ' · <span style="color:var(--ok)">paid ' + dmy(t.freightPaidDate) + '</span>' : '') : '—')) +
       (P.profit && t.U && !t.plantPO ? row('Profit before GST', inr(t.profit)) : '') + '</dl>';
   }
   h += truckPhotos(t);
@@ -1161,13 +1161,14 @@ function truckTable(tr, kind) {
   var body = tr.map(function (t, i) {
     var c = cell('<span class="sn">' + (i + 1) + '</span>') + cell(lnk('truck', t.id)) + cell(dm(t.date)) + (mf ? cell(firmTag(t.firm)) : '') + cell('<b>' + esc(t.truck) + '</b>') + cell(kind === 'po' || kind === 'plant' ? (t.plantPO ? '<span class="tag own">Own plant</span>' : lnk('buyer', t.buyer)) : lnk('plant', t.plant)) + cell(lnk('transporter', t.transporter)) +
       cell(t.L ? qt(t.L) : '—', 1) + cell(t.U ? qt(t.U) : '—', 1) + cell(t.U ? qt(t.short) : '—', 1) + cell(t.trip + (t.detDays && !t.fBuyer ? ' <span class="over">+' + t.detDays + '</span>' : ''), 1) + cell('<span class="stage ' + (t.st < 0 ? 'sx' : 's' + t.st) + '">' + t.stage + '</span>');
-    if (M) c += cell(t.L ? inr(t.purTot) : '—', 1) + cell(t.fBuyer ? 'customer' : t.U ? inr(t.frAmt) : '—', 1) + cell(t.shortDed ? inr(t.shortDed) : '—', 1) + cell(t.det ? inr(t.det) : '—', 1) + cell(t.A ? inr(t.A) : '—', 1) +
-      cell(t.U && !t.fBuyer ? inr(t.netPay) + (t.carryIn || t.carryOut ? ' <span class="mu">*</span>' : '') : '—', 1) + cell(t.fBuyer ? '—' : t.freightPaid ? '✓ ' + dm(t.freightPaidDate) : (t.U ? 'unpaid' : '—')) + cell(t.so && t.saleTot ? inr(t.saleTot) : '—', 1);
+    if (M) c += cell(t.L ? inr(t.purTot) : '—', 1) + cell(t.fBuyer ? 'customer' : t.U ? inr(t.frAmt) : '—', 1) + cell(t.shortDed ? inr(t.shortDed) : '—', 1) + cell(t.det ? inr(t.det) : '—', 1) + cell(advCell(t, true), 1) +
+      cell(t.U && !t.fBuyer ? inr(t.netPay) + (t.carryOut ? ' <span class="mu" title="' + inr(t.carryOut) + ' extra advance carried to the next trip">*</span>' : '') : '—', 1) + cell(t.fBuyer ? '—' : t.freightPaid ? '✓ ' + dm(t.freightPaidDate) : (t.U ? 'unpaid' : '—')) + cell(t.so && t.saleTot ? inr(t.saleTot) : '—', 1);
     return '<tr>' + c + '</tr>';
   }).join('');
   var foot = '<tr><td colspan="' + (mf ? 7 : 6) + '">Total ' + trk(tr.length) + '</td>' + cell(qt(sum(tr, function (t) { return t.L; })), 1) + cell(qt(sum(tr, function (t) { return t.U; })), 1) + cell(qt(sum(tr, function (t) { return t.short; })), 1) + '<td></td><td></td>';
   if (M) foot += cell(inr(sum(tr, function (t) { return t.purTot; })), 1) + cell(inr(sum(tr, function (t) { return t.frAmt; })), 1) + cell(inr(sum(tr, function (t) { return t.shortDed; })), 1) + cell(inr(sum(tr, function (t) { return t.det; })), 1) +
-    cell(inr(sum(tr, function (t) { return t.A; })), 1) + cell(inr(sum(tr, function (t) { return t.netPay; })), 1) + '<td></td>' + cell(inr(sum(tr, function (t) { return t.so ? t.saleTot : 0; })), 1);
+    // advances given: an extra advance shown again on a later trip ("earlier trip") is counted once
+    cell(inr(sum(tr, function (t) { return t.A; })) + (tr.some(function (t) { return t.carryIn > 0; }) ? ' <span class="mu">given</span>' : ''), 1) + cell(inr(sum(tr, function (t) { return t.netPay; })), 1) + '<td></td>' + cell(inr(sum(tr, function (t) { return t.so ? t.saleTot : 0; })), 1);
   return '<div class="tblw"><table class="t"><thead><tr>' + head.map(function (x) { return '<th' + (x[1] ? ' class="r"' : '') + '>' + x[0] + '</th>'; }).join('') + '</tr></thead><tbody>' + body + '</tbody><tfoot>' + foot + '</tr></tfoot></table></div>';
 }
 
@@ -1337,6 +1338,15 @@ function actReversePay(id) {
     danger: 1, submit: 'Yes, reverse it', done: 'Payment reversed', fields: [{ k: 'reason', label: 'Reason', full: 1, req: 1, ph: 'e.g. entered twice' }],
     custom: function (v) { return callSafe('api_reversePayment', id, v.reason); } });
 }
+/* Freight advance set against this trip: its own advance plus extra advance carried from an earlier trip of the same truck
+   (Nitish, 23-11-2026). So on every row: freight − shortage − advance + detention = net freight payable. */
+function advCell(t, inline) {
+  var a = r2(t.A + t.carryIn);
+  if (!a) return '—';
+  if (!t.carryIn) return inr(a);
+  var why = (t.A ? inr(t.A) + ' + ' + inr(t.carryIn) + ' ' : '') + 'from earlier trip';
+  return inr(a) + (inline ? ' <span class="mu">(' + why + ')</span>' : '<small>' + why + '</small>');
+}
 function vFreight() {
   // Transporter totals use all loaded trucks; the list shows only open ones (closed / cancelled are on the "Closed & cancelled" page).
   var all = T.filter(function (t) { return t.L && tInFirm(t); }), lv = all.filter(function (t) { return !t.cx && !t.fBuyer; }), base = all.filter(function (t) { return !t.cx && t.st !== 6; });
@@ -1368,8 +1378,8 @@ function vFreight() {
       '<div class="td r num" data-l="Freight">' + (t.U && !t.fBuyer ? inr(t.frAmt) : '—') + '</div>' +
       '<div class="td r num" data-l="Short ded.">' + (t.shortDed ? inr(t.shortDed) + '<small>' + qt(t.short) + ' qtl</small>' : '—') + '</div>' +
       '<div class="td r num" data-l="Detention">' + (t.det ? inr(t.det) : t.detSuggest ? '<span class="mu" title="Suggestion only, not added">' + inr(t.detSuggest) + '?</span>' : '—') + '</div>' +
-      '<div class="td r num" data-l="Freight adv.">' + (t.A ? inr(t.A) : '—') + '</div>' +
-      '<div class="td r num" data-l="Net freight payable"><b>' + (t.fBuyer ? '<span class="mu">—</span>' : t.U ? inr(t.netPay) : '—') + '</b>' + (t.carryIn ? '<small>after ' + inr(t.carryIn) + ' earlier adv.</small>' : '') + (t.carryOut ? '<small class="over">' + inr(t.carryOut) + ' extra adv. → next trip</small>' : '') + '<b>' + '</b></div>' +
+      '<div class="td r num" data-l="Freight adv.">' + advCell(t) + '</div>' +
+      '<div class="td r num" data-l="Net freight payable"><b>' + (t.fBuyer ? '<span class="mu">—</span>' : t.U ? inr(t.netPay) : '—') + '</b>' + (t.carryOut ? '<small class="over">' + inr(t.carryOut) + ' extra adv. → next trip</small>' : '') + '</div>' +
       '<div class="td" data-l="Freight">' + pay + '</div><div class="td acts"><button type="button" class="ib" data-act="menu" data-id="' + esc(t.id) + '" aria-label="More actions">⋯</button></div></div>';
   }).join('') + '</div>' + more(list);
   h += '<p class="mu" style="font-size:12.5px;margin-top:10px">Net freight payable = freight − shortage deduction − freight advance + detention. Shortage above ' + (n(D.settings.shortageAllowancePct) * 100).toFixed(2) + '% of loaded weight is cut at the sale rate (at the purchase rate for own-plant trucks). Detention: ' + n(D.settings.freeDays === undefined ? 3 : D.settings.freeDays) + ' free days, then ' + inr(n(D.settings.detentionPerDay === undefined ? 500 : D.settings.detentionPerDay)) + ' a day.</p>';
@@ -1665,7 +1675,7 @@ function actAssign(id) {
 }
 function actLoad(id) {
   var t = getT(id);
-  quick(id, 'Dispatch weight', esc(t.truck + ' · ' + t.id), [{ k: 'loadWt', label: 'Weight on the slip', type: 'weight', req: 1, full: 1 }, { k: 'date', label: 'Date out (from the slip)', type: 'date', req: 1 }, { k: 'transporter', label: 'Transporter', list: transporters(), req: 1 }, { k: 'frate', label: 'Freight rate per qtl', type: 'number' }, { k: 'slip', label: 'RST / Weighment Slip No.' }], 'Weight saved', Object.assign({}, t, { date: t.date || D.today, frate: t.frate === '' || t.frate == null ? (D.settings.defaultFreightRate || '') : t.frate }), truckWarn(id, t), weightNeeds);
+  quick(id, 'Dispatch weight', esc(t.truck + ' · ' + t.id), [{ k: 'loadWt', label: 'Weight on the slip', type: 'weight', req: 1, full: 1 }, { k: 'date', label: 'Date out (from the slip)', type: 'date', req: 1 }, { k: 'transporter', label: 'Transporter (can be added later)', list: transporters() }, { k: 'frate', label: 'Freight rate per qtl', type: 'number' }, { k: 'slip', label: 'RST / Weighment Slip No.' }], 'Weight saved', Object.assign({}, t, { date: t.date || D.today, frate: t.frate === '' || t.frate == null ? (D.settings.defaultFreightRate || '') : t.frate }), truckWarn(id, t), weightNeeds);
   FORM.onlyChanged = false; // the suggested freight rate and date are sent as shown (before, keeping the suggested 85 was refused)
 }
 function actUnload(id) {
@@ -1845,13 +1855,13 @@ function showImport(r) {
 var FLOWSEL = '';
 var REV = null, REVOK = '', REVKEY = '', REVDATE = '', REVWHO = '';
 function exactRs(x) { return '₹' + Number(x || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
-/* Once a weight is entered, the transporter and the freight rate are needed (the server checks the same rule). */
+/* Once a weight is entered, the date out and the freight rate are needed (the server checks the rate too).
+   The transporter is optional (Nitish, 23-11-2026). */
 function weightNeeds(v) {
   var o = FORM && FORM.values ? FORM.values : {};
-  if (o.id && n(v.loadWt) === n(o.loadWt) && String(v.transporter || '') === String(o.transporter || '')) return null;
+  if (o.id && n(v.loadWt) === n(o.loadWt) && n(v.frate) === n(o.frate)) return null;
   if (!(n(v.loadWt) > 0)) return null;
   if (!v.date) return 'Enter the date the truck left (date out, from the slip).';
-  if (!String(v.transporter || '').trim()) return 'Enter the transporter. It is required once the weight is entered.';
   if (P.truckMoney && !(n(v.frate) > 0)) return 'Enter the freight rate per qtl. It is required once the weight is entered.';
   return null;
 }

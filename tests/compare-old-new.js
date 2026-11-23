@@ -60,8 +60,12 @@ const A = runOn(oldCode), B = runOn(undefined);
    - dates in messages are DD-MM-YYYY (old: yyyy-mm-dd)
    - new setting qtyTolerancePct (order quantity window) */
 const EXPECTED = ['dates in messages DD-MM-YYYY', 'new settings qtyTolerancePct + hiddenFirms (left empty in this day)',
-  'customer payments (pays) sent to money roles', 'new Closed rule changes the stage sent to Dispatch (_st)'];
-A.log.forEach(l => { if (l.err) l.err = l.err.replace(/\b(\d{4})-(\d{2})-(\d{2})\b/g, '$3-$2-$1'); });
+  'customer payments (pays) sent to money roles', 'new Closed rule changes the stage sent to Dispatch (_st)',
+  'transporter optional (23-11-2026): a weight without transporter and rate is refused for the missing rate'];
+A.log.forEach(l => {
+  if (l.err) l.err = l.err.replace(/\b(\d{4})-(\d{2})-(\d{2})\b/g, '$3-$2-$1');
+  if (l.err === 'Enter the transporter. It is required once the weight is entered.') l.err = 'Enter the freight rate per qtl. It is required once the weight is entered.';
+});
 if (B.tabs.APP_SETTINGS) B.tabs.APP_SETTINGS = B.tabs.APP_SETTINGS.filter(r => r[0] !== 'qtyTolerancePct' && r[0] !== 'hiddenFirms');
 Object.keys(B.screens).forEach(k => { if (B.screens[k].settings) { delete B.screens[k].settings.qtyTolerancePct; delete B.screens[k].settings.hiddenFirms; } delete B.screens[k].pays; });
 // Stage values follow the new Closed rule (checked in parity / receivables tests); here only that Dispatch still gets one.

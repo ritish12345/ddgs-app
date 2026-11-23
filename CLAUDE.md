@@ -32,7 +32,8 @@ Read this file fully before doing any work in this folder.
 - **Shortage deduction** = (shortage − 0.2% of dispatch weight) × sale rate ex-GST, only if positive; own-plant trucks use the purchase rate.
 - **Net freight = received weight × freight rate − freight advance − shortage deduction.**
 - **Detention is only a suggestion** (3 free days, then ₹500/day). It is never added unless someone types an amount when paying freight.
-- Extra freight advance on one trip carries forward to the same vehicle's next trip.
+- Extra freight advance on one trip carries forward to the same vehicle's next trip. On Freight & Transport (and the truck page and statements), the next trip's "Freight adv." shows it ("from earlier trip"), so every row reads freight − shortage − advance + detention = net payable. Statement totals count each advance once ("given").
+- **Transporter is optional** (23-11-2026); the freight rate is still required once the weight is entered.
 - Freight is paid by the last firm that sells (mostly Raghav). If the SO says the customer pays freight, there is no freight for us.
 - Raghav's margin on sales to own group companies (e.g. to Shree Ram) is not reduced by freight.
 - Same vehicle number cannot be entered twice on the same day (spaces ignored). Only Owner can override.

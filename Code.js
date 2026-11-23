@@ -355,12 +355,12 @@ function checkTruckRules_(obj) {
   if (num_(get('unloadWt')) > 0 && !get('so') && !(tpo && tpo.poType === 'plant')) throw new Error('Choose the customer (sale order) before recording unloading.');
 }
 
-/* Once a weight is entered, the transporter and the freight rate are required (checked on the values after this save). */
+/* Once a weight is entered, the freight rate is required (checked on the values after this save).
+   The transporter is optional (Nitish, 23-11-2026): it can be added later. */
 function requireWeight_(obj, cur) {
-  if (!('loadWt' in obj) && !('transporter' in obj) && !('frate' in obj)) return;
+  if (!('loadWt' in obj) && !('frate' in obj)) return;
   var get = function (k) { return (k in obj) ? obj[k] : cur[k]; };
   if (!(num_(get('loadWt')) > 0)) return;
-  if (!String(get('transporter') || '').trim()) throw new Error('Enter the transporter. It is required once the weight is entered.');
   if (!(num_(get('frate')) > 0)) throw new Error('Enter the freight rate per qtl. It is required once the weight is entered.');
 }
 /* Order quantity window (setting qtyTolerancePct, 1%). Example PO-01-BCL of 10,000 qtl: complete from 9,900 qtl,
