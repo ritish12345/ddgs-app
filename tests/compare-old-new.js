@@ -68,6 +68,10 @@ A.log.forEach(l => {
 });
 if (B.tabs.APP_SETTINGS) B.tabs.APP_SETTINGS = B.tabs.APP_SETTINGS.filter(r => r[0] !== 'qtyTolerancePct' && r[0] !== 'hiddenFirms');
 Object.keys(B.screens).forEach(k => { if (B.screens[k].settings) { delete B.screens[k].settings.qtyTolerancePct; delete B.screens[k].settings.hiddenFirms; } delete B.screens[k].pays; });
+// Transporter advances (24-11-2026): new column at the end of APP_TRUCKS (blank in this day) and the advances sent to money roles.
+EXPECTED.push('transporter advances: new APP_TRUCKS column "Transporter Advance Used" (blank here), advances sent to money roles');
+if (B.tabs.APP_TRUCKS) { const ci = B.tabs.APP_TRUCKS[0].indexOf('Transporter Advance Used'); if (ci >= 0) B.tabs.APP_TRUCKS = B.tabs.APP_TRUCKS.map(r => r.filter((x, i) => i !== ci)); }
+Object.keys(B.screens).forEach(k => { delete B.screens[k].advances; (B.screens[k].trucks || []).forEach(t => { delete t.tAdv; }); });
 // Stage values follow the new Closed rule (checked in parity / receivables tests); here only that Dispatch still gets one.
 [A, B].forEach(X => Object.keys(X.screens).forEach(k => (X.screens[k].trucks || []).forEach(t => { if ('_st' in t) t._st = 'present'; })));
 

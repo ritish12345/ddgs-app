@@ -515,6 +515,7 @@ function rebuild() {
     Q.forEach(function (op) { opApply(op, byId, list); (op.ids || []).forEach(function (id) { PEND[id] = 1; }); });
   }
   T = CARRY(list.map(derive));
+  TADV = P.money ? transAdv(T, D.advances || []) : {}; // transporter advances, used automatically (same as the server)
   flagIssues();
   // Customer accounts (Receivables): confirmed payments plus those still saving.
   PAYS = (D.pays || []).slice();
@@ -537,6 +538,7 @@ function applyResult(d) {
   });
   if (d.notes) D.notes = d.notes;
   if (d.pays) D.pays = d.pays; // customer payments (Receivables)
+  if (d.advances) D.advances = d.advances; // transporter advances
   if (d.banks) D.banks = d.banks;
   if (d.users) D.users = d.users;
   if (d.today) D.today = d.today;
@@ -559,7 +561,7 @@ function showSync() {
    background, one after another in the order they were made. If the internet drops, they wait and try again.
    If the server refuses one (a rule), it drops out (the screen goes back to the server's data) and is listed
    at the bottom with "Open again", which opens the same form with what was typed. */
-var Q = [], QRUN = false, FAILS = [], PEND = {}, SYNCING = false, LASTFULL = 0, LASTACT = null, NEEDSYNC = false, LASTORDERS = [], ACC = {}, PAYS = [];
+var Q = [], QRUN = false, FAILS = [], PEND = {}, SYNCING = false, LASTFULL = 0, LASTACT = null, NEEDSYNC = false, LASTORDERS = [], ACC = {}, PAYS = [], TADV = {};
 var RETRY_RE = /NetworkError|Connection failure|HTTP 0|server error occurred|timed out|Lock timeout|Too many simultaneous|invoked too many times|Exceeded maximum execution time/i;
 function newRid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 10); }
 function saveQ() {
@@ -616,7 +618,7 @@ function opApply(op, byId, list) {
   } else if (op.k === 'batch') (d.ids || []).forEach(function (id) {
     var b = byId[id]; if (!b) return;
     if (d.kind === 'plant') Object.assign(b, { plantPaid: true, plantPaidDate: d.date, plantUTR: d.utr });
-    else Object.assign(b, { freightPaid: true, freightPaidDate: d.date, freightUTR: d.utr });
+    else Object.assign(b, { freightPaid: true, freightPaidDate: d.date, freightUTR: d.utr, tAdv: (getT(id) || {}).advUsed || '' }); // the server saves the same
   });
 }
 /* A truck form (new truck or any change to one) as a waiting save. p = what the form sends to the server. */
@@ -627,6 +629,8 @@ function fastTruck(p) {
   Object.keys(p).forEach(function (k) { if (k !== 'id' && k !== '_force') patch[k] = p[k]; });
   if ('truck' in patch) patch.truck = normTruck(patch.truck);
   if ('transporter' in patch) patch.transporter = normName(patch.transporter);
+  if (!isNew && p.freightPaid === true && !t.freightPaid) patch.tAdv = t.advUsed || ''; // what it takes from its transporter's advance (the server works it out the same)
+  if (!isNew && p.freightPaid === false) patch.tAdv = '';
   if (isNew) { // the same defaults the server fills in
     if (!patch.placedOn) patch.placedOn = D.today;
     if (!patch.date) patch.date = patch.placedOn;
@@ -772,6 +776,36 @@ function CARRY(list) {
     trips[trips.length - 1].carryLeft = run;
   });
   return list;
+}
+/* Transporter advances: the same calculation as transAdv_ in Code.js (keep both the same). Money given to a transporter
+   that is not tied to a truck is used automatically: a freight-paid truck keeps what it took (tAdv); unloaded, unpaid trucks
+   of that transporter share what is left, oldest unload first. netPay goes down by what is taken; left = given − used. */
+function transAdv(list, advs) {
+  var acc = {}, open = {};
+  var key = function (s) { return String(s || '').toUpperCase().replace(/\s+/g, ' ').trim(); };
+  var get = function (k) { return acc[k] || (acc[k] = { name: k, given: 0, used: 0, left: 0 }); };
+  (advs || []).forEach(function (a) { var k = key(a.transporter); if (k) get(k).given += Number(a.amount) || 0; });
+  list.forEach(function (t) {
+    t.advUsed = 0; t.advAvail = 0;
+    var k = key(t.transporter);
+    if (t.cx || t.fBuyer || !t.U || !k) return;
+    if (t.freightPaid) {
+      var u = Number(t.tAdv) || 0;
+      if (u) { t.advUsed = r2(u); t.netPay = r2(t.netPay - u); get(k).used += u; }
+      return;
+    }
+    (open[k] = open[k] || []).push(t);
+  });
+  Object.keys(acc).forEach(function (k) {
+    var a = acc[k], pool = r2(a.given - a.used);
+    (open[k] || []).sort(function (x, y) { return String(x.unloadDate).localeCompare(String(y.unloadDate)) || String(x.id).localeCompare(String(y.id)); }).forEach(function (t) {
+      t.advAvail = Math.max(0, pool);
+      var use = r2(Math.max(0, Math.min(pool, t.netPay)));
+      if (use > 0) { t.advUsed = use; t.netPay = r2(t.netPay - use); pool = r2(pool - use); a.used += use; }
+    });
+    a.given = r2(a.given); a.used = r2(a.used); a.left = r2(a.given - a.used);
+  });
+  return acc;
 }
 /* Customer accounts: the same calculation as custAcc_ in Code.js. Customer money is kept per customer (factory), not per truck.
    Sales = sale totals of its unloaded trucks; Outstanding = Sales − Received − Deducted (below 0 = advance);
@@ -1168,7 +1202,7 @@ function truckTable(tr, kind) {
   var foot = '<tr><td colspan="' + (mf ? 7 : 6) + '">Total ' + trk(tr.length) + '</td>' + cell(qt(sum(tr, function (t) { return t.L; })), 1) + cell(qt(sum(tr, function (t) { return t.U; })), 1) + cell(qt(sum(tr, function (t) { return t.short; })), 1) + '<td></td><td></td>';
   if (M) foot += cell(inr(sum(tr, function (t) { return t.purTot; })), 1) + cell(inr(sum(tr, function (t) { return t.frAmt; })), 1) + cell(inr(sum(tr, function (t) { return t.shortDed; })), 1) + cell(inr(sum(tr, function (t) { return t.det; })), 1) +
     // advances given: an extra advance shown again on a later trip ("earlier trip") is counted once
-    cell(inr(sum(tr, function (t) { return t.A; })) + (tr.some(function (t) { return t.carryIn > 0; }) ? ' <span class="mu">given</span>' : ''), 1) + cell(inr(sum(tr, function (t) { return t.netPay; })), 1) + '<td></td>' + cell(inr(sum(tr, function (t) { return t.so ? t.saleTot : 0; })), 1);
+    cell(inr(sum(tr, function (t) { return t.A; })) + (tr.some(function (t) { return t.carryIn > 0 || t.advUsed > 0; }) ? ' <span class="mu">given on trucks</span>' : ''), 1) + cell(inr(sum(tr, function (t) { return t.netPay; })), 1) + '<td></td>' + cell(inr(sum(tr, function (t) { return t.so ? t.saleTot : 0; })), 1);
   return '<div class="tblw"><table class="t"><thead><tr>' + head.map(function (x) { return '<th' + (x[1] ? ' class="r"' : '') + '>' + x[0] + '</th>'; }).join('') + '</tr></thead><tbody>' + body + '</tbody><tfoot>' + foot + '</tr></tfoot></table></div>';
 }
 
@@ -1177,6 +1211,7 @@ function vParty(kind, name) {
   var key = normName(name);
   var tr = liveAll().filter(function (t) { return normName(kind === 'buyer' ? t.buyer : kind === 'plant' ? t.plant : (t.transporter || '(none)')) === key; }).sort(sortT);
   var extra = (kind === 'buyer' && P.truckMoney ? '<button type="button" class="btn pri sm" data-act="custPay" data-id="' + esc(key) + '">+ Received</button>' : '') +
+    (kind === 'transporter' && P.truckMoney ? '<button type="button" class="btn pri sm" data-act="tAdv" data-id="' + esc(key) + '">+ Advance</button>' : '') +
     (P.exportX ? '<button type="button" class="btn sm" data-act="exportPage" data-kind="' + kind + '" data-id="' + esc(name) + '">' + (kind === 'transporter' ? 'Statement Excel' : 'Excel') + '</button>' : '');
   var h = pageHead(esc(name), { buyer: 'Customer', plant: 'Supplier', transporter: 'Transporter' }[kind] + ' · ' + trk(tr.length), extra, newTab(kind, name));
   h += '<div class="kpis">' + kpi('Loaded', qt(sum(tr, function (t) { return t.L; })) + ' qtl') + kpi('Unloaded', qt(sum(tr, function (t) { return t.U; })) + ' qtl') + kpi('Shortage', qt(sum(tr, function (t) { return t.short; })) + ' qtl');
@@ -1194,10 +1229,13 @@ function vParty(kind, name) {
         kpi('Freight advance open', inr(sum(f.filter(function (t) { return !t.freightPaid; }), function (t) { return t.A; }))) +
         kpi('Returned empty', T.filter(function (t) { return t.returned && normName(t.transporter || '(none)') === key; }).length, 'trucks sent back without loading') +
         kpi('Advance to adjust', inr(sum(f, function (t) { return t.carryLeft; })), 'extra advance waiting for next trips') +
-        kpi('Payable now', inr(sum(f.filter(function (t) { return t.U && !t.freightPaid; }), function (t) { return t.netPay; })), 'unloaded, not paid', 'warn');
+        kpi('Payable now', inr(sum(f.filter(function (t) { return t.U && !t.freightPaid; }), function (t) { return t.netPay; })), 'unloaded, not paid, after advances', 'warn');
+      var ta = TADV[key];
+      if (ta) h += kpi('Transporter advance left', inr(ta.left), 'given ' + inr(ta.given) + ' · used ' + inr(ta.used), ta.left < -0.5 ? 'bad' : 'good');
     }
   }
   h += '</div>';
+  if (kind === 'transporter' && P.money) h += advList(key);
   if (kind !== 'transporter') {
     var ord = (kind === 'buyer' ? D.so : D.po).filter(function (o) { return normName(kind === 'buyer' ? o.buyer : o.plant) === key; });
     h += '<h2>' + (kind === 'buyer' ? 'Sale orders' : 'Purchase orders') + '</h2><div class="panel">' + (ord.length ? ord.map(function (o, i) {
@@ -1341,11 +1379,50 @@ function actReversePay(id) {
 /* Freight advance set against this trip: its own advance plus extra advance carried from an earlier trip of the same truck
    (Nitish, 23-11-2026). So on every row: freight − shortage − advance + detention = net freight payable. */
 function advCell(t, inline) {
-  var a = r2(t.A + t.carryIn);
+  var tv = t.advUsed || 0, a = r2(t.A + t.carryIn + tv);
   if (!a) return '—';
-  if (!t.carryIn) return inr(a);
-  var why = (t.A ? inr(t.A) + ' + ' + inr(t.carryIn) + ' ' : '') + 'from earlier trip';
+  if (!t.carryIn && !tv) return inr(a);
+  var parts = [];
+  if (t.A) parts.push(inr(t.A) + ' this truck');
+  if (t.carryIn) parts.push(inr(t.carryIn) + ' from earlier trip');
+  if (tv) parts.push(inr(tv) + ' from transporter advance');
+  var why = parts.length === 1 ? parts[0].replace(/^₹[\d,]+ /, '') : parts.join(' + ');
   return inr(a) + (inline ? ' <span class="mu">(' + why + ')</span>' : '<small>' + why + '</small>');
+}
+/* + Advance to a transporter, not tied to a truck (e.g. before loading). Used automatically on its freight. */
+function actTAdv(name) {
+  var key = normName(name || ''), a = TADV[key];
+  openForm({ title: 'Advance to transporter', sub: 'Money given to a transporter or driver that is not on a truck yet. It is taken off this transporter’s freight automatically, oldest trip first.' + (a ? '<br>' + esc(key) + ': advance left <b>' + inr(a.left) + '</b>' : ''),
+    values: { transporter: key, date: D.today }, done: 'Advance saved', submit: 'Save advance',
+    fields: [
+      { k: 'transporter', label: 'Transporter', req: 1, full: 1, list: transporters() },
+      { k: 'amount', label: 'Amount (₹)', type: 'number', req: 1 }, { k: 'date', label: 'Date', type: 'date', req: 1 },
+      { k: 'vehicle', label: 'Vehicle No (optional)' }, { k: 'driver', label: 'Driver name / phone (optional)' },
+      { k: 'ref', label: 'UTR / bank reference (optional)', full: 1 }, { k: 'note', label: 'Note', type: 'textarea', full: 1 }
+    ],
+    check: function (v) { return n(v.amount) > 0 ? null : 'Enter the amount of the advance.'; },
+    warn: function (v) { return v.transporter && transporters().indexOf(normName(v.transporter)) < 0 ? 'New transporter name "' + normName(v.transporter) + '". Check the spelling matches the one on the trucks, or the advance will not be used on them.' : null; },
+    custom: function (v) { return callSafe('api_addAdvance', v, newRid()); } });
+}
+/* A wrong advance is reversed (a minus line), never deleted. */
+function actReverseAdv(id) {
+  var p = (D.advances || []).filter(function (x) { return x.id === id; })[0];
+  if (!p) return;
+  openForm({ title: 'Reverse ' + id + '?', sub: esc(p.transporter) + ' · ' + inr(n(p.amount)) + ' · ' + dmy(p.date) + '<br>A minus line is added on today’s date; nothing is deleted.',
+    danger: 1, submit: 'Yes, reverse it', done: 'Advance reversed', fields: [{ k: 'reason', label: 'Reason', full: 1, req: 1, ph: 'e.g. entered twice' }],
+    custom: function (v) { return callSafe('api_reverseAdvance', id, v.reason); } });
+}
+/* Advances given to one transporter, newest first, each with Reverse. */
+function advList(key) {
+  var all = (D.advances || []).filter(function (a) { return normName(a.transporter) === key; }), reversed = {};
+  all.forEach(function (a) { var m = /^Reversal of (ADV-\d+):/.exec(String(a.note || '')); if (m) reversed[m[1]] = 1; });
+  if (!all.length) return '';
+  return '<h2>Advances given (' + all.length + ')</h2><div class="list">' + all.slice().reverse().map(function (a, i) {
+    var rev = n(a.amount) < 0, gone = reversed[a.id];
+    return '<div class="row" style="' + (gone || rev ? 'opacity:.6' : '') + '"><div class="m"><span class="sn">' + (i + 1) + '.</span> <b>' + inr(n(a.amount)) + '</b> <span class="mu">· ' + dmy(a.date) + ' · ' + esc(a.id) +
+      (a.vehicle ? ' · ' + esc(a.vehicle) : '') + (a.driver ? ' · ' + esc(a.driver) : '') + (a.ref ? ' · Ref ' + esc(a.ref) : '') + (a.note ? ' · ' + esc(a.note) : '') + ' · ' + esc(a.by) + '</span>' + (gone ? ' <span class="tag">Reversed</span>' : '') + '</div>' +
+      (!gone && !rev && P.truckMoney ? '<button type="button" class="btn sm ghost" data-act="reverseAdv" data-id="' + esc(a.id) + '">Reverse</button>' : '') + '</div>';
+  }).join('') + '</div>';
 }
 function vFreight() {
   // Transporter totals use all loaded trucks; the list shows only open ones (closed / cancelled are on the "Closed & cancelled" page).
@@ -1362,9 +1439,20 @@ function vFreight() {
     by[k].n++; if (t.U && !t.freightPaid) by[k].due += t.netPay; if (!t.freightPaid) by[k].adv += t.A;
   });
   var h = '<h2>By transporter</h2><div class="kpis" style="margin-bottom:14px">' + (Object.keys(by).sort().map(function (k) {
-    return kpi(lnk('transporter', k), inr(by[k].due), trk(by[k].n) + ' · advance ' + inr(by[k].adv), by[k].due < 0 ? 'bad' : '');
+    var ta = TADV[normName(k)];
+    return kpi(lnk('transporter', k), inr(by[k].due), trk(by[k].n) + ' · advance ' + inr(by[k].adv) + (ta ? ' · transporter advance left ' + inr(ta.left) : ''), by[k].due < 0 ? 'bad' : '');
   }).join('') || '<div class="panel empty">No loaded trucks.</div>') + '</div>';
-  h += '<div class="bar">' + searchBox() + (P.truckMoney ? '<button type="button" class="btn" data-act="payFreightBatch">Pay freight (several trucks)</button>' : '') + (P.exportX ? '<button type="button" class="btn sm" data-act="exportList">Download this list</button>' : '') + '</div>' + subChips('freight', opts, base);
+  // Advances given to transporters (not tied to a truck): given, used on their freight, left
+  var tk = Object.keys(TADV).sort();
+  h += '<h2>Transporter advances</h2>' + (tk.length ? '<div class="tbl" style="--cols:44px 1.6fr 1fr 1fr 1fr 130px"><div class="tr th"><div>S.No.</div><div>Transporter</div><div class="r">Given</div><div class="r">Used on freight</div><div class="r">Left</div><div></div></div>' +
+    tk.map(function (k, i) {
+      var a = TADV[k];
+      return '<div class="tr"><div class="td sn" data-l="S.No.">' + (i + 1) + '</div><div class="td wide" data-l="Transporter">' + lnk('transporter', k) + '</div>' +
+        '<div class="td r num" data-l="Given">' + inr(a.given) + '</div><div class="td r num" data-l="Used on freight">' + inr(a.used) + '</div>' +
+        '<div class="td r num" data-l="Left"><b class="' + (a.left < -0.5 ? 'over' : '') + '">' + inr(a.left) + '</b></div>' +
+        '<div class="td acts">' + (P.truckMoney ? '<button type="button" class="nx money" data-act="tAdv" data-id="' + esc(k) + '">+ Advance</button>' : '') + '</div></div>';
+    }).join('') + '</div>' : '<div class="panel empty" style="margin-bottom:14px">No advances to transporters yet.' + (P.truckMoney ? ' Use "+ Transporter advance" for money given before loading.' : '') + '</div>');
+  h += '<div class="bar" style="margin-top:14px">' + searchBox() + (P.truckMoney ? '<button type="button" class="btn" data-act="tAdv" data-id="">+ Transporter advance</button><button type="button" class="btn" data-act="payFreightBatch">Pay freight (several trucks)</button>' : '') + (P.exportX ? '<button type="button" class="btn sm" data-act="exportList">Download this list</button>' : '') + '</div>' + subChips('freight', opts, base);
   if (!list.length) return h + '<div class="panel empty">No trucks here.</div>';
   var cols = '44px 112px 1fr 1fr .75fr .75fr .6fr .85fr .8fr .8fr .85fr .95fr 112px 40px';
   h += '<div class="tbl" style="--cols:' + cols + '"><div class="tr th"><div>S.No.</div><div>Dispatch</div><div>Truck</div><div>Transporter</div><div class="r">Loaded</div><div class="r">Unloaded</div><div class="r">Rate</div><div class="r">Freight</div><div class="r">Short ded.</div><div class="r">Detention</div><div class="r">Freight adv.</div><div class="r">Net freight payable</div><div>Freight</div><div></div></div>';
@@ -1702,11 +1790,15 @@ function actAdvance(id) {
 function actFPaid(id) {
   var t = getT(id);
   var fields = [{ k: 'detention', label: 'Detention (₹) – only if you agree to pay', type: 'number', help: t.detDays > 0 ? t.trip + ' days on trip, ' + t.freeDays + ' free, so ' + t.detDays + ' extra day' + (t.detDays > 1 ? 's' : '') + '. Suggestion: ' + inr(t.detSuggest) + ' (' + inr(t.perDay) + '/day). Leave 0 if not paying.' : 'Trip within the ' + t.freeDays + ' free days. Leave 0.', fill: t.detSuggest || null, fillLabel: 'Add suggested ' + inr(t.detSuggest) }, { k: 'freightPaidDate', label: 'Payment date', type: 'date', req: 1 }, { k: 'freightUTR', label: 'UTR (bank reference, optional)', ph: 'e.g. SBIN52345678901', full: 1 }];
-  openForm({ title: 'Pay freight', sub: esc(t.truck + ' · ' + t.id + ' · ' + (t.transporter || 'no transporter')) + '<br>Freight ' + inr(t.frAmt) + ' − shortage ' + inr(t.shortDed) + ' − advance ' + inr(t.A) + ' + detention' + (t.carryIn ? ' − ' + inr(t.carryIn) + ' extra advance from earlier trip' : '') + '<br>Net to pay <b id="fnet">' + inr(t.netPay) + '</b>' + (t.transporter ? bankBox(bankFor('transporter', t.transporter), 'transporter', t.transporter) : '<div class="mu">No transporter on this truck.</div>') + payPhotoInput('freightPay', t) + (t.carryOut ? '<br><span class="mu">Advance is more than freight: ' + inr(t.carryOut) + ' will be adjusted on this truck\u2019s next trip.</span>' : ''),
+  openForm({ title: 'Pay freight', sub: esc(t.truck + ' · ' + t.id + ' · ' + (t.transporter || 'no transporter')) + '<br>Freight ' + inr(t.frAmt) + ' − shortage ' + inr(t.shortDed) + ' − advance ' + inr(t.A) + ' + detention' + (t.carryIn ? ' − ' + inr(t.carryIn) + ' extra advance from earlier trip' : '') + (t.advAvail > 0 ? ' − transporter advance <b id="ftadv">' + inr(t.advUsed) + '</b> (left before this truck ' + inr(t.advAvail) + ')' : '') + '<br>Net to pay <b id="fnet">' + inr(t.netPay) + '</b>' + (t.transporter ? bankBox(bankFor('transporter', t.transporter), 'transporter', t.transporter) : '<div class="mu">No transporter on this truck.</div>') + payPhotoInput('freightPay', t) + (t.carryOut ? '<br><span class="mu">Advance is more than freight: ' + inr(t.carryOut) + ' will be adjusted on this truck\u2019s next trip.</span>' : ''),
     fn: 'api_saveTruck', submit: 'Confirm freight paid', done: 'Freight marked paid', values: { detention: t.det || 0, freightPaidDate: D.today }, fields: fields,
     check: function (v) { return v.detention === '' ? 'Enter the detention amount (0 if none).' : null; },
     build: function (v) { return { id: id, freightPaid: true, freightPaidDate: v.freightPaidDate, detention: v.detention, freightUTR: v.freightUTR }; } });
-  $('#f_detention').addEventListener('input', function (e) { $('#fnet').textContent = inr(Math.max(0, t.frAmt - t.shortDed - t.A + n(e.target.value) - t.carryIn)); });
+  $('#f_detention').addEventListener('input', function (e) {
+    var gross = Math.max(0, t.frAmt - t.shortDed - t.A + n(e.target.value) - t.carryIn), use = Math.min(gross, t.advAvail || 0); // transporter advance, as the server works it out
+    if ($('#ftadv')) $('#ftadv').textContent = inr(use);
+    $('#fnet').textContent = inr(gross - use);
+  });
 }
 function actOrder(kind, id) {
   var defFirm = FIRM !== 'all' ? FIRM : firms()[0];
@@ -2091,6 +2183,7 @@ function runAct(a, id, kind) {
     newTruck: actNewTruck, editTruck: function () { actEditTruck(id); }, assign: function () { actAssign(id); }, load: function () { actLoad(id); },
     paid: function () { actPaid(id); }, unpaid: function () { actUnpaid(id); }, advance: function () { actAdvance(id); }, unload: function () { actUnload(id); },
     custPay: function () { actCustPay(id); }, reversePay: function () { actReversePay(id); }, exportAccounts: function () { doExport('accounts', '', null); },
+    tAdv: function () { actTAdv(id); }, reverseAdv: function () { actReverseAdv(id); },
     fpaid: function () { actFPaid(id); }, funpaid: function () { actFUnpaid(id); },
     newPO: function () { actOrder('po'); }, newSO: function () { actOrder('so'); }, editPO: function () { actOrder('po', id); }, editSO: function () { actOrder('so', id); },
     addNote: function () {

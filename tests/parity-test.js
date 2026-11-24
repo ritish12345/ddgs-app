@@ -32,12 +32,20 @@ const trucks = [
   { id: 'DISP-0010', date: '2026-11-19', po: 'PO-01-BCL', so: '', truck: 'KA01AA0001', loadWt: '', placedOn: '2026-11-19', status: 'Returned' }
 ];
 
+// Transporter advances (24-11-2026): DISP-0007 (freight paid) took 2,000 when it was paid; the rest is shared by the
+// unpaid unloaded trucks of the same transporter, oldest unload first. One advance is reversed.
+['DISP-0001', 'DISP-0005', 'DISP-0007', 'DISP-0008', 'DISP-0009'].forEach(id => { trucks.find(t => t.id === id).transporter = 'SHARMA ROADLINES'; });
+trucks.find(t => t.id === 'DISP-0007').tAdv = 2000;
+const ADVS = [{ id: 'ADV-0001', date: '2026-11-01', transporter: 'Sharma Roadlines', amount: 40000 }, { id: 'ADV-0002', date: '2026-11-05', transporter: 'SHARMA ROADLINES', amount: 5000 },
+  { id: 'ADV-0003', date: '2026-11-06', transporter: 'SHARMA ROADLINES', amount: -5000, note: 'Reversal of ADV-0002: entered twice' }];
+
 // server
 const code = fs.readFileSync(path.join(ROOT, 'Code.js'), 'utf8');
 const sv = { Utilities: {}, console };
 vm.createContext(sv);
-vm.runInContext(code + '\nthis.derive_ = derive_; this.carry_ = carry_; this.custAcc_ = custAcc_;', sv);
+vm.runInContext(code + '\nthis.derive_ = derive_; this.carry_ = carry_; this.custAcc_ = custAcc_; this.transAdv_ = transAdv_;', sv);
 const sOut = sv.carry_(trucks.map(t => sv.derive_(Object.assign({}, t), PO[t.po], SO[t.so], S, today)));
+const sAdv = sv.transAdv_(sOut, ADVS);
 // Customer payments (money is kept per customer): part payment + TDS, a reversal, the group company, and an advance.
 const PAYS = [
   { id: 'PAY-00001', date: '2026-11-10', buyer: 'GODREJ AGROVET KHANA', amount: 500000, deduction: '', note: '' },
@@ -56,9 +64,9 @@ const calc = js.slice(0, js.indexOf('function flagIssues'));
 const cv = { document: { querySelector() { return null; } }, window: {}, console };
 vm.createContext(cv);
 vm.runInContext(calc + '\nD = ' + JSON.stringify({ settings: S, today }) + '; P = { money: true }; PO = ' + JSON.stringify(PO) + '; SO = ' + JSON.stringify(SO) +
-  '; this.out = CARRY(' + JSON.stringify(trucks) + '.map(derive)); this.acc = custAcc(this.out, ' + JSON.stringify(PAYS) + ');', cv);
+  '; this.out = CARRY(' + JSON.stringify(trucks) + '.map(derive)); this.tadv = transAdv(this.out, ' + JSON.stringify(ADVS) + '); this.acc = custAcc(this.out, ' + JSON.stringify(PAYS) + ');', cv);
 
-const keys = ['L', 'U', 'R', 'A', 'FR', 'DED', 'purEx', 'purTot', 'saleWt', 'saleEx', 'saleTot', 'soBase', 'short', 'allow', 'shortDed', 'frAmt', 'trip', 'detDays', 'detSuggest', 'det',
+const keys = ['advUsed', 'advAvail', 'L', 'U', 'R', 'A', 'FR', 'DED', 'purEx', 'purTot', 'saleWt', 'saleEx', 'saleTot', 'soBase', 'short', 'allow', 'shortDed', 'frAmt', 'trip', 'detDays', 'detSuggest', 'det',
   'netFr', 'netPay', 'carryIn', 'carryOut', 'carryLeft', 'profit', 'st', 'credit', 'due', 'ownBuyer', 'fBuyer', 'plantPO', 'firm', 'rateUsed', 'noSlip', 'cx', 'placed', 'stage'];
 let bad = 0;
 sOut.forEach((s, i) => {
@@ -77,4 +85,6 @@ names.forEach(nm => ak.forEach(k => {
 }));
 names.forEach(nm => { const a = sAcc[nm]; console.log('  ' + nm.padEnd(22) + ' sales ' + a.sales + '  received ' + a.received + '  deducted ' + a.deducted + '  outstanding ' + a.outstanding + '  overdue ' + a.overdue + (a.oldest ? ' (' + a.oldest + ' days)' : '')); });
 console.log(bad ? '\n' + bad + ' DIFFERENCES between server and screen' : '\nServer and screen give identical numbers on all ' + sOut.length + ' trucks (' + keys.length + ' values each) and all ' + names.length + ' customer accounts.');
+if (JSON.stringify(sAdv) !== JSON.stringify(JSON.parse(JSON.stringify(cv.tadv)))) { bad++; console.log('  DIFF transporter advances: server ' + JSON.stringify(sAdv) + ' screen ' + JSON.stringify(cv.tadv)); }
+else console.log('  transporter advances ' + JSON.stringify(sAdv));
 process.exitCode = bad ? 1 : 0;

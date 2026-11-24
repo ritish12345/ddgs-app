@@ -28,6 +28,9 @@ const GOD = 'GODREJ AGROVET KHANA', KING = 'KING FOOD MALERKOTLA', SR = 'SHREE R
   const accounts = () => s.run('deriveAll_').accounts;
   const trucks = () => { const m = {}; s.run('deriveAll_').trucks.forEach(t => { m[t.id] = t; }); return m; };
   const payRows = () => s.store.sheet('APP_PAYMENTS').dump().slice(1);
+  // The test day's Godrej truck (DISP-0001) was unloaded on 16-11-2026 with 7 credit days, so from 24-11-2026 on it would be
+  // overdue too and change the figures below. Keep it unloaded 2 days ago, so these checks do not depend on the calendar.
+  s.run('api_saveTruck', own, { id: 'DISP-0001', unloadDate: daysAgo(2) });
 
   console.log('Customer accounts');
   let a = accounts();

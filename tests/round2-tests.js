@@ -92,7 +92,9 @@ const lastId = (s, truck) => s.store.sheet('APP_TRUCKS').dump().slice(1).filter(
   const set = old.store.sheet('APP_SETTINGS').dump().slice(1);
   ok(set.filter(x => x[0] === 'qtyTolerancePct').length === 1 && set.find(x => x[0] === 'qtyTolerancePct')[1] === 0.01, 'APP_SETTINGS gets qtyTolerancePct = 0.01');
   neu.run('api_authState');
-  ok(old.store.sheet('APP_SETTINGS').dump().filter(x => x[0] === 'qtyTolerancePct').length === 1 && JSON.stringify(old.store.sheet('APP_TRUCKS').dump()) === before, 'only once; trucks untouched');
+  const aft = old.store.sheet('APP_TRUCKS').dump(), bef = JSON.parse(before);
+  ok(old.store.sheet('APP_SETTINGS').dump().filter(x => x[0] === 'qtyTolerancePct').length === 1 && JSON.stringify(aft.slice(1)) === JSON.stringify(bef.slice(1)) &&
+    JSON.stringify(aft[0].slice(0, bef[0].length)) === JSON.stringify(bef[0]), 'only once; truck rows untouched (new columns only added at the end of the header)');
 
   console.log('Screen (Accounts, Keshav)');
   const A = openApp(s, acc);

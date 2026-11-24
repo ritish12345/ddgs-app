@@ -22,7 +22,7 @@
  * Deploy as "Execute as: Me" so staff never need access to the sheet itself.
  */
 
-var T = { PO: 'APP_PO', SO: 'APP_SO', TR: 'APP_TRUCKS', LOG: 'APP_LOG', SET: 'APP_SETTINGS', US: 'APP_USERS', PAY: 'APP_PAYMENTS', NOTE: 'APP_NOTES', BANK: 'APP_BANK' };
+var T = { PO: 'APP_PO', SO: 'APP_SO', TR: 'APP_TRUCKS', LOG: 'APP_LOG', SET: 'APP_SETTINGS', US: 'APP_USERS', PAY: 'APP_PAYMENTS', NOTE: 'APP_NOTES', BANK: 'APP_BANK', ADV: 'APP_ADVANCES' };
 
 // What each role may do. Change here if needed.
 var ROLES = {
@@ -32,12 +32,12 @@ var ROLES = {
   Viewer:   { money: true,  trucks: false, truckMoney: false, orders: false, users: false, cancelTruck: false, profit: false, exportX: false, editClosed: false }
 };
 Object.keys(ROLES).forEach(function (r) { ROLES[r].review = r === 'Owner'; ROLES[r].bank = r === 'Owner' || r === 'Accounts'; });
-var TRUCK_MONEY = ['plantPaid', 'plantPaidDate', 'frate', 'advance', 'freightPaid', 'freightPaidDate', 'received', 'receivedDate', 'deduction', 'deductionNote', 'detention', 'saleRate', 'plantUTR', 'freightUTR', 'zohoBill', 'zohoInvoice', 'zohoFreight'];
+var TRUCK_MONEY = ['plantPaid', 'plantPaidDate', 'frate', 'advance', 'freightPaid', 'freightPaidDate', 'received', 'receivedDate', 'deduction', 'deductionNote', 'detention', 'saleRate', 'plantUTR', 'freightUTR', 'zohoBill', 'zohoInvoice', 'zohoFreight', 'tAdv'];
 var ORDER_MONEY = ['rate', 'gst', 'gstMode', 'freightMode', 'creditDays'];
 // Amounts hidden from roles without money access (paid / not paid status stays visible).
-var TRUCK_HIDE = ['frate', 'advance', 'received', 'receivedDate', 'deduction', 'deductionNote', 'detention', 'saleRate', 'plantUTR', 'freightUTR', 'zohoBill', 'zohoInvoice', 'zohoFreight'];
+var TRUCK_HIDE = ['frate', 'advance', 'received', 'receivedDate', 'deduction', 'deductionNote', 'detention', 'saleRate', 'plantUTR', 'freightUTR', 'zohoBill', 'zohoInvoice', 'zohoFreight', 'tAdv'];
 // Changed only through their own actions (Cancel, Returned, Restore, photo upload), which check the role. A normal truck save ignores them.
-var TRUCK_LOCKED = ['status', 'returnedDate', 'slipPhoto', 'plantPayPhoto', 'freightPayPhoto'];
+var TRUCK_LOCKED = ['status', 'returnedDate', 'slipPhoto', 'plantPayPhoto', 'freightPayPhoto', 'tAdv']; // tAdv: set only when freight is paid
 var ME = null;
 
 // [key, header, type]  type: text | date | num | bool
@@ -72,7 +72,8 @@ var SCHEMA = {
     ['deduction', 'Deduction (TDS/claim)', 'num'], ['deductionNote', 'Deduction Note', 'text'],
     ['detention', 'Detention (Rs)', 'num'], ['saleRate', 'Invoice Rate (this vehicle)', 'num'],
     ['plantUTR', 'Supplier Payment UTR', 'text'], ['freightUTR', 'Freight Payment UTR', 'text'], ['billNo', 'Supplier Invoice No', 'text'], ['billQty', 'Supplier Invoice Qty', 'num'], ['returnedDate', 'Returned Date', 'text'],
-    ['placedOn', 'Vehicle Placed On', 'date'], ['slipPhoto', 'Slip Photo Link', 'text'], ['plantPayPhoto', 'Supplier Payment Screenshot', 'text'], ['freightPayPhoto', 'Freight Payment Screenshot', 'text']
+    ['placedOn', 'Vehicle Placed On', 'date'], ['slipPhoto', 'Slip Photo Link', 'text'], ['plantPayPhoto', 'Supplier Payment Screenshot', 'text'], ['freightPayPhoto', 'Freight Payment Screenshot', 'text'],
+    ['tAdv', 'Transporter Advance Used', 'num'] // what this truck took from its transporter's advance, saved when its freight is paid
   ],
   APP_LOG: [['time', 'Time', 'text'], ['user', 'User', 'text'], ['action', 'Action', 'text'],
             ['record', 'Record', 'text'], ['details', 'Details', 'text'],
@@ -87,7 +88,10 @@ var SCHEMA = {
   APP_NOTES: [['id', 'Note ID', 'text'], ['date', 'Date', 'date'], ['area', 'Screen', 'text'], ['text', 'Note', 'text'],
               ['status', 'Status', 'text'], ['by', 'Written By', 'text'], ['at', 'Written At', 'text']],
   APP_BANK: [['id', 'Key', 'text'], ['kind', 'Type', 'text'], ['name', 'Party', 'text'], ['accName', 'Account Name', 'text'],
-             ['accNo', 'Account Number', 'text'], ['ifsc', 'IFSC', 'text'], ['by', 'Updated By', 'text'], ['at', 'Updated At', 'text']]
+             ['accNo', 'Account Number', 'text'], ['ifsc', 'IFSC', 'text'], ['by', 'Updated By', 'text'], ['at', 'Updated At', 'text']],
+  // Advances given to a transporter that are not tied to a truck (e.g. before loading). A wrong one is reversed by a minus line.
+  APP_ADVANCES: [['id', 'Advance No.', 'text'], ['date', 'Date', 'date'], ['transporter', 'Transporter', 'text'], ['vehicle', 'Vehicle No', 'text'], ['driver', 'Driver', 'text'],
+                 ['amount', 'Amount', 'num'], ['ref', 'UTR / Ref', 'text'], ['note', 'Note', 'text'], ['by', 'Entered By', 'text'], ['at', 'Entered At', 'text']]
 };
 
 var SETTINGS_DEFAULT = [
@@ -315,6 +319,8 @@ function api_saveTruck(token, obj) {
     linkTruckOrders_(obj);
     checkQty_(obj, force);
     if (obj.id) checkTruckRules_(obj);
+    if (obj.id && obj.freightPaid === true && !(was && was.freightPaid)) obj.tAdv = advForPay_(obj);
+    if (obj.id && obj.freightPaid === false) obj.tAdv = '';
     return saveRecord_(T.TR, obj);
   }, rid);
 }
@@ -486,6 +492,44 @@ function api_reversePayment(token, payId, reason) {
   });
 }
 
+/** An advance to a transporter that is not tied to a truck (e.g. given before loading). It is used automatically
+    on that transporter's freight (transAdv_). Owner and Accounts. */
+function api_addAdvance(token, o, rid) {
+  auth_(token); need_('truckMoney');
+  o = o || {};
+  var tr = normName_(o.transporter), a = num_(o.amount);
+  if (!tr) throw new Error('Enter the transporter.');
+  if (!(a > 0)) throw new Error('Enter the amount of the advance.');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(o.date || ''))) throw new Error('Enter the date.');
+  return withLock_(function () {
+    var id = appendAdv_({ date: o.date, transporter: tr, vehicle: normTruck_(o.vehicle), driver: String(o.driver || '').trim(), amount: a,
+      ref: String(o.ref || '').trim().toUpperCase(), note: String(o.note || '').trim() });
+    log_('Transporter advance', tr, id + ': ' + a + (o.vehicle ? ', vehicle ' + normTruck_(o.vehicle) : '') + (o.ref ? ', ref ' + String(o.ref).toUpperCase() : ''));
+  }, cleanRid_(rid));
+}
+function appendAdv_(o) {
+  var sh = sheet_(T.ADV) || makeTab_(T.ADV);
+  o.id = nextId_(T.ADV, rows_(T.ADV), {});
+  sh.getRange(sh.getLastRow() + 1, 1, 1, SCHEMA[T.ADV].length).setValues([rowFor_(T.ADV, o)]);
+  dropTab_(T.ADV); markChanged_(T.ADV);
+  return o.id;
+}
+/** A wrong advance is never deleted: a minus line is added (dated today). Accounts only for today's entries; the Owner any. */
+function api_reverseAdvance(token, advId, reason) {
+  auth_(token); need_('truckMoney');
+  reason = String(reason || '').trim();
+  if (!reason) throw new Error('Write why this advance is reversed.');
+  return withLock_(function () {
+    var all = rows_(T.ADV), p = all.filter(function (r) { return r.id === advId; })[0];
+    if (!p) throw new Error('Advance ' + advId + ' was not found.');
+    if (/^Reversal of /.test(String(p.note)) || (num_(p.amount) || 0) < 0) throw new Error(advId + ' is itself a reversal.');
+    if (all.some(function (r) { return String(r.note).indexOf('Reversal of ' + advId + ':') === 0; })) throw new Error(advId + ' is already reversed.');
+    if (ME.role !== 'Owner' && String(p.at).slice(0, 10) !== today_()) throw new Error('Only the Owner can reverse an advance entered on an earlier day.');
+    var id = appendAdv_({ date: today_(), transporter: p.transporter, vehicle: p.vehicle, driver: p.driver, amount: -(num_(p.amount) || 0), ref: '', note: 'Reversal of ' + advId + ': ' + reason });
+    log_('Advance reversed', advId, id + ': ' + reason);
+  });
+}
+
 function api_savePO(token, obj) {
   auth_(token); need_('orders');
   obj = obj || {};
@@ -636,7 +680,7 @@ function api_payBatch(token, kind, ids, date, utr, amount, rid) {
     ids.forEach(function (id) {
       var t = map[id];
       if (kind === 'plant') saveRecord_(T.TR, { id: id, plantPaid: true, plantPaidDate: date, plantUTR: utr });
-      else saveRecord_(T.TR, { id: id, freightPaid: true, freightPaidDate: date, freightUTR: utr, detention: t.det });
+      else saveRecord_(T.TR, { id: id, freightPaid: true, freightPaidDate: date, freightUTR: utr, detention: t.det, tAdv: t.advUsed || '' });
     });
     log_(kind === 'plant' ? 'Plant payment' : 'Freight payment', utr || 'no UTR', ids.length + ' trucks: ' + ids.join(', ') + ' | amount entered ' + (amount === '' || amount == null ? '-' : amount));
   }, cleanRid_(rid));
@@ -1027,7 +1071,7 @@ function cacheRow_(name, row, rowNo) {
 }
 
 /* ---------------- data version: lets an open screen ask "anything new?" without reading the tabs ---------------- */
-var SCREEN_TABS_ = [T.PO, T.SO, T.TR, T.NOTE, T.BANK, T.US, T.PAY];
+var SCREEN_TABS_ = [T.PO, T.SO, T.TR, T.NOTE, T.BANK, T.US, T.PAY, T.ADV];
 function dataChanged_() { return SCREEN_TABS_.some(function (n) { return !!REQ_.changed[n]; }); }
 /* Kept in a script property (lasting) and mirrored in Apps Script's cache (fast, no daily read limit). */
 function dataVersion_() {
@@ -1064,6 +1108,7 @@ function readAll_() {
   };
   out.notes = sheet_(T.NOTE) ? rows_(T.NOTE).reverse() : [];
   if (can.money) out.pays = sheet_(T.PAY) ? rows_(T.PAY) : []; // customer payments (Receivables page)
+  if (can.money) out.advances = sheet_(T.ADV) ? rows_(T.ADV) : []; // transporter advances (Freight & Transport)
   if (can.bank) out.banks = sheet_(T.BANK) ? rows_(T.BANK) : [];
   if (can.users) out.users = userList_();
   return out;
@@ -1095,6 +1140,7 @@ function changes_() {
   shape_(out.po, out.so, out.trucks, can);
   if (ch[T.NOTE]) out.notes = rows_(T.NOTE).reverse();
   if (ch[T.PAY] && can.money) out.pays = rows_(T.PAY);
+  if (ch[T.ADV] && can.money) out.advances = rows_(T.ADV);
   if (ch[T.BANK] && can.bank) out.banks = rows_(T.BANK);
   if (ch[T.US] && can.users) out.users = userList_();
   return out;
@@ -1199,7 +1245,7 @@ function validate_(name, obj, rec, isNew) {
 }
 
 function nextId_(name, existing, obj) {
-  var max = 0, re = name === T.PO ? /^PO-(\d+)/ : name === T.SO ? /^SO-(\d+)/ : name === T.PAY ? /^PAY-(\d+)/ : /^DISP-(\d+)/;
+  var max = 0, re = name === T.PO ? /^PO-(\d+)/ : name === T.SO ? /^SO-(\d+)/ : name === T.PAY ? /^PAY-(\d+)/ : name === T.ADV ? /^ADV-(\d+)/ : /^DISP-(\d+)/;
   existing.forEach(function (r) { var m = String(r.id).match(re); if (m) max = Math.max(max, Number(m[1])); });
   var n = max + 1;
   if (name === T.PO) {
@@ -1208,6 +1254,7 @@ function nextId_(name, existing, obj) {
   }
   if (name === T.SO) return 'SO-' + pad_(n, 4);
   if (name === T.PAY) return 'PAY-' + pad_(n, 5);
+  if (name === T.ADV) return 'ADV-' + pad_(n, 4);
   return 'DISP-' + pad_(n, 4);
 }
 
@@ -1254,7 +1301,7 @@ function writeLog_(lines) {
 
 /* ---------------- setup and import ---------------- */
 
-var SCHEMA_V = '6.6'; // 6.5: setting qtyTolerancePct; 6.6: setting hiddenFirms
+var SCHEMA_V = '6.7'; // 6.5: setting qtyTolerancePct; 6.6: setting hiddenFirms; 6.7: transporter advances (APP_ADVANCES, APP_TRUCKS tAdv)
 function ensureSetup_() {
   var cache = CacheService.getScriptCache();
   if (cache.get('schema_ok') === SCHEMA_V) return null; // checked in the last 6 hours (setup clears this)
@@ -1269,7 +1316,7 @@ function ensureSetup_() {
   lock.waitLock(30000);
   try {
     if (sheet_(T.TR)) return null;
-    [T.SET, T.PO, T.SO, T.TR, T.LOG, T.US, T.PAY, T.NOTE, T.BANK].forEach(makeTab_);
+    [T.SET, T.PO, T.SO, T.TR, T.LOG, T.US, T.PAY, T.NOTE, T.BANK, T.ADV].forEach(makeTab_);
     var set = sheet_(T.SET);
     set.getRange(2, 1, SETTINGS_DEFAULT.length, 3).setValues(SETTINGS_DEFAULT);
     var report = importOld_();
@@ -1284,7 +1331,7 @@ function ensureSetup_() {
 
 /** Adds any new columns to existing APP_ tabs after an update. Old data stays where it is. */
 function upgradeHeaders_() {
-  [T.US, T.PAY, T.NOTE, T.BANK].forEach(function (name) { if (!sheet_(name)) makeTab_(name); });
+  [T.US, T.PAY, T.NOTE, T.BANK, T.ADV].forEach(function (name) { if (!sheet_(name)) makeTab_(name); });
   var set = sheet_(T.SET);
   if (set) {
     var have = {};
@@ -1548,14 +1595,61 @@ function carry_(list) {
   return list;
 }
 
-function deriveAll_() {
+/* Transporter advances (Nitish, 23-11-2026): money given to a transporter that is not tied to a truck, used automatically.
+   A truck whose freight is paid keeps what it took (saved in tAdv when paid). Unloaded, unpaid trucks of that transporter
+   share what is left, oldest unload first. netPay (freight to pay) goes down by what is taken; left = given − used.
+   The screen has the same function (transAdv in Index.html). */
+function transAdv_(list, advs) {
+  var r2 = function (x) { return Math.round(x * 100) / 100; }, acc = {}, open = {};
+  var key = function (s) { return String(s || '').toUpperCase().replace(/\s+/g, ' ').trim(); };
+  var get = function (k) { return acc[k] || (acc[k] = { name: k, given: 0, used: 0, left: 0 }); };
+  (advs || []).forEach(function (a) { var k = key(a.transporter); if (k) get(k).given += Number(a.amount) || 0; });
+  list.forEach(function (t) {
+    t.advUsed = 0; t.advAvail = 0;
+    var k = key(t.transporter);
+    if (t.cx || t.fBuyer || !t.U || !k) return;
+    if (t.freightPaid) {
+      var u = Number(t.tAdv) || 0;
+      if (u) { t.advUsed = r2(u); t.netPay = r2(t.netPay - u); get(k).used += u; }
+      return;
+    }
+    (open[k] = open[k] || []).push(t);
+  });
+  Object.keys(acc).forEach(function (k) {
+    var a = acc[k], pool = r2(a.given - a.used);
+    (open[k] || []).sort(function (x, y) { return String(x.unloadDate).localeCompare(String(y.unloadDate)) || String(x.id).localeCompare(String(y.id)); }).forEach(function (t) {
+      t.advAvail = Math.max(0, pool);
+      var use = r2(Math.max(0, Math.min(pool, t.netPay)));
+      if (use > 0) { t.advUsed = use; t.netPay = r2(t.netPay - use); pool = r2(pool - use); a.used += use; }
+    });
+    a.given = r2(a.given); a.used = r2(a.used); a.left = r2(a.given - a.used);
+  });
+  return acc;
+}
+
+/* patch (optional): one truck's unsaved changes, to work out what it would take from its transporter's advance
+   when its freight is paid now (advForPay_). */
+function deriveAll_(patch) {
   var po = {}, so = {}, S = readSettings_(), today = Utilities.formatDate(new Date(), tz_(), 'yyyy-MM-dd');
   var V = visibleRows_(S); // firms kept out of this app (hiddenFirms) are not counted anywhere
   V.po.forEach(function (r) { po[r.id] = r; });
   V.so.forEach(function (r) { so[r.id] = r; });
-  var trucks = carry_(V.trucks.map(function (t) { return derive_(t, po[t.po], so[t.so], S, today); }));
-  var pays = sheet_(T.PAY) ? rows_(T.PAY) : [];
-  return { po: po, so: so, S: S, today: today, trucks: trucks, pays: pays, accounts: custAcc_(trucks, pays, S) };
+  var list = V.trucks.map(function (t) {
+    if (!patch || t.id !== patch.id) return t;
+    var c = {}, k;
+    for (k in t) c[k] = t[k];
+    for (k in patch) if (['freightPaid', 'freightPaidDate', 'freightUTR', 'tAdv'].indexOf(k) < 0) c[k] = patch[k];
+    return c;
+  });
+  var trucks = carry_(list.map(function (t) { return derive_(t, po[t.po], so[t.so], S, today); }));
+  var pays = sheet_(T.PAY) ? rows_(T.PAY) : [], advs = sheet_(T.ADV) ? rows_(T.ADV) : [];
+  var tadv = transAdv_(trucks, advs);
+  return { po: po, so: so, S: S, today: today, trucks: trucks, pays: pays, accounts: custAcc_(trucks, pays, S), advs: advs, tadv: tadv };
+}
+/* What a truck takes from its transporter's advance if its freight is paid now (with the changes being saved). */
+function advForPay_(obj) {
+  var t = deriveAll_(obj).trucks.filter(function (x) { return x.id === obj.id; })[0];
+  return t && t.advUsed ? t.advUsed : '';
 }
 
 /* ---------------- Excel export ---------------- */
@@ -1567,7 +1661,7 @@ function truckColumns_(can) {
   if (can.money) c = c.concat([['Supplier Amount incl GST', 'purTot'], ['Supplier Paid', 'plantPaid'], ['Supplier Paid Date', 'plantPaidDate'], ['Supplier UTR', 'plantUTR'],
     ['Sale Rate', 'rateUsed'], ['Sale Total', 'saleTot'],
     ['Freight Rate', 'FR'], ['Freight Amount', 'frAmt'], ['Shortage Deduction', 'shortDed'], ['Detention', 'det'],
-    ['Freight Advance', 'A'], ['Trip Net Freight', 'netFr'], ['Earlier Advance Adjusted', 'carryIn'], ['Net Freight Payable', 'netPay'], ['Freight Paid', 'freightPaid'], ['Freight Paid Date', 'freightPaidDate'], ['Freight UTR', 'freightUTR']]);
+    ['Freight Advance', 'A'], ['Trip Net Freight', 'netFr'], ['Earlier Advance Adjusted', 'carryIn'], ['Transporter Advance Used', 'advUsed'], ['Net Freight Payable', 'netPay'], ['Freight Paid', 'freightPaid'], ['Freight Paid Date', 'freightPaidDate'], ['Freight UTR', 'freightUTR']]);
   if (can.profit) c.push(['Profit before GST', 'profit']);
   c.push(['Note', 'note']);
   return c;
@@ -1588,6 +1682,7 @@ function tab_(name, cols, list) {
   return { name: name, rows: [['S.No.'].concat(cols.map(function (c) { return c[0]; }))].concat(body), dateCols: Object.keys(dateCols).map(Number) };
 }
 
+var ADV_COLS_ = [['Advance No.', 'id'], ['Date', 'date'], ['Transporter', 'transporter'], ['Vehicle No', 'vehicle'], ['Driver', 'driver'], ['Amount', 'amount'], ['UTR / Ref', 'ref'], ['Note', 'note'], ['Entered By', 'by']];
 function exportTabs_(kind, key, ids, can, firm) {
   var A = deriveAll_();
   if (firm) {
@@ -1635,7 +1730,10 @@ function exportTabs_(kind, key, ids, can, firm) {
         var b = by[k]; b.trucks++; b.freight += t.frAmt; b.short += t.shortDed; b.det += t.det; b.adv += t.A;
         if (t.U && !t.freightPaid) b.payable += t.netPay; if (t.freightPaid) b.paid += t.netPay;
       });
-      tabs.push(tab_('Transporters', [['Transporter', 'name'], ['Trucks', 'trucks'], ['Freight', 'freight'], ['Shortage Deduction', 'short'], ['Detention', 'det'], ['Freight Advance', 'adv'], ['Net Paid', 'paid'], ['Net Payable Now', 'payable']], Object.keys(by).map(function (k) { return by[k]; })));
+      Object.keys(A.tadv).forEach(function (k) { by[k] = by[k] || { name: k, trucks: 0, freight: 0, short: 0, det: 0, adv: 0, payable: 0, paid: 0 }; by[k].tGiven = A.tadv[k].given; by[k].tUsed = A.tadv[k].used; by[k].tLeft = A.tadv[k].left; });
+      tabs.push(tab_('Transporters', [['Transporter', 'name'], ['Trucks', 'trucks'], ['Freight', 'freight'], ['Shortage Deduction', 'short'], ['Detention', 'det'], ['Freight Advance', 'adv'], ['Net Paid', 'paid'], ['Net Payable Now', 'payable'],
+        ['Transporter Advance Given', 'tGiven'], ['Transporter Advance Used', 'tUsed'], ['Transporter Advance Left', 'tLeft']], Object.keys(by).map(function (k) { return by[k]; })));
+      tabs.push(tab_('Transporter Advances', ADV_COLS_, A.advs));
       tabs.push(tab_('Customer Accounts', ac, accRows));
       tabs.push(tab_('Customer Payments', pc, pays));
     }
@@ -1655,6 +1753,7 @@ function exportTabs_(kind, key, ids, can, firm) {
     }[kind];
     if (!match) throw new Error('Unknown export');
     tabs.push(tab_(kind === 'transporter' ? 'Statement' : 'Trucks', tc, pick(A.trucks.filter(match))));
+    if (kind === 'transporter' && can.money) tabs.push(tab_('Advances', ADV_COLS_, A.advs.filter(function (a) { return normName_(a.transporter) === normName_(key); })));
     if (kind === 'po') tabs.push(tab_('PO', oc, orderRows(A.po, 'po').filter(function (r) { return r.id === key; })));
     if (kind === 'so') tabs.push(tab_('SO', oc, orderRows(A.so, 'so').filter(function (r) { return r.id === key; })));
     if (kind === 'buyer') tabs.push(tab_('Sale Orders', oc, orderRows(A.so, 'so').filter(function (r) { return normName_(r.party) === normName_(key); })));
@@ -1750,7 +1849,8 @@ function sendDailyReport_() {
   var ownDue = sum(accs.filter(function (a) { return a.own; }), owes);
   h += '<p><b>Position now:</b> outside customers owe ' + money_(sum(accs.filter(function (a) { return !a.own; }), owes)) + (ownDue ? ' · group company owes ' + money_(ownDue) : '') + ' (overdue ' + money_(sum(accs, function (a) { return a.overdue; })) + ') · suppliers unpaid ' +
     money_(sum(live.filter(function (t) { return t.L && !t.plantPaid; }), function (t) { return t.purTot; })) + ' · freight payable ' +
-    money_(sum(live.filter(function (t) { return t.U && !t.freightPaid; }), function (t) { return t.netPay; })) + ' · on the road ' +
+    money_(sum(live.filter(function (t) { return t.U && !t.freightPaid; }), function (t) { return t.netPay; })) + ' · transporter advances left ' +
+    money_(sum(Object.keys(A.tadv).map(function (k) { return A.tadv[k]; }), function (a) { return Math.max(0, a.left); })) + ' · on the road ' +
     q(sum(live.filter(function (t) { return t.L && !t.U; }), function (t) { return t.L; })) + ' qtl</p>';
   var dest = function (t) { return t.plantPO ? 'Own plant' : t.buyer || 'not assigned'; };
   h += '<h3>Trucks added today</h3>' + table(['Dispatch', 'Firm', 'Truck', 'PO / Supplier', 'Going to', 'Loaded qtl'], added.map(function (t) { return [t.id, t.firm, t.truck, t.po + ' ' + t.plant, dest(t), t.L ? q(t.L) : '-']; }));
@@ -1758,6 +1858,7 @@ function sendDailyReport_() {
   h += '<h3>Money today</h3>' + table(['What', 'Dispatch / Payment', 'Party', 'Amount'],
     plantPaid.map(function (t) { return ['Supplier paid', t.id, t.plant, money_(t.purTot)]; })
       .concat(frPaid.map(function (t) { return ['Freight paid', t.id, t.transporter, money_(t.netPay)]; }))
+      .concat(A.advs.filter(function (a) { return a.date === today; }).map(function (a) { return [Number(a.amount) < 0 ? 'Transporter advance reversed' : 'Transporter advance', a.id + (a.vehicle ? ' / ' + a.vehicle : ''), a.transporter, money_(Number(a.amount || 0))]; }))
       .concat(pays.map(function (p) { return [(Number(p.amount) < 0 || Number(p.deduction) < 0 ? 'Reversed' : 'Received') + (p.deduction ? ' (deduction ' + p.deduction + (p.note ? ': ' + p.note : '') + ')' : ''), p.id + (p.truck ? ' / ' + p.truck : ''), p.buyer, money_(Number(p.amount || 0))]; })));
   var bal = function (map, k) {
     return Object.keys(map).filter(function (id) { return map[id].status !== 'Cancelled' && map[id].status !== 'Settled'; }).map(function (id) {

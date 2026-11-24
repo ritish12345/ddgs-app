@@ -67,7 +67,7 @@ const lastId = (s, truck) => s.store.sheet('APP_TRUCKS').dump().slice(1).filter(
   ok(/Freight advance₹20,146 \(₹20,146 extra advance from an earlier trip of this truck\)/.test(K.$('#view').textContent), 'truck page: Freight advance ₹20,146 (extra advance from an earlier trip)');
   K.win.QS = ''; K.win.go('transporter', 'KANG TRANSPORT');
   const st = K.$('#view table.t');
-  ok(!!st && /₹20,146 \(from earlier trip\)/.test(st.textContent) && /₹45,000 given/.test(st.querySelector('tfoot').textContent), 'transporter statement: trip 2 shows it too; the total counts the advance once (₹45,000 given)');
+  ok(!!st && /₹20,146 \(from earlier trip\)/.test(st.textContent) && /₹45,000 given on trucks/.test(st.querySelector('tfoot').textContent), 'transporter statement: trip 2 shows it too; the total counts the advance once (₹45,000 given on trucks)');
   K.win.close();
 
   console.log('3. Editing a truck on a short-closed PO / SO shows its PO and SO (like DISP-0006…0008 on PO-02-OASIS / SO-0004)');
