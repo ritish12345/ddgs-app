@@ -97,6 +97,7 @@ h2:first-child{margin-top:0}
 .seg button.on{background:var(--ink);color:#fff}
 .chips{display:flex;gap:6px;overflow-x:auto;scrollbar-width:none;padding-bottom:4px;margin-bottom:10px}
 .chips::-webkit-scrollbar{display:none}
+.spl{margin:4px 0 8px}.spl .rad{display:flex;flex-wrap:wrap;gap:6px 8px;align-items:center;min-height:44px;margin:2px 0;color:var(--fg);font-weight:400}.spl .rad input[type=radio]{width:20px;height:20px;margin:0}.spl .spq{width:92px;min-height:40px}.spl select{min-height:40px;max-width:100%}
 .chip{flex:none;border:1px solid var(--bd);background:var(--card);padding:7px 12px;border-radius:99px;font-size:13px;font-weight:500;white-space:nowrap;min-height:36px}
 .chip.on{background:var(--ink);color:#fff;border-color:var(--ink)}
 .chip b{font-weight:700;margin-left:2px}
@@ -725,7 +726,7 @@ function reopenFail(i) {
 }
 
 function derive(t) {
-  var po = PO[t.po], so = SO[t.so], S = D.settings;
+  var po = PO[t.po], so = SO[t.so], S = D.settings, po2 = PO[t.po2], so2 = SO[t.so2];
   var plantPO = !!(po && po.poType === 'plant');
   if (plantPO) so = null;
   var L = n(t.loadWt), U = n(t.unloadWt), R = n(t.received), A = n(t.advance), FR = n(t.frate), DED = n(t.deduction);
@@ -736,18 +737,39 @@ function derive(t) {
   x.plant = po ? po.plant : ''; x.buyer = so ? so.buyer : '';
   x.plantPO = plantPO; x.firm = firmOf(po); x.ownBuyer = !!(so && isFirm(so.buyer)); x.rateUsed = soRate; x.rateOwn = own !== null;
   x.purEx = r2(L * poRate); x.purTot = r2(x.purEx * (1 + poG));
+  // One truck on two orders (Nitish, 24-11-2026): the first order takes a fixed part, the second the rest. PO: poQty of
+  // the dispatch weight at PO 1's rate, the rest at PO 2's. SO: soQty of the sale weight (received, or dispatch until
+  // received) at SO 1's rate, the rest at SO 2's, so a shortage falls on SO 2 and is charged at SO 2's rate.
+  // A rate typed on the truck (saleRate) still prices the whole truck.
+  var p2 = t.po2 && po2 ? po2 : null, s2 = so && t.so2 && so2 ? so2 : null;
+  x.poQ1 = p2 ? r2(Math.min(L, n(t.poQty))) : L; x.poQ2 = p2 ? r2(L - x.poQ1) : 0;
+  x.soQ1 = s2 ? r2(Math.min(L, n(t.soQty))) : so ? L : 0; x.soQ2 = s2 ? r2(L - x.soQ1) : 0;
+  x.pur1Tot = x.purTot; x.pur2Tot = 0; x.rate2 = p2 ? n(p2.rate) : 0;
+  if (p2) {
+    var e1 = r2(x.poQ1 * poRate), e2 = r2(x.poQ2 * n(p2.rate));
+    x.pur1Tot = r2(e1 * (1 + poG)); x.pur2Tot = r2(e2 * (1 + n(p2.gst))); x.purEx = r2(e1 + e2); x.purTot = r2(x.pur1Tot + x.pur2Tot);
+  }
   x.saleWt = U || L;
   var gIncl = !!(so && so.gstMode === 'incl');
   x.fBuyer = !!(so && so.freightMode === 'buyer');
   x.soBase = gIncl ? soRate / (1 + soG) : soRate;
   x.saleEx = so ? r2(x.saleWt * x.soBase) : 0;
   x.saleTot = so ? r2(gIncl ? x.saleWt * soRate : x.saleEx * (1 + soG)) : 0;
+  x.sale1Qty = so ? x.saleWt : 0; x.sale2Qty = 0; x.sale1Tot = x.saleTot; x.sale2Tot = 0; x.soRate2 = s2 ? n(s2.rate) : 0;
+  var shB = x.soBase, shG = soG; // the rate a shortage is charged at (before GST)
+  if (s2 && own === null) {
+    var g2Incl = s2.gstMode === 'incl', sr2 = n(s2.rate), sg2 = n(s2.gst), sb2 = g2Incl ? sr2 / (1 + sg2) : sr2;
+    var q1 = r2(Math.min(x.saleWt, n(t.soQty))), q2 = r2(x.saleWt - q1), x1 = r2(q1 * x.soBase), x2 = r2(q2 * sb2);
+    x.sale1Qty = q1; x.sale2Qty = q2;
+    x.sale1Tot = r2(gIncl ? q1 * soRate : x1 * (1 + soG)); x.sale2Tot = r2(g2Incl ? q2 * sr2 : x2 * (1 + sg2));
+    x.saleEx = r2(x1 + x2); x.saleTot = r2(x.sale1Tot + x.sale2Tot); shB = sb2; shG = sg2;
+  }
   x.short = U ? r2(Math.max(0, L - U)) : 0;
   x.allow = L * n(S.shortageAllowancePct);
-  x.shortDed = !U || x.fBuyer ? 0 : plantPO ? r2(Math.max(0, x.short - x.allow) * poRate * (1 + poG)) : so ? r2(Math.max(0, x.short - x.allow) * x.soBase * (1 + soG)) : 0;
+  x.shortDed = !U || x.fBuyer ? 0 : plantPO ? r2(Math.max(0, x.short - x.allow) * poRate * (1 + poG)) : so ? r2(Math.max(0, x.short - x.allow) * shB * (1 + shG)) : 0;
   // For showing the working: the charged shortage (above the free allowance) and the rate it is charged at (incl. GST)
   x.shortOver = U ? r2(Math.max(0, x.short - x.allow)) : 0;
-  x.shortRate = !U || x.fBuyer ? 0 : plantPO ? r2(poRate * (1 + poG)) : so ? r2(x.soBase * (1 + soG)) : 0;
+  x.shortRate = !U || x.fBuyer ? 0 : plantPO ? r2(poRate * (1 + poG)) : so ? r2(shB * (1 + shG)) : 0;
   x.frAmt = x.fBuyer ? 0 : r2(U * FR);
   x.trip = t.date ? days(t.date, t.unloadDate || D.today) : 0;
   x.freeDays = S.freeDays === undefined || S.freeDays === '' ? 3 : n(S.freeDays);
@@ -894,11 +916,26 @@ function flagIssues() {
   });
 }
 
+/* How much of a truck is on order id (k = 'po' or 'so'; w = its dispatch or received weight). A truck split between two
+   orders (24-11-2026) has its first order's part (poQty / soQty, at most w) on po / so and the rest on po2 / so2.
+   The same on the server (partOn_ in Code.js). */
+function partOn(t, k, id, w) {
+  if (!t || !id) return 0;
+  var two = t[k + '2'];
+  if (!two) return t[k] === id ? w : 0;
+  var first = Math.min(w, n(t[k + 'Qty']));
+  return r2(t[k] === id ? first : two === id ? w - first : 0);
+}
+/* This truck's amount on order id: supplier amount (po) or sale total (so) of its part. */
+function amtOn(t, k, id) { return k === 'po' ? (t.po === id ? t.pur1Tot : t.po2 === id ? t.pur2Tot : 0) : (t.so === id ? t.sale1Tot : t.so2 === id ? t.sale2Tot : 0); }
+/* PO-01-BCL, or for a split truck: PO-01-BCL 141.60 + PO-07-BCL 225.80 (links) */
+function ordLinks(t, k) { return !t[k + '2'] ? lnk(k, t[k]) : lnk(k, t[k]) + ' <span class="mu">' + qt(t[k + 'Q1']) + '</span> + ' + lnk(k, t[k + '2']) + ' <span class="mu">' + qt(t[k + 'Q2']) + '</span>'; }
 function orderStats(kind, o) {
   var key = kind === 'po' ? 'po' : 'so';
-  var tr = liveAll().filter(function (t) { return t[key] === o.id; });
-  var done = sum(tr, function (t) { return t.L; }), q = n(o.qty), tl = tol();
-  return { tr: tr, done: r2(done), unl: r2(sum(tr, function (t) { return t.U; })), short: r2(sum(tr, function (t) { return t.short; })), bal: r2(q - done), pct: q ? Math.min(100, done / q * 100) : 0,
+  var tr = liveAll().filter(function (t) { return t[key] === o.id || t[key + '2'] === o.id; });
+  var pL = function (t) { return partOn(t, key, o.id, t.L); }, pU = function (t) { return partOn(t, key, o.id, t.U); };
+  var done = sum(tr, pL), q = n(o.qty), tl = tol();
+  return { tr: tr, done: r2(done), unl: r2(sum(tr, pU)), short: r2(sum(tr, function (t) { return t.U ? Math.max(0, pL(t) - pU(t)) : 0; })), bal: r2(q - done), pct: q ? Math.min(100, done / q * 100) : 0,
     lim: r2(q * (1 + tl)), complete: q > 0 && done >= q * (1 - tl) - 0.005, over: q > 0 && done > q * (1 + tl) + 0.005 };
 }
 /* An open order at 99%+ of its quantity: "Complete" (or "Over the limit") and a Short-close button for those who manage orders. */
@@ -1053,7 +1090,7 @@ function filterFn(k) {
 function matchQ(t) {
   if (!QS) return true;
   var q = QS.replace(/\s+/g, '');
-  return [t.id, t.truck, t.po, t.so, t.buyer, t.plant, t.transporter, t.firm, t.driver, t.plantUTR, t.freightUTR, t.billNo].join('|').toLowerCase().replace(/\s+/g, '').indexOf(q) >= 0;
+  return [t.id, t.truck, t.po, t.so, t.po2, t.so2, t.buyer, t.plant, t.transporter, t.firm, t.driver, t.plantUTR, t.freightUTR, t.billNo].join('|').toLowerCase().replace(/\s+/g, '').indexOf(q) >= 0;
 }
 function sortT(a, b) { return (b.date || '').localeCompare(a.date || '') || b.id.localeCompare(a.id); }
 function vDispatch() {
@@ -1072,9 +1109,9 @@ function vDispatch() {
   h += '<div class="tbl" style="--cols:' + cols + '"><div class="tr th"><div>S.No.</div><div>Dispatch</div><div>PO / plant</div><div>Truck</div><div>Going to</div><div class="r">Loaded</div>' + (M ? '<div class="r">Supplier amount</div><div>Supplier</div><div>Freight adv.</div>' : '<div>Transporter</div>') + '<div>Next step</div><div></div></div>';
   h += list.slice(0, LIMIT).map(function (t, i) {
     var lv = !t.cx, ns = nextStep(t);
-    var go2 = t.plantPO ? '<span class="tag own">Own plant</span> ' + esc(shortFirm(plantFirm())) : t.so ? lnk('buyer', t.buyer) + '<small>' + lnk('so', t.so) + (t.ownBuyer ? ' · group company' : '') + '</small>' : (lv && P.trucks ? '<button class="pill add" type="button" data-act="assign" data-id="' + esc(t.id) + '">+ Choose customer</button>' : '—');
+    var go2 = t.plantPO ? '<span class="tag own">Own plant</span> ' + esc(shortFirm(plantFirm())) : t.so ? lnk('buyer', t.buyer) + '<small>' + ordLinks(t, 'so') + (t.ownBuyer ? ' · group company' : '') + '</small>' : (lv && P.trucks ? '<button class="pill add" type="button" data-act="assign" data-id="' + esc(t.id) + '">+ Choose customer</button>' : '—');
     var row = '<div class="td sn" data-l="S.No.">' + (i + 1) + '</div><div class="td">' + lnk('truck', t.id) + ntsm('truck', t.id) + '<small>' + dmy(t.date) + '</small></div>' +
-      '<div class="td" data-l="PO">' + lnk('po', t.po) + ' ' + firmTag(t.firm) + '<small>' + lnk('plant', t.plant) + '</small></div>' +
+      '<div class="td" data-l="PO">' + ordLinks(t, 'po') + ' ' + firmTag(t.firm) + '<small>' + lnk('plant', t.plant) + '</small></div>' +
       '<div class="td wide" data-l="Truck"><b>' + esc(t.truck) + '</b> ' + pendTag(t) + (t.noSlip ? '<span class="tag no">No slip</span> ' : '') + (t.billOk ? '<span class="tag ok" title="Slip weight matches supplier invoice">Checked</span> ' : '') + (t.issues.some(function (i) { return i.bad; }) ? '<span class="tag" title="' + esc(t.issues.map(function (i) { return i.msg; }).join(' · ')) + '">Check</span>' : '') +
         '<div style="margin-top:3px"><span class="stage ' + (t.st < 0 ? 'sx' : 's' + t.st) + '">' + t.stage + '</span>' + (t.L && !t.U && t.detDays > 0 && !t.fBuyer ? ' <span class="tag wn">' + t.trip + ' days</span>' : '') + '</div></div>' +
       '<div class="td wide" data-l="Going to">' + go2 + '</div>' +
@@ -1088,6 +1125,12 @@ function vDispatch() {
     return '<div class="tr ' + (t.cx ? 'cx' : '') + '">' + row + '</div>';
   }).join('') + '</div>' + more(list);
   return h;
+}
+/* The working of a split truck's supplier amount (po) or sale (so), shown under the amount. */
+function splitWork(t, k) {
+  var sm = function (x) { return '<small class="mu" style="display:block;font-weight:400">' + x + '</small>'; };
+  if (k === 'po') return t.po2 && t.L ? sm(qt(t.poQ1) + ' qtl × ' + rs2(PO[t.po] ? PO[t.po].rate : 0) + ' (' + esc(t.po) + ') + ' + qt(t.poQ2) + ' qtl × ' + rs2(t.rate2) + ' (' + esc(t.po2) + '), + GST = ' + inr(t.pur1Tot) + ' + ' + inr(t.pur2Tot)) : '';
+  return t.so2 && !t.rateOwn ? sm(qt(t.sale1Qty) + ' qtl × ' + rs2(t.rateUsed) + ' (' + esc(t.so) + ') + ' + qt(t.sale2Qty) + ' qtl × ' + rs2(t.soRate2) + ' (' + esc(t.so2) + ') = ' + inr(t.sale1Tot) + ' + ' + inr(t.sale2Tot)) : '';
 }
 function truckList(list, noLimit) {
   if (!list.length) return '<div class="panel empty">No trucks here.</div>';
@@ -1104,7 +1147,7 @@ function truckCard(t, i) {
   }
   return '<div class="tc ' + (t.cx ? 'cx' : '') + '"><div class="info" data-go="truck" data-id="' + esc(t.id) + '">' +
     '<div class="l1">' + (i != null ? '<span class="sn">' + (i + 1) + '.</span>' : '') + '<span class="truck">' + esc(t.truck) + '</span>' + pendTag(t) + (t.noSlip ? '<span class="tag no">No slip</span>' : '') + (t.billOk ? '<span class="tag ok">Checked</span>' : '') + '<span class="stage ' + (t.st < 0 ? 'sx' : 's' + t.st) + '">' + t.stage + '</span>' + (bad ? '<span class="tag">Check</span>' : '') + (t.L && !t.U && t.detDays > 0 && !t.fBuyer ? '<span class="tag wn">' + t.trip + ' days</span>' : '') + '</div>' +
-    '<div class="l2">' + esc(t.plant || t.po) + ' → ' + (t.plantPO ? esc(shortFirm(plantFirm())) + ' plant' : t.so ? esc(t.buyer || t.so) : '<span class="mu">no customer yet</span>') + (t.L ? ' · <b>' + qt(t.U || t.L) + '</b> qtl' : '') + '</div>' +
+    '<div class="l2">' + esc(t.plant || t.po) + ' → ' + (t.plantPO ? esc(shortFirm(plantFirm())) + ' plant' : t.so ? esc(t.buyer || t.so) : '<span class="mu">no customer yet</span>') + (t.L ? ' · <b>' + qt(t.U || t.L) + '</b> qtl' : '') + (t.po2 || t.so2 ? ' <span class="tag wn">2 orders</span>' : '') + '</div>' +
     '<div class="l3"><span>' + esc(t.id) + '</span>' + firmTag(t.firm) + '<span>' + dmy(t.date) + '</span>' + (t.transporter ? '<span>' + esc(t.transporter) + '</span>' : '') + '</div></div>' + money +
     '<div class="acts">' + (ns ? '<button type="button" class="next ' + (ns.m ? 'money' : '') + '" data-act="' + ns.a + '" data-id="' + esc(t.id) + '">' + ns.l + '</button>' : (t.cx ? '' : '<span class="done">' + (t.st === 6 ? '✓ Closed' : '✓ Done') + '</span>')) +
     '<button type="button" class="more" data-act="menu" data-id="' + esc(t.id) + '" aria-label="More actions">⋯</button></div></div>';
@@ -1119,14 +1162,14 @@ function vTruck(id) {
   var h = pageHead(esc(t.truck) + ' <span class="stage ' + (t.st < 0 ? 'sx' : 's' + t.st) + '" style="vertical-align:4px">' + t.stage + '</span> ' + pendTag(t), esc(t.id) + ' · dispatched ' + dmy(t.date), '', newTab('truck', t.id));
   if (ns) h += '<div style="margin-bottom:12px"><button type="button" class="next ' + (ns.m ? 'money' : '') + '" style="width:100%;max-width:360px" data-act="' + ns.a + '" data-id="' + esc(t.id) + '">' + ns.l + '</button></div>';
   if (t.issues.length) h += '<div class="panel" style="margin-bottom:12px">' + t.issues.map(function (i) { return '<div class="prob"><span class="dot" style="' + (i.bad ? '' : 'background:var(--wn)') + '"></span><span>' + esc(i.msg) + '</span></div>'; }).join('') + '</div>';
-  h += '<h2>Trip</h2><dl class="dl">' + (multiFirm() ? row('Firm', esc(t.firm)) : '') + row('Purchase order', lnk('po', t.po)) + row('Supplier', lnk('plant', t.plant)) +
-    (t.plantPO ? row('Going to', 'Own plant · ' + esc(plantFirm()) + ' <span class="mu">(no sale)</span>') : row('Sale order', lnk('so', t.so)) + row('Customer', lnk('buyer', t.buyer) + (t.ownBuyer ? ' <span class="tag own">group company</span>' : ''))) +
+  h += '<h2>Trip</h2><dl class="dl">' + (multiFirm() ? row('Firm', esc(t.firm)) : '') + row('Purchase order', ordLinks(t, 'po')) + row('Supplier', lnk('plant', t.plant)) +
+    (t.plantPO ? row('Going to', 'Own plant · ' + esc(plantFirm()) + ' <span class="mu">(no sale)</span>') : row('Sale order', ordLinks(t, 'so')) + row('Customer', lnk('buyer', t.buyer) + (t.ownBuyer ? ' <span class="tag own">group company</span>' : ''))) +
     row('Vehicle placed on', dmy(t.placed)) + row('Transporter', lnk('transporter', t.transporter)) + row('Driver', esc(t.driver) || '—') + row('RST / Weighment Slip No.', esc(t.slip) || '—') +
     row('Loaded', t.L ? qt(t.L) + ' qtl' : '—') + row('Supplier invoice', t.billQ === null ? (t.L ? '<span class="mu">not entered</span>' : '—') : esc(t.billNo || '') + ' · ' + qt(t.billQ) + ' qtl ' + (t.billOk ? '<span class="tag ok">matches slip</span>' : '<span class="tag">does not match slip</span>')) + row('Unloaded', t.U ? qt(t.U) + ' qtl on ' + dmy(t.unloadDate) : '—') + row('Shortage', t.U ? qt(t.short) + ' qtl' : '—') +
     row('Days on trip', t.trip + (t.detDays && !t.fBuyer ? ' <span class="over">(' + t.detDays + ' over ' + t.freeDays + ' free)</span>' : '')) + '</dl>';
   if (P.money) {
-    h += '<h2>Money</h2><dl class="dl">' + (t.plantUTR ? row('Supplier payment UTR', esc(t.plantUTR)) : '') + (t.freightUTR ? row('Freight payment UTR', esc(t.freightUTR)) : '') + row('Supplier amount', !t.L ? '— <span class="mu">(after weight)</span>' : inr(t.purTot) + (t.plantPaid ? ' · <span style="color:var(--ok)">paid ' + dmy(t.plantPaidDate) + '</span>' : ' · <span class="over">unpaid</span>')) +
-      (t.plantPO ? '' : row('Invoice rate', t.so ? inr(t.rateUsed) + '/qtl' + (t.rateOwn ? ' <span class="tag wn">this truck only</span>' : '') : '—') + row('Sale total', t.so ? inr(t.saleTot) + (t.U ? '' : ' <span class="mu">(on loaded wt)</span>') : '—') +
+    h += '<h2>Money</h2><dl class="dl">' + (t.plantUTR ? row('Supplier payment UTR', esc(t.plantUTR)) : '') + (t.freightUTR ? row('Freight payment UTR', esc(t.freightUTR)) : '') + row('Supplier amount', !t.L ? '— <span class="mu">(after weight)</span>' : inr(t.purTot) + (t.plantPaid ? ' · <span style="color:var(--ok)">paid ' + dmy(t.plantPaidDate) + '</span>' : ' · <span class="over">unpaid</span>') + splitWork(t, 'po')) +
+      (t.plantPO ? '' : row('Invoice rate', t.so ? rs2(t.rateUsed) + '/qtl' + (t.so2 && !t.rateOwn ? ' + ' + rs2(t.soRate2) + '/qtl' : '') + (t.rateOwn ? ' <span class="tag wn">this truck only</span>' : '') : '—') + row('Sale total', t.so ? inr(t.saleTot) + (t.U ? '' : ' <span class="mu">(on loaded wt)</span>') + splitWork(t, 'so') : '—') +
       row('Customer money', t.so ? 'kept per customer · ' + lnk('buyer', t.buyer, t.buyer + ' account') : '—')) +
       (t.fBuyer ? row('Freight', 'Paid by buyer') : row('Freight', t.U ? inr(t.frAmt) + ' (' + inr(t.FR) + '/qtl)' : (t.FR ? inr(t.FR) + '/qtl' : '—')) + row('Shortage deduction', inr(t.shortDed) + (t.U ? '<small class="mu" style="display:block;font-weight:400">' + esc(shortWork(t)) + '</small>' : '')) +
         row('Detention', (t.det ? inr(t.det) : '₹0') + (t.detSuggest && !t.det ? ' <span class="mu">(suggested ' + inr(t.detSuggest) + ' if you agree to pay)</span>' : '')) + row('Freight advance', inr(t.A + t.carryIn) + (t.carryIn ? ' <span class="mu">(' + (t.A ? inr(t.A) + ' this trip + ' : '') + inr(t.carryIn) + ' extra advance from an earlier trip of this truck)</span>' : '')) +
@@ -1214,16 +1257,20 @@ function vOrder(kind, id) {
   h += '<div class="kpis">' + kpi('Ordered', qt(o.qty) + ' qtl') + kpi(kind === 'po' ? 'Loaded' : 'Dispatched', qt(s.done) + ' qtl', trk(s.tr.length)) + kpi('Balance', qt(s.bal) + ' qtl', '', s.bal < 0 ? 'bad' : '') +
     kpi('Unloaded', qt(s.unl) + ' qtl') + kpi('Shortage', qt(s.short) + ' qtl', '', s.short > 0 ? 'warn' : '');
   if (P.money) {
-    if (kind === 'po') h += kpi('Supplier amount', inr(sum(tr, function (t) { return t.purTot; }))) + kpi('Unpaid to supplier', inr(sum(tr.filter(function (t) { return !t.plantPaid; }), function (t) { return t.purTot; })), '', 'warn') +
+    var amt = function (t) { return amtOn(t, kind, id); };
+    if (kind === 'po') h += kpi('Supplier amount', inr(sum(tr, amt))) + kpi('Unpaid to supplier', inr(sum(tr.filter(function (t) { return !t.plantPaid; }), amt)), '', 'warn') +
       kpi('Freight to pay', inr(sum(tr.filter(function (t) { return t.U && !t.freightPaid && !t.fBuyer; }), function (t) { return t.netPay; })));
-    else h += kpi('Sale total', inr(sum(tr.filter(function (t) { return t.U; }), function (t) { return t.saleTot; })), 'unloaded trucks') +
+    else h += kpi('Sale total', inr(sum(tr.filter(function (t) { return t.U; }), amt)), 'unloaded trucks') +
       kpi('Freight paid', inr(sum(tr.filter(function (t) { return t.freightPaid; }), function (t) { return t.netPay; })));
   }
-  h += '</div>' + (kind === 'po' ? poFlow(o, tr) : '') + '<h2>Trucks</h2>' + truckTable(kind === 'po' && FLOWSEL ? tr.filter(flowMatch()) : tr, kind);
+  h += '</div>' + (kind === 'po' ? poFlow(o, tr) : '') + '<h2>Trucks</h2>' + truckTable(kind === 'po' && FLOWSEL ? tr.filter(flowMatch()) : tr, kind, id);
   return h;
 }
-function truckTable(tr, kind) {
+function truckTable(tr, kind, oid) {
   if (!tr.length) return '<div class="panel empty">No trucks yet.</div>';
+  // on an order page (oid): a truck split between two orders shows only its part on this order
+  var pL = function (t) { return oid ? partOn(t, kind, oid, t.L) : t.L; }, pU = function (t) { return oid ? partOn(t, kind, oid, t.U) : t.U; };
+  var pS = function (t) { return oid ? (t.U ? Math.max(0, r2(pL(t) - pU(t))) : 0) : t.short; }, pA = function (t, k) { return oid && kind === k ? amtOn(t, k, oid) : k === 'po' ? t.purTot : t.saleTot; };
   var M = P.money;
   var mf = multiFirm() && tr.some(function (t) { return t.firm !== tr[0].firm; });
   var head = [['S.No.'], ['Dispatch'], ['Date']].concat(mf ? [['Firm']] : []).concat([['Truck'], [kind === 'po' || kind === 'plant' ? 'Going to' : 'Supplier'], ['Transporter']]).concat([ ['Loaded', 1], ['Unloaded', 1], ['Short', 1], ['Days', 1], ['Stage']]);
@@ -1231,15 +1278,15 @@ function truckTable(tr, kind) {
   var cell = function (v, r) { return '<td' + (r ? ' class="r"' : '') + '>' + v + '</td>'; };
   var body = tr.map(function (t, i) {
     var c = cell('<span class="sn">' + (i + 1) + '</span>') + cell(lnk('truck', t.id)) + cell(dm(t.date)) + (mf ? cell(firmTag(t.firm)) : '') + cell('<b>' + esc(t.truck) + '</b>') + cell(kind === 'po' || kind === 'plant' ? (t.plantPO ? '<span class="tag own">Own plant</span>' : lnk('buyer', t.buyer)) : lnk('plant', t.plant)) + cell(lnk('transporter', t.transporter)) +
-      cell(t.L ? qt(t.L) : '—', 1) + cell(t.U ? qt(t.U) : '—', 1) + cell(t.U ? qt(t.short) : '—', 1) + cell(t.trip + (t.detDays && !t.fBuyer ? ' <span class="over">+' + t.detDays + '</span>' : ''), 1) + cell('<span class="stage ' + (t.st < 0 ? 'sx' : 's' + t.st) + '">' + t.stage + '</span>');
-    if (M) c += cell(t.L ? inr(t.purTot) : '—', 1) + cell(t.fBuyer ? 'customer' : t.U ? inr(t.frAmt) : '—', 1) + cell(t.shortDed ? inr(t.shortDed) : '—', 1) + cell(t.det ? inr(t.det) : '—', 1) + cell(advCell(t, true), 1) +
-      cell(t.U && !t.fBuyer ? inr(t.netPay) + (t.carryOut ? ' <span class="mu" title="' + inr(t.carryOut) + ' extra advance carried to the next trip">*</span>' : '') : '—', 1) + cell(t.fBuyer ? '—' : t.freightPaid ? '✓ ' + dm(t.freightPaidDate) : (t.U ? 'unpaid' : '—')) + cell(t.so && t.saleTot ? inr(t.saleTot) : '—', 1);
+      cell(t.L ? qt(pL(t)) + (pL(t) !== t.L ? '<small class="mu" style="display:block">of ' + qt(t.L) + ' (2 orders)</small>' : '') : '—', 1) + cell(t.U ? qt(pU(t)) : '—', 1) + cell(t.U ? qt(pS(t)) : '—', 1) + cell(t.trip + (t.detDays && !t.fBuyer ? ' <span class="over">+' + t.detDays + '</span>' : ''), 1) + cell('<span class="stage ' + (t.st < 0 ? 'sx' : 's' + t.st) + '">' + t.stage + '</span>');
+    if (M) c += cell(t.L ? inr(pA(t, 'po')) : '—', 1) + cell(t.fBuyer ? 'customer' : t.U ? inr(t.frAmt) : '—', 1) + cell(t.shortDed ? inr(t.shortDed) : '—', 1) + cell(t.det ? inr(t.det) : '—', 1) + cell(advCell(t, true), 1) +
+      cell(t.U && !t.fBuyer ? inr(t.netPay) + (t.carryOut ? ' <span class="mu" title="' + inr(t.carryOut) + ' extra advance carried to the next trip">*</span>' : '') : '—', 1) + cell(t.fBuyer ? '—' : t.freightPaid ? '✓ ' + dm(t.freightPaidDate) : (t.U ? 'unpaid' : '—')) + cell(t.so && t.saleTot ? inr(pA(t, 'so')) : '—', 1);
     return '<tr>' + c + '</tr>';
   }).join('');
-  var foot = '<tr><td colspan="' + (mf ? 7 : 6) + '">Total ' + trk(tr.length) + '</td>' + cell(qt(sum(tr, function (t) { return t.L; })), 1) + cell(qt(sum(tr, function (t) { return t.U; })), 1) + cell(qt(sum(tr, function (t) { return t.short; })), 1) + '<td></td><td></td>';
-  if (M) foot += cell(inr(sum(tr, function (t) { return t.purTot; })), 1) + cell(inr(sum(tr, function (t) { return t.frAmt; })), 1) + cell(inr(sum(tr, function (t) { return t.shortDed; })), 1) + cell(inr(sum(tr, function (t) { return t.det; })), 1) +
+  var foot = '<tr><td colspan="' + (mf ? 7 : 6) + '">Total ' + trk(tr.length) + '</td>' + cell(qt(sum(tr, pL)), 1) + cell(qt(sum(tr, pU)), 1) + cell(qt(sum(tr, pS)), 1) + '<td></td><td></td>';
+  if (M) foot += cell(inr(sum(tr, function (t) { return pA(t, 'po'); })), 1) + cell(inr(sum(tr, function (t) { return t.frAmt; })), 1) + cell(inr(sum(tr, function (t) { return t.shortDed; })), 1) + cell(inr(sum(tr, function (t) { return t.det; })), 1) +
     // advances given: an extra advance shown again on a later trip ("earlier trip") is counted once
-    cell(inr(sum(tr, function (t) { return t.A; })) + (tr.some(function (t) { return t.carryIn > 0 || t.advUsed > 0; }) ? ' <span class="mu">given on trucks</span>' : ''), 1) + cell(inr(sum(tr, function (t) { return t.netPay; })), 1) + '<td></td>' + cell(inr(sum(tr, function (t) { return t.so ? t.saleTot : 0; })), 1);
+    cell(inr(sum(tr, function (t) { return t.A; })) + (tr.some(function (t) { return t.carryIn > 0 || t.advUsed > 0; }) ? ' <span class="mu">given on trucks</span>' : ''), 1) + cell(inr(sum(tr, function (t) { return t.netPay; })), 1) + '<td></td>' + cell(inr(sum(tr, function (t) { return t.so ? pA(t, 'so') : 0; })), 1);
   return '<div class="tblw"><table class="t"><thead><tr>' + head.map(function (x) { return '<th' + (x[1] ? ' class="r"' : '') + '>' + x[0] + '</th>'; }).join('') + '</tr></thead><tbody>' + body + '</tbody><tfoot>' + foot + '</tr></tfoot></table></div>';
 }
 
@@ -1305,7 +1352,7 @@ function vSettle() {
     return '<div class="tr"><div class="td sn" data-l="S.No.">' + (i + 1) + '</div><div class="td" data-l="Unloaded on">' + dmy(t.unloadDate) + '</div>' +
       '<div class="td">' + lnk('truck', t.id) + ntsm('truck', t.id) + '<small>' + dmy(t.date) + '</small></div>' +
       '<div class="td" data-l="Truck"><b>' + esc(t.truck) + '</b> ' + pendTag(t) + firmTag(t.firm) + '<div style="margin-top:3px"><span class="stage ' + (t.st < 0 ? 'sx' : 's' + t.st) + '">' + t.stage + '</span></div></div>' +
-      '<div class="td wide" data-l="Customer">' + lnk('buyer', t.buyer) + (t.ownBuyer ? ' <span class="tag own">group company</span>' : '') + '<small>' + lnk('so', t.so) + ' · ' + inr(t.rateUsed) + '/qtl' + (t.rateOwn ? ' (this truck)' : '') + '</small></div>' +
+      '<div class="td wide" data-l="Customer">' + lnk('buyer', t.buyer) + (t.ownBuyer ? ' <span class="tag own">group company</span>' : '') + '<small>' + ordLinks(t, 'so') + ' · ' + inr(t.rateUsed) + (t.so2 && !t.rateOwn ? ' + ' + inr(t.soRate2) : '') + '/qtl' + (t.rateOwn ? ' (this truck)' : '') + '</small></div>' +
       '<div class="td r num" data-l="Loaded">' + qt(t.L) + '</div><div class="td r num" data-l="Unloaded"><b>' + qt(t.U) + '</b></div>' +
       '<div class="td r num" data-l="Short">' + qt(t.short) + '</div><div class="td r num" data-l="Sale total"><b>' + inr(t.saleTot) + '</b></div>' +
       '<div class="td acts"><button type="button" class="ib" data-act="menu" data-id="' + esc(t.id) + '" aria-label="More actions">⋯</button></div></div>';
@@ -1785,6 +1832,15 @@ function submitForm(ev) {
   var send = vals;
   if (FORM.onlyChanged) { send = changedOnly(vals); if (!Object.keys(send).length) { closeForm(); toast('No changes'); return; } }
   // Order quantity window: staff are stopped here (the server checks the same); the Owner gets a warning and can accept it.
+  // One truck on two orders (older order first): offered once per form; the choice is saved with Save again
+  if (FORM.fn === 'api_saveTruck') {
+    if (!FORM.split) {
+      var probe = FORM.build ? FORM.build(Object.assign({}, send)) : send, sorig = probe && probe.id ? getT(probe.id) : null;
+      var offer = splitOffer(send, sorig);
+      FORM.split = offer || [];
+      if (offer) { showSplit(offer, send, sorig); return; }
+    } else if (FORM.split.length) { var se = applySplit(FORM.split, send); if (se) { showErr(se); return; } }
+  }
   var qf = FORM.warn && FORM.warn.qty;
   if (qf && D.me.role !== 'Owner') { var qp = qf(send); if (qp) { showErr(qp + ' Ask the Owner.'); return; } }
   if (!FORM.warned) {
@@ -1856,16 +1912,98 @@ function qtyProblem(id, orig, v) {
   var soId = cur('so');
   if (p && p.poType === 'plant') soId = '';
   else if (!soId && p && p.linkSO && SO[p.linkSO] && SO[p.linkSO].status !== 'Cancelled' && SO[p.linkSO].status !== 'Settled') soId = p.linkSO; // filled in by the PO
-  [['po', cur('po'), PO, 'loaded'], ['so', soId, SO, 'dispatched']].forEach(function (c) {
-    var o = c[1] && c[2][c[1]];
-    if (out || !o || !(n(o.qty) > 0) || o.status === 'Cancelled' || o.status === 'Settled') return;
-    var onIt = !!orig && orig[c[0]] === c[1];
-    var others = r2(sum(liveAll().filter(function (t) { return t.id !== id && t[c[0]] === c[1]; }), function (t) { return t.L; }));
-    var before = onIt ? n(orig.loadWt) : 0, limit = n(o.qty) * (1 + tl), full = n(o.qty) * (1 - tl);
-    if (L > before && others + L > limit + 0.005) out = c[1] + ' would go over its limit of ' + qt(limit) + ' qtl (' + qt(o.qty) + ' + ' + r2(tl * 100) + '%) by ' + qt(others + L - limit) + ' qtl.';
-    else if (!onIt && others >= full - 0.005) out = c[1] + ' is complete (' + qt(others) + ' of ' + qt(o.qty) + ' qtl ' + c[3] + ').';
+  // a truck split between two orders counts only its part on each (partOn)
+  var me = { po: cur('po'), so: soId, po2: cur('po2'), so2: p && p.poType === 'plant' ? '' : cur('so2'), poQty: cur('poQty'), soQty: cur('soQty') }, oL = orig ? n(orig.loadWt) : 0;
+  [['po', PO, 'loaded'], ['so', SO, 'dispatched']].forEach(function (c) {
+    [me[c[0]], me[c[0] + '2']].forEach(function (oid) {
+      var o = oid && c[1][oid];
+      if (out || !o || !(n(o.qty) > 0) || o.status === 'Cancelled' || o.status === 'Settled') return;
+      var onIt = !!orig && (orig[c[0]] === oid || orig[c[0] + '2'] === oid);
+      var others = r2(sum(liveAll().filter(function (t) { return t.id !== id; }), function (t) { return partOn(t, c[0], oid, t.L); }));
+      var mine = partOn(me, c[0], oid, L), before = onIt ? partOn(orig, c[0], oid, oL) : 0, limit = n(o.qty) * (1 + tl), full = n(o.qty) * (1 - tl);
+      if (mine > before && others + mine > limit + 0.005) out = oid + ' would go over its limit of ' + qt(limit) + ' qtl (' + qt(o.qty) + ' + ' + r2(tl * 100) + '%) by ' + qt(others + mine - limit) + ' qtl.';
+      else if (!onIt && others >= full - 0.005) out = oid + ' is complete (' + qt(others) + ' of ' + qt(o.qty) + ' qtl ' + c[2] + ').';
+    });
   });
   return out;
+}
+/* ---------- One truck on two orders (Nitish, 24-11-2026) ----------
+   Older order first: when the truck's supplier (PO) or customer (SO) has an older open order in the same firm that is
+   not complete and has less left than the truck, saving offers what is left on that order + the rest on the next one
+   ("Split"), or the whole truck on it when it fits ("Move"). "No" saves as chosen (the ±1% rule as before).
+   The first order's part is fixed; the rest of the weight goes on the second (also for the sale: see derive). */
+function orderLeft(k, o, exceptId) {
+  var q = n(o.qty), done = r2(sum(liveAll().filter(function (t) { return t.id !== exceptId; }), function (t) { return partOn(t, k, o.id, t.L); }));
+  return { q: q, done: done, left: r2(q - done), complete: !(q > 0) || done >= q * (1 - tol()) - 0.005 };
+}
+function splitFor(k, chosenId, L, tid) {
+  var map = k === 'po' ? PO : SO, o = map[chosenId], who = k === 'po' ? 'plant' : 'buyer';
+  if (!o) return null;
+  var open = (k === 'po' ? D.po : D.so).filter(function (x) {
+    return isOpen(x) && firmOf(x) === firmOf(o) && normName(x[who]) === normName(o[who]) &&
+      (k === 'po' ? (x.poType === 'plant') === (o.poType === 'plant') : String(x.freightMode || '') === String(o.freightMode || ''));
+  }).sort(function (a, b) { return String(a.date).localeCompare(String(b.date)) || a.id.localeCompare(b.id, 'en', { numeric: true }); })
+    .map(function (x) { return { o: x, s: orderLeft(k, x, tid) }; }).filter(function (x) { return !x.s.complete && x.s.left > 0.005; });
+  if (!open.length) return null;
+  var first = open[0], rest = open.slice(1).map(function (x) { return x.o.id; });
+  var fits = L <= first.s.left + first.s.q * tol() + 0.005;
+  var base = { k: k, first: first.o.id, left: first.s.left, done: first.s.done, qty: first.s.q, chosen: chosenId, L: L };
+  if (first.o.id === chosenId) { // the chosen order is the oldest open one: split only when the truck does not fit
+    if (fits || !rest.length) return null;
+    return Object.assign(base, { type: 'split', second: rest[0], others: rest });
+  }
+  if (fits) return Object.assign(base, { type: 'move' }); // an older order can take the whole truck
+  var second = rest.indexOf(chosenId) >= 0 ? chosenId : rest[0];
+  return second ? Object.assign(base, { type: 'split', second: second, others: rest }) : null;
+}
+/* v = the fields being saved, orig = the truck now (blank for a new truck). Only when the weight, PO or SO is saved. */
+function splitOffer(v, orig) {
+  if (!['loadWt', 'po', 'so'].some(function (k) { return k in v; }) || (orig && orig.cx)) return null;
+  var cur = function (k) { return k in v ? v[k] : (orig ? orig[k] : ''); };
+  var L = n(cur('loadWt')), tid = orig ? orig.id : '', out = [], p = PO[cur('po')];
+  if (!(L > 0) || L > 1000) return null;
+  if (p && !cur('po2')) { var a = splitFor('po', p.id, L, tid); if (a) out.push(a); }
+  var soId = cur('so');
+  if (!soId && p && p.linkSO && SO[p.linkSO] && isOpen(SO[p.linkSO])) soId = p.linkSO;
+  if (soId && !(p && p.poType === 'plant') && !cur('so2')) { var b = splitFor('so', soId, L, tid); if (b) out.push(b); }
+  return out.length ? out : null;
+}
+function showSplit(offers, v, orig) {
+  var h = '<div class="msg warn" id="fsplit">' + offers.map(function (x, i) {
+    var map = x.k === 'po' ? PO : SO, o = map[x.first], party = x.k === 'po' ? o.plant : o.buyer;
+    var head = '<div><b>' + esc(x.first) + '</b> (' + esc(party) + ') has <b>' + qt(x.left) + ' qtl</b> left (' + qt(x.done) + ' of ' + qt(x.qty) + ' qtl ' + (x.k === 'po' ? 'loaded' : 'sent') + ')' + (x.first !== x.chosen ? ' and is older than ' + esc(x.chosen) : '') + '.</div>';
+    var radio = function (val, on, body) { return '<label class="rad"><input type="radio" name="sp' + i + '" value="' + val + '"' + (on ? ' checked' : '') + '>' + body + '</label>'; };
+    if (x.type === 'move') return '<div class="spl">' + head + radio('move', 1, 'Put this truck (' + qt(x.L) + ' qtl) on ' + esc(x.first)) + radio('no', 0, 'No, keep it on ' + esc(x.chosen)) + '</div>';
+    return '<div class="spl">' + head +
+      radio('split', 1, 'Split: <input id="spq' + i + '" class="spq" inputmode="decimal" value="' + x.left.toFixed(2) + '"> qtl on ' + esc(x.first) + ' + <b id="spr' + i + '">' + qt(r2(x.L - x.left)) + '</b> qtl on ' +
+        '<select id="sps' + i + '">' + x.others.map(function (id) { return '<option value="' + esc(id) + '"' + (id === x.second ? ' selected' : '') + '>' + esc(id) + ' · bal ' + qt(orderLeft(x.k, map[id], orig ? orig.id : '').left) + '</option>'; }).join('') + '</select>') +
+      radio('no', 0, 'No split: all ' + qt(x.L) + ' qtl on ' + esc(x.chosen)) + '</div>';
+  }).join('');
+  // the supplier was already paid: show what the supplier amount becomes
+  var po = offers.filter(function (x) { return x.k === 'po'; })[0];
+  if (po && P.money && orig && orig.plantPaid) {
+    var nt = Object.assign({}, orig, v, po.type === 'move' ? { po: po.first } : { po: po.first, po2: po.second, poQty: po.left });
+    h += '<div class="mu" style="margin-top:4px">Supplier already paid on ' + dmy(orig.plantPaidDate) + ': the supplier amount becomes ' + inr(derive(nt).purTot) + ' instead of ' + inr(orig.purTot) + '.</div>';
+  }
+  h += '<div style="margin-top:6px">Tap Save again to save your choice.</div></div>';
+  $('#fwarn').insertAdjacentHTML('beforebegin', h);
+  offers.forEach(function (x, i) {
+    var q = document.getElementById('spq' + i);
+    if (q) q.addEventListener('input', function () { $('#spr' + i).textContent = qt(Math.max(0, r2(x.L - n(q.value)))); });
+  });
+  var box = $('#fsplit');
+  if (box && box.scrollIntoView) box.scrollIntoView({ block: 'nearest' });
+}
+function applySplit(offers, send) {
+  for (var i = 0; i < offers.length; i++) {
+    var x = offers[i], ch = document.querySelector('#fsplit input[name="sp' + i + '"]:checked'), val = ch ? ch.value : 'no';
+    if (val === 'move') { send[x.k] = x.first; continue; }
+    if (val !== 'split') continue;
+    var q = n((document.getElementById('spq' + i) || {}).value), sec = (document.getElementById('sps' + i) || {}).value || x.second;
+    if (!(q > 0) || q > x.L - 0.005) return 'The qty on ' + x.first + ' must be more than 0 and less than ' + qt(x.L) + ' qtl.';
+    send[x.k] = x.first; send[x.k + '2'] = sec; send[x.k + 'Qty'] = r2(q);
+  }
+  return null;
 }
 function actNewTruck() {
   var recent = live().filter(function (t) { return PO[t.po] && PO[t.po].status !== 'Cancelled'; }).sort(sortT)[0];
@@ -1891,6 +2029,11 @@ function actEditTruck(id) {
     { sec: 'Loading' }, { k: 'loadWt', label: 'Dispatch weight', type: 'weight' }, { k: 'slip', label: 'RST / Weighment Slip No.' },
     { sec: 'Unloading' }, { k: 'unloadDate', label: 'Unloading date', type: 'date' }, { k: 'unloadWt', label: 'Received weight', type: 'weight' }
   ];
+  // One truck on two orders: the first order keeps this qty, the second takes the rest of the weight (24-11-2026)
+  var sameParty = function (list, cur, first, who, party) { return list.filter(function (o) { var x = (who === 'plant' ? PO : SO)[o[0]]; return o[0] !== first && x && (o[0] === cur || normName(x[who]) === normName(party)); }); };
+  fields.push({ sec: 'Split between two orders (optional)' },
+    { k: 'po2', label: 'Second PO (takes the rest of the weight)', type: 'select', options: sameParty(poOpts(t.po2, t.firm), t.po2, t.po, 'plant', t.plant), blank: 'No second PO' }, { k: 'poQty', label: 'Qty on the first PO (qtl)', type: 'number' });
+  if (!t.plantPO) fields.push({ k: 'so2', label: 'Second SO (takes the rest)', type: 'select', options: sameParty(soOpts(t.so2, t.firm), t.so2, t.so, 'buyer', t.buyer), blank: 'No second SO' }, { k: 'soQty', label: 'Qty on the first SO (qtl)', type: 'number' });
   if (!P.truckMoney) fields.push({ k: 'frate', label: 'Freight rate per qtl (needed with weight)', type: 'number' });
   if (P.truckMoney) fields = fields.concat([{ sec: 'Freight' }, { k: 'frate', label: 'Freight rate per qtl', type: 'number' }, { k: 'advance', label: 'Freight advance (₹)', type: 'number' }, { k: 'detention', label: 'Detention (₹)', type: 'number', help: 'Only if agreed with the transporter. Suggestion: ' + t.freeDays + ' free days, then ' + inr(t.perDay) + '/day' + (t.detSuggest ? ' = ' + inr(t.detSuggest) : '') + '.' }]);
   if (P.truckMoney && !t.plantPO) fields.push({ k: 'saleRate', label: 'Invoice rate for this vehicle (₹/qtl)', type: 'number', help: 'Only if this invoice has a different rate. Blank = sale order rate' + (SO[t.so] ? ' (' + inr(SO[t.so].rate) + ')' : '') + '.' });
@@ -2302,13 +2445,13 @@ function poFlow(o, tr) {
   var G = {};
   tr.forEach(function (t) {
     if (t.cx) return;
-    var key = t.plantPO ? '__plant' : t.so ? 'so:' + t.so : '__none';
+    var key = t.plantPO ? '__plant' : t.so ? 'so:' + t.so : '__none', pl = partOn(t, 'po', o.id, t.L);
     var g = G[key] || (G[key] = { key: key, title: t.plantPO ? 'Own plant · ' + shortFirm(plantFirm()) : t.so ? (t.buyer || t.so) : 'No customer yet', cls: key === '__none' ? 'none' : key === '__plant' ? 'own' : '', qty: 0, n: 0, done: 0, road: 0, sos: {} });
-    g.qty = r2(g.qty + t.L); g.n++; g.done = r2(g.done + t.U); if (t.L && !t.U) g.road = r2(g.road + t.L); if (t.so) g.sos[t.so] = 1;
+    g.qty = r2(g.qty + pl); g.n++; g.done = r2(g.done + partOn(t, 'po', o.id, t.U)); if (t.L && !t.U) g.road = r2(g.road + pl); if (t.so) g.sos[t.so] = 1; if (t.so2) g.sos[t.so2] = 1;
   });
   var groups = Object.keys(G).map(function (k) { var g = G[k], sos = Object.keys(g.sos); g.lines = [qt(g.qty) + ' qtl · ' + trk(g.n), sos.length ? 'SO ' + sos.join(', ') : 'no sale order', 'delivered ' + qt(g.done) + ' · on road ' + qt(g.road)]; return g; })
     .sort(function (a, b) { return b.qty - a.qty; });
-  var loaded = r2(sum(tr.filter(function (t) { return !t.cx; }), function (t) { return t.L; }));
+  var loaded = r2(sum(tr.filter(function (t) { return !t.cx; }), function (t) { return partOn(t, 'po', o.id, t.L); }));
   var rem = Math.max(0, r2(n(o.qty) - loaded));
   return flowChart(esc(o.id) + ' · ' + esc(o.plant), ['Ordered ' + qt(o.qty) + ' qtl', 'Loaded ' + qt(loaded) + ' qtl', 'Remaining ' + qt(rem) + ' qtl'], groups);
 }
@@ -2316,9 +2459,12 @@ function buyerFlow(name, tr) {
   var G = {};
   tr.forEach(function (t) {
     if (t.cx) return;
-    var key = 'po:' + t.po;
-    var g = G[key] || (G[key] = { key: key, title: t.po + ' · ' + (t.plant || ''), cls: '', qty: 0, n: 0, done: 0, road: 0 });
-    g.qty = r2(g.qty + t.L); g.n++; g.done = r2(g.done + t.U); if (t.L && !t.U) g.road = r2(g.road + t.L);
+    [t.po, t.po2].forEach(function (pid) { // a truck on two POs counts its part on each
+      if (!pid) return;
+      var key = 'po:' + pid, pl = partOn(t, 'po', pid, t.L);
+      var g = G[key] || (G[key] = { key: key, title: pid + ' · ' + (t.plant || ''), cls: '', qty: 0, n: 0, done: 0, road: 0 });
+      g.qty = r2(g.qty + pl); g.n++; g.done = r2(g.done + partOn(t, 'po', pid, t.U)); if (t.L && !t.U) g.road = r2(g.road + pl);
+    });
   });
   var groups = Object.keys(G).map(function (k) { var g = G[k]; g.lines = [qt(g.qty) + ' qtl · ' + trk(g.n), 'delivered ' + qt(g.done) + ' · on road ' + qt(g.road)]; return g; })
     .sort(function (a, b) { return b.qty - a.qty; });

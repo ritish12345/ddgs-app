@@ -73,7 +73,9 @@ var SCHEMA = {
     ['detention', 'Detention (Rs)', 'num'], ['saleRate', 'Invoice Rate (this vehicle)', 'num'],
     ['plantUTR', 'Supplier Payment UTR', 'text'], ['freightUTR', 'Freight Payment UTR', 'text'], ['billNo', 'Supplier Invoice No', 'text'], ['billQty', 'Supplier Invoice Qty', 'num'], ['returnedDate', 'Returned Date', 'text'],
     ['placedOn', 'Vehicle Placed On', 'date'], ['slipPhoto', 'Slip Photo Link', 'text'], ['plantPayPhoto', 'Supplier Payment Screenshot', 'text'], ['freightPayPhoto', 'Freight Payment Screenshot', 'text'],
-    ['tAdv', 'Transporter Advance Used', 'num'] // what this truck took from its transporter's advance, saved when its freight is paid
+    ['tAdv', 'Transporter Advance Used', 'num'], // what this truck took from its transporter's advance, saved when its freight is paid
+    // One truck on two orders (Nitish, 24-11-2026): poQty qtl on po, the rest of the weight on po2 (the same for so / so2).
+    ['po2', 'Second PO ID', 'text'], ['poQty', 'Qty On First PO', 'num'], ['so2', 'Second SO ID', 'text'], ['soQty', 'Qty On First SO', 'num']
   ],
   APP_LOG: [['time', 'Time', 'text'], ['user', 'User', 'text'], ['action', 'Action', 'text'],
             ['record', 'Record', 'text'], ['details', 'Details', 'text'],
@@ -145,7 +147,19 @@ function hiddenSets_(S) {
   rows_(T.SO).forEach(function (o) { if (H.firms.indexOf(firmOf_(o, S)) >= 0) H.so[o.id] = 1; });
   return H;
 }
-function hidTruck_(t, H) { return !!t && (!!H.po[t.po] || !!H.so[t.so]); }
+function hidTruck_(t, H) { return !!t && (!!H.po[t.po] || !!H.so[t.so] || !!H.po[t.po2] || !!H.so[t.so2]); }
+/* How much of a truck is on order id (k = 'po' or 'so'; w = its weight in qtl, dispatch or received). A truck split
+   between two orders (Nitish, 24-11-2026) has its first order's part (poQty / soQty, at most w) on po / so and the
+   rest on po2 / so2. The same on the screen (partOn in Index.html). */
+function partOn_(t, k, id, w) {
+  if (!t || !id) return 0;
+  var two = t[k + '2'];
+  if (!two) return t[k] === id ? w : 0;
+  var first = Math.min(w, num_(t[k + 'Qty']) || 0);
+  return Math.round((t[k] === id ? first : two === id ? w - first : 0) * 100) / 100;
+}
+/* "PO-01-BCL", or for a split truck "PO-01-BCL 141.60 + PO-07-BCL 225.80" (a derived truck). */
+function ordIds_(t, k) { return !t[k + '2'] ? (t[k] || '') : t[k] + ' ' + qtl_(t[k + 'Q1']) + ' + ' + t[k + '2'] + ' ' + qtl_(t[k + 'Q2']); }
 function hiddenErr_(what, H) { return new Error(what + ' belongs to ' + H.firms.join(', ') + ', which is kept out of this app.'); }
 /* POs, SOs and trucks without the hidden ones. */
 function visibleRows_(S) {
@@ -308,6 +322,8 @@ function api_saveTruck(token, obj) {
     if (hidTruck_(was, H)) throw hiddenErr_(obj.id, H);
     if (obj.po && H.po[obj.po]) throw hiddenErr_(obj.po, H);
     if (obj.so && H.so[obj.so]) throw hiddenErr_(obj.so, H);
+    if (obj.po2 && H.po[obj.po2]) throw hiddenErr_(obj.po2, H);
+    if (obj.so2 && H.so[obj.so2]) throw hiddenErr_(obj.so2, H);
     [['po', T.PO], ['so', T.SO]].forEach(function (k) {
       if (!(k[0] in obj) || !obj[k[0]]) return;
       var cur = obj.id ? rows_(T.TR).filter(function (r) { return r.id === obj.id; })[0] : null;
@@ -319,6 +335,7 @@ function api_saveTruck(token, obj) {
     var dup = sameDayTruck_(obj);
     if (dup && !force) throw new Error('Vehicle ' + dup.truck + ' is already entered on ' + dmy_(dup.date) + ' as ' + dup.id + '. A vehicle cannot be entered twice on the same day.' + (ME.role === 'Owner' ? '' : ' Ask the Owner if this is a real second trip.'));
     linkTruckOrders_(obj);
+    checkSplit_(obj);
     checkQty_(obj, force);
     if (obj.id) checkTruckRules_(obj);
     if (obj.id && obj.freightPaid === true && !(was && was.freightPaid)) obj.tAdv = advForPay_(obj);
@@ -349,6 +366,33 @@ function linkTruckOrders_(obj) {
     var sx = rows_(T.SO).filter(function (r) { return r.id === soNow; })[0];
     if (sx && firmOf_(sx) !== firmOf_(po)) throw new Error(soNow + ' is in ' + firmOf_(sx) + ' but ' + po.id + ' is in ' + firmOf_(po) + '. A truck\'s sale order must be in the same firm as its PO.');
   }
+}
+/* One truck on two orders (Nitish, 24-11-2026): the first order (po / so) takes poQty / soQty qtl, the second
+   (po2 / so2) the rest of the weight. The second order has the same supplier / customer and firm as the first (and
+   the same PO type / freight terms), and must be open when it is chosen. A blank second order removes the split. */
+function checkSplit_(obj) {
+  if (!['po', 'so', 'po2', 'so2', 'poQty', 'soQty', 'loadWt'].some(function (k) { return k in obj; })) return;
+  var cur = obj.id ? rows_(T.TR).filter(function (r) { return r.id === obj.id; })[0] : null;
+  var get = function (k) { return (k in obj) ? obj[k] : cur ? cur[k] : ''; };
+  var L = num_(get('loadWt')) || 0, po = rows_(T.PO).filter(function (r) { return r.id === get('po'); })[0];
+  [['po', T.PO, 'PO', 'supplier', 'plant'], ['so', T.SO, 'SO', 'customer', 'buyer']].forEach(function (c) {
+    var k = c[0], k2 = k + '2', kq = k + 'Qty', id1 = get(k), id2 = get(k2);
+    if (k === 'so' && po && po.poType === 'plant') id2 = ''; // own-plant trucks have no sale order
+    if (id2 && !id1 && obj[k2]) throw new Error('Choose the first ' + c[2] + ' before a second one.');
+    if (!id2 || !id1) { if (get(k2) || (get(kq) !== '' && get(kq) != null)) { obj[k2] = ''; obj[kq] = ''; } return; }
+    if (id2 === id1) throw new Error('The second ' + c[2] + ' is the same as the first (' + id1 + ').');
+    var list = rows_(c[1]), o1 = list.filter(function (r) { return r.id === id1; })[0], o2 = list.filter(function (r) { return r.id === id2; })[0];
+    if (!o2) throw new Error(id2 + ' was not found.');
+    if (!o1) return;
+    if ((k2 in obj) && (!cur || cur[k2] !== id2) && (o2.status === 'Cancelled' || o2.status === 'Settled')) throw new Error(id2 + ' is ' + (o2.status === 'Settled' ? 'short-closed' : 'cancelled') + '. Choose an open ' + c[2] + ' for the rest of the truck.');
+    if (normName_(o1[c[4]]) !== normName_(o2[c[4]])) throw new Error(id2 + ' is for ' + o2[c[4]] + ' but ' + id1 + ' is for ' + o1[c[4]] + '. A truck can be split only between orders of the same ' + c[3] + '.');
+    if (firmOf_(o1) !== firmOf_(o2)) throw new Error(id2 + ' is in ' + firmOf_(o2) + ' but ' + id1 + ' is in ' + firmOf_(o1) + '. Both orders must be in the same firm.');
+    if (k === 'po' && (o1.poType === 'plant') !== (o2.poType === 'plant')) throw new Error(id1 + ' and ' + id2 + ' must both be trading POs or both own-plant POs.');
+    if (k === 'so' && String(o1.freightMode || '') !== String(o2.freightMode || '')) throw new Error(id1 + ' and ' + id2 + ' have different freight terms. A truck can be split only between sale orders with the same freight terms.');
+    var q = num_(get(kq));
+    if (!(L > 0)) throw new Error('Enter the dispatch weight before splitting the truck between two orders.');
+    if (!(q > 0) || q > L - 0.005) throw new Error('The qty on ' + id1 + ' must be more than 0 and less than the dispatch weight (' + qtl_(L) + ' qtl). The rest goes on ' + id2 + '.');
+  });
 }
 var SUPPLIER_SIDE_ = ['plantPaid', 'plantPaidDate', 'plantUTR', 'billNo', 'billQty'];
 function checkTruckRules_(obj) {
@@ -394,24 +438,27 @@ function checkQty_(obj, force) {
   var H = hiddenSets_(), tol = qtyTol_(readSettings_()), L = num_(get('loadWt')) || 0, trucks = rows_(T.TR).filter(function (t) { return !hidTruck_(t, H); });
   if (L > 1000) return; // looks like kg: the save is refused with the clear "looks like kg" message instead
   var owner = ME && ME.role === 'Owner';
+  // A truck split between two orders counts only its part on each (partOn_).
+  var me = { po: get('po'), so: get('so'), po2: get('po2'), so2: get('so2'), poQty: get('poQty'), soQty: get('soQty') }, curL = cur ? (num_(cur.loadWt) || 0) : 0;
   [['po', T.PO, 'loaded'], ['so', T.SO, 'dispatched']].forEach(function (k) {
-    var id = get(k[0]);
-    if (!id) return;
-    var o = rows_(k[1]).filter(function (r) { return r.id === id; })[0], qty = o ? num_(o.qty) : '';
-    if (!o || !(qty > 0) || o.status === 'Cancelled' || o.status === 'Settled') return;
-    var onIt = !!cur && cur[k[0]] === id; // this truck was already on this order before the save
-    var others = 0;
-    trucks.forEach(function (t) { if (t.id !== obj.id && t[k[0]] === id && !isOff_(t)) others += num_(t.loadWt) || 0; });
-    others = Math.round(others * 100) / 100;
-    var before = onIt ? (num_(cur.loadWt) || 0) : 0, limit = qty * (1 + tol), full = qty * (1 - tol);
-    if (L > before && others + L > limit + 0.005) {
-      throw new Error(id + ' would go over its limit of ' + qtl_(limit) + ' qtl (' + qtl_(qty) + ' + ' + Math.round(tol * 10000) / 100 + '%) by ' + qtl_(others + L - limit) + ' qtl.' +
-        (owner ? ' Open it again and tap Save twice to accept.' : ' Ask the Owner.'));
-    }
-    if (!onIt && others >= full - 0.005) {
-      throw new Error(id + ' is complete (' + qtl_(others) + ' of ' + qtl_(qty) + ' qtl ' + k[2] + ').' +
-        (owner ? ' Short-close it, or open this again and tap Save twice to add the truck anyway.' : ' Ask the Owner.'));
-    }
+    [me[k[0]], me[k[0] + '2']].forEach(function (id) {
+      if (!id) return;
+      var o = rows_(k[1]).filter(function (r) { return r.id === id; })[0], qty = o ? num_(o.qty) : '';
+      if (!o || !(qty > 0) || o.status === 'Cancelled' || o.status === 'Settled') return;
+      var onIt = !!cur && (cur[k[0]] === id || cur[k[0] + '2'] === id); // this truck was already on this order before the save
+      var others = 0;
+      trucks.forEach(function (t) { if (t.id !== obj.id && !isOff_(t)) others += partOn_(t, k[0], id, num_(t.loadWt) || 0); });
+      others = Math.round(others * 100) / 100;
+      var mine = partOn_(me, k[0], id, L), before = onIt ? partOn_(cur, k[0], id, curL) : 0, limit = qty * (1 + tol), full = qty * (1 - tol);
+      if (mine > before && others + mine > limit + 0.005) {
+        throw new Error(id + ' would go over its limit of ' + qtl_(limit) + ' qtl (' + qtl_(qty) + ' + ' + Math.round(tol * 10000) / 100 + '%) by ' + qtl_(others + mine - limit) + ' qtl.' +
+          (owner ? ' Open it again and tap Save twice to accept.' : ' Ask the Owner.'));
+      }
+      if (!onIt && others >= full - 0.005) {
+        throw new Error(id + ' is complete (' + qtl_(others) + ' of ' + qtl_(qty) + ' qtl ' + k[2] + ').' +
+          (owner ? ' Short-close it, or open this again and tap Save twice to add the truck anyway.' : ' Ask the Owner.'));
+      }
+    });
   });
 }
 function qtl_(x) {
@@ -607,7 +654,7 @@ function api_cancel(token, table, id, reason) {
     if (!name) throw new Error('Unknown record type');
     if (table !== 'truck') {
       var key = table === 'po' ? 'po' : 'so';
-      var n = rows_(T.TR).filter(function (t) { return t[key] === id && !isOff_(t); }).length;
+      var n = rows_(T.TR).filter(function (t) { return (t[key] === id || t[key + '2'] === id) && !isOff_(t); }).length;
       if (n) throw new Error(id + ' still has ' + n + ' active truck' + (n > 1 ? 's' : '') + '. Move or cancel them first.');
       if (table === 'so') {
         var lp = rows_(T.PO).filter(function (p) { return p.linkSO === id && p.status !== 'Cancelled'; })[0];
@@ -1319,7 +1366,7 @@ function writeLog_(lines) {
 
 /* ---------------- setup and import ---------------- */
 
-var SCHEMA_V = '6.9'; // 6.9: open screens fetch everything once after an upgrade; 6.5: setting qtyTolerancePct; 6.6: setting hiddenFirms; 6.7: transporter advances (APP_ADVANCES, APP_TRUCKS tAdv); 6.8: four firms, Firm on payments and advances
+var SCHEMA_V = '7.0'; // 7.0: APP_TRUCKS po2 / poQty / so2 / soQty (one truck on two orders); 6.9: open screens fetch everything once after an upgrade; 6.5: setting qtyTolerancePct; 6.6: setting hiddenFirms; 6.7: transporter advances (APP_ADVANCES, APP_TRUCKS tAdv); 6.8: four firms, Firm on payments and advances
 function ensureSetup_() {
   var cache = CacheService.getScriptCache();
   if (cache.get('schema_ok') === SCHEMA_V) return null; // checked in the last 6 hours (setup clears this)
@@ -1525,7 +1572,7 @@ function days_(a, b) {
 
 var STAGES_ = ['Vehicle placed', 'Loaded', 'Supplier paid', 'Unloaded', 'Part paid', 'Customer paid', 'Closed']; // same words as the screen
 
-function derive_(t, po, so, S, today) {
+function derive_(t, po, so, S, today, po2, so2) {
   var n = function (x) { var v = parseFloat(x); return isNaN(v) ? 0 : v; };
   var r2 = function (x) { return Math.round(x * 100) / 100; };
   var L = n(t.loadWt), U = n(t.unloadWt), R = n(t.received), A = n(t.advance), FR = n(t.frate), DED = n(t.deduction);
@@ -1539,18 +1586,39 @@ function derive_(t, po, so, S, today) {
   x.plant = po ? po.plant : ''; x.buyer = so ? so.buyer : '';
   x.plantPO = plantPO; x.firm = firmOf_(po, S); x.ownBuyer = !!(so && isFirm_(so.buyer, S)); x.rateUsed = soRate;
   x.purEx = r2(L * poRate); x.purTot = r2(x.purEx * (1 + poG));
+  // One truck on two orders (Nitish, 24-11-2026): the first order takes a fixed part, the second the rest. PO: poQty of
+  // the dispatch weight at PO 1's rate, the rest at PO 2's. SO: soQty of the sale weight (received, or dispatch until
+  // received) at SO 1's rate, the rest at SO 2's, so a shortage falls on SO 2 and is charged at SO 2's rate.
+  // A rate typed on the truck (saleRate) still prices the whole truck.
+  var p2 = t.po2 && po2 ? po2 : null, s2 = so && t.so2 && so2 ? so2 : null;
+  x.poQ1 = p2 ? r2(Math.min(L, n(t.poQty))) : L; x.poQ2 = p2 ? r2(L - x.poQ1) : 0;
+  x.soQ1 = s2 ? r2(Math.min(L, n(t.soQty))) : so ? L : 0; x.soQ2 = s2 ? r2(L - x.soQ1) : 0;
+  x.pur1Tot = x.purTot; x.pur2Tot = 0; x.rate2 = p2 ? n(p2.rate) : 0;
+  if (p2) {
+    var e1 = r2(x.poQ1 * poRate), e2 = r2(x.poQ2 * n(p2.rate));
+    x.pur1Tot = r2(e1 * (1 + poG)); x.pur2Tot = r2(e2 * (1 + n(p2.gst))); x.purEx = r2(e1 + e2); x.purTot = r2(x.pur1Tot + x.pur2Tot);
+  }
   x.saleWt = U || L;
   var gIncl = !!(so && so.gstMode === 'incl');
   x.fBuyer = !!(so && so.freightMode === 'buyer');
   x.soBase = gIncl ? soRate / (1 + soG) : soRate;
   x.saleEx = so ? r2(x.saleWt * x.soBase) : 0;
   x.saleTot = so ? r2(gIncl ? x.saleWt * soRate : x.saleEx * (1 + soG)) : 0;
+  x.sale1Qty = so ? x.saleWt : 0; x.sale2Qty = 0; x.sale1Tot = x.saleTot; x.sale2Tot = 0; x.soRate2 = s2 ? n(s2.rate) : 0;
+  var shB = x.soBase, shG = soG; // the rate a shortage is charged at (before GST)
+  if (s2 && own === null) {
+    var g2Incl = s2.gstMode === 'incl', sr2 = n(s2.rate), sg2 = n(s2.gst), sb2 = g2Incl ? sr2 / (1 + sg2) : sr2;
+    var q1 = r2(Math.min(x.saleWt, n(t.soQty))), q2 = r2(x.saleWt - q1), x1 = r2(q1 * x.soBase), x2 = r2(q2 * sb2);
+    x.sale1Qty = q1; x.sale2Qty = q2;
+    x.sale1Tot = r2(gIncl ? q1 * soRate : x1 * (1 + soG)); x.sale2Tot = r2(g2Incl ? q2 * sr2 : x2 * (1 + sg2));
+    x.saleEx = r2(x1 + x2); x.saleTot = r2(x.sale1Tot + x.sale2Tot); shB = sb2; shG = sg2;
+  }
   x.short = U ? r2(Math.max(0, L - U)) : 0;
   x.allow = L * n(S.shortageAllowancePct);
-  x.shortDed = !U || x.fBuyer ? 0 : plantPO ? r2(Math.max(0, x.short - x.allow) * poRate * (1 + poG)) : so ? r2(Math.max(0, x.short - x.allow) * x.soBase * (1 + soG)) : 0;
+  x.shortDed = !U || x.fBuyer ? 0 : plantPO ? r2(Math.max(0, x.short - x.allow) * poRate * (1 + poG)) : so ? r2(Math.max(0, x.short - x.allow) * shB * (1 + shG)) : 0;
   // For showing the working: the charged shortage (above the free allowance) and the rate it is charged at (incl. GST)
   x.shortOver = U ? r2(Math.max(0, x.short - x.allow)) : 0;
-  x.shortRate = !U || x.fBuyer ? 0 : plantPO ? r2(poRate * (1 + poG)) : so ? r2(x.soBase * (1 + soG)) : 0;
+  x.shortRate = !U || x.fBuyer ? 0 : plantPO ? r2(poRate * (1 + poG)) : so ? r2(shB * (1 + shG)) : 0;
   x.frAmt = x.fBuyer ? 0 : r2(U * FR);
   x.trip = t.date ? days_(t.date, t.unloadDate || today) : 0;
   x.detDays = Math.max(0, x.trip - n(S.freeDays === undefined || S.freeDays === '' ? 3 : S.freeDays));
@@ -1688,7 +1756,7 @@ function deriveAll_(patch) {
     for (k in patch) if (['freightPaid', 'freightPaidDate', 'freightUTR', 'tAdv'].indexOf(k) < 0) c[k] = patch[k];
     return c;
   });
-  var trucks = carry_(list.map(function (t) { return derive_(t, po[t.po], so[t.so], S, today); }));
+  var trucks = carry_(list.map(function (t) { return derive_(t, po[t.po], so[t.so], S, today, po[t.po2], so[t.so2]); }));
   var pays = sheet_(T.PAY) ? rows_(T.PAY) : [], advs = sheet_(T.ADV) ? rows_(T.ADV) : [];
   var tadv = transAdv_(trucks, advs, firms_(S)[0]);
   return { po: po, so: so, S: S, today: today, trucks: trucks, pays: pays, accounts: custAcc_(trucks, pays, S), advs: advs, tadv: tadv };
@@ -1702,7 +1770,7 @@ function advForPay_(obj) {
 /* ---------------- Excel export ---------------- */
 
 function truckColumns_(can) {
-  var c = [['Dispatch No.', 'id'], ['Status', 'status'], ['Firm', 'firm'], ['Dispatch Date', 'date'], ['Vehicle Placed On', 'placedOn'], ['PO', 'po'], ['Supplier', 'plant'], ['SO', 'so'], ['Customer', 'buyer'],
+  var c = [['Dispatch No.', 'id'], ['Status', 'status'], ['Firm', 'firm'], ['Dispatch Date', 'date'], ['Vehicle Placed On', 'placedOn'], ['PO', 'po'], ['Supplier', 'plant'], ['Second PO', 'po2'], ['Qty on First PO', 'poQty'], ['SO', 'so'], ['Customer', 'buyer'], ['Second SO', 'so2'], ['Qty on First SO', 'soQty'],
     ['Vehicle No', 'truck'], ['Transporter', 'transporter'], ['Driver', 'driver'], ['RST / Weighment Slip No', 'slip'], ['Slip Photo Link', 'slipPhoto'], ['Dispatch Wt (qtl)', 'L'], ['Supplier Invoice No', 'billNo'], ['Supplier Invoice Qty', 'billQty'],
     ['Unload Date', 'unloadDate'], ['Received Wt (qtl)', 'U'], ['Shortage (qtl)', 'short'], ['Days on trip', 'trip'], ['Stage', 'stage']];
   if (can.money) c = c.concat([['Supplier Amount incl GST', 'purTot'], ['Supplier Paid', 'plantPaid'], ['Supplier Paid Date', 'plantPaidDate'], ['Supplier UTR', 'plantUTR'],
@@ -1742,8 +1810,8 @@ function exportTabs_(kind, key, ids, can, firm) {
   var tc = truckColumns_(can), tabs = [];
   var orderRows = function (map, k) {
     return Object.keys(map).map(function (id) {
-      var o = map[id], tr = live.filter(function (t) { return t[k] === id; }), done = 0;
-      tr.forEach(function (t) { done += t.L; });
+      var o = map[id], tr = live.filter(function (t) { return t[k] === id || t[k + '2'] === id; }), done = 0;
+      tr.forEach(function (t) { done += partOn_(t, k, id, t.L); });
       var r = { id: id, takenIn: o.takenIn || '', firm: firmOf_(o, A.S), type: k === 'po' ? (o.poType === 'plant' ? 'Own plant' : 'Trading') : (isFirm_(o.buyer, A.S) ? 'To group company' : 'Trading'), link: o.linkSO || '', party: o.plant || o.buyer, date: o.date, qty: o.qty, done: Math.round(done * 100) / 100,
         bal: Math.round((Number(o.qty || 0) - done) * 100) / 100, trucks: tr.length, status: o.status === 'Settled' ? 'Short-closed' : o.status, rate: o.rate,
         terms: o.gstMode ? (o.gstMode === 'incl' ? 'GST incl' : 'GST extra') + ', ' + (o.freightMode === 'buyer' ? 'buyer pays freight' : 'freight incl') : '' };
@@ -1806,7 +1874,7 @@ function exportTabs_(kind, key, ids, can, firm) {
   } else {
     var match = {
       trucks: function () { return true; },
-      po: function (t) { return t.po === key; }, so: function (t) { return t.so === key; },
+      po: function (t) { return t.po === key || t.po2 === key; }, so: function (t) { return t.so === key || t.so2 === key; },
       buyer: function (t) { return normName_(t.buyer) === normName_(key); }, plant: function (t) { return normName_(t.plant) === normName_(key); },
       transporter: function (t) { return normName_(t.transporter || '(none)') === normName_(key); }
     }[kind];
@@ -1896,7 +1964,7 @@ function reportHtml_(A, from, to, f, money, who) {
   var disp = live.filter(function (t) { return t.L && inR(t.date); }).sort(function (a, b) { return byId(a.date, b.date) || byId(a.id, b.id); });
   var unl = live.filter(function (t) { return t.U && inR(t.unloadDate); }).sort(function (a, b) { return byId(a.unloadDate, b.unloadDate) || byId(a.id, b.id); });
   var fs = function (x) { return all ? '<br><span class="mu">' + esc(shortFirm_(x)) + '</span>' : ''; };
-  var dest = function (t) { return t.plantPO ? 'Own plant' : t.buyer ? esc(t.buyer) + (t.so ? '<br><span class="mu">' + esc(t.so) + '</span>' : '') : '<span class="mu">not assigned</span>'; };
+  var dest = function (t) { return t.plantPO ? 'Own plant' : t.buyer ? esc(t.buyer) + (t.so ? '<br><span class="mu">' + esc(ordIds_(t, 'so')) + '</span>' : '') : '<span class="mu">not assigned</span>'; };
   // a table: cols = [[heading, right-aligned?]], rows = arrays of cell html, tot = totals row (or null)
   var table = function (cols, rows, tot) {
     if (!rows.length) return '<p class="mu">None.</p>';
@@ -1936,10 +2004,12 @@ function reportHtml_(A, from, to, f, money, who) {
     return Object.keys(map).map(function (id) { return map[id]; }).filter(function (o) {
       if (f && firmOf_(o, S) !== f) return false;
       var open = o.status !== 'Cancelled' && o.status !== 'Settled';
-      return open || disp.some(function (t) { return t[k] === o.id; }) || unl.some(function (t) { return t[k] === o.id; });
+      var on = function (t) { return t[k] === o.id || t[k + '2'] === o.id; };
+      return open || disp.some(on) || unl.some(on);
     }).sort(function (a, b) { return byId(a.id, b.id); }).map(function (o) {
-      var on = function (t) { return t[k] === o.id; }, done = sum(live.filter(on), function (t) { return t.L; }), qty = Number(o.qty) || 0;
-      return { o: o, qty: qty, done: done, bal: Math.round((qty - done) * 100) / 100, dp: disp.filter(on), up: unl.filter(on) };
+      var on = function (t) { return t[k] === o.id || t[k + '2'] === o.id; }, done = sum(live, function (t) { return partOn_(t, k, o.id, t.L); }), qty = Number(o.qty) || 0;
+      var dp = disp.filter(on), up = unl.filter(on);
+      return { o: o, qty: qty, done: done, bal: Math.round((qty - done) * 100) / 100, dp: dp, up: up, dq: sum(dp, function (t) { return partOn_(t, k, o.id, t.L); }), uq: sum(up, function (t) { return partOn_(t, k, o.id, t.U); }) };
     });
   };
   var st = function (o) { return o.status === 'Settled' ? ' <span class="mu">short-closed</span>' : o.status === 'Cancelled' ? ' <span class="mu">cancelled</span>' : ''; };
@@ -1947,20 +2017,20 @@ function reportHtml_(A, from, to, f, money, who) {
   h += '<h2>Purchase orders</h2>' + table([['PO'], ['Date'], ['Supplier']].concat(money ? [['Rate', 1]] : []).concat([['Ordered qtl', 1], ['Loaded qtl', 1], ['Balance qtl', 1], ['In period', 1]]),
     pos.map(function (x) {
       return [nw(esc(x.o.id)) + fs(firmOf_(x.o, S)) + st(x.o), dt(x.o.date), esc(x.o.plant)].concat(money ? [rs(x.o.rate) + '<br><span class="mu">+ GST ' + Math.round((Number(x.o.gst) || 0) * 100) + '%</span>'] : [])
-        .concat([q(x.qty), q(x.done), '<b>' + q(x.bal) + '</b>', x.dp.length ? tk(x.dp.length) + '<br>' + q(sum(x.dp, function (t) { return t.L; })) + ' qtl' : '—']);
+        .concat([q(x.qty), q(x.done), '<b>' + q(x.bal) + '</b>', x.dp.length ? tk(x.dp.length) + '<br>' + q(x.dq) + ' qtl' : '—']);
     }), ['Total', '', ''].concat(money ? [''] : []).concat([q(sum(pos, function (x) { return x.qty; })), q(sum(pos, function (x) { return x.done; })), q(sum(pos, function (x) { return x.bal; })), tk(disp.filter(function (t) { return t.po; }).length)]));
   var sos = orders(A.so, 'so');
   var terms = function (o) { return (o.gstMode === 'incl' ? 'GST incl.' : o.gstMode === 'excl' ? '+ GST' : '') + (o.freightMode === 'buyer' ? ', customer pays freight' : o.freightMode === 'ours' ? ', freight incl.' : ''); };
   h += '<h2>Sale orders</h2>' + table([['SO'], ['Date'], ['Customer']].concat(money ? [['Rate', 1]] : []).concat([['Ordered qtl', 1], ['Dispatched qtl', 1], ['Balance qtl', 1], ['Dispatched in period', 1], ['Unloaded in period', 1]]),
     sos.map(function (x) {
       return [nw(esc(x.o.id)) + fs(firmOf_(x.o, S)) + st(x.o), dt(x.o.date), esc(x.o.buyer)].concat(money ? [rs(x.o.rate) + '<br><span class="mu">' + esc(terms(x.o)) + '</span>'] : [])
-        .concat([q(x.qty), q(x.done), '<b>' + q(x.bal) + '</b>', x.dp.length ? tk(x.dp.length) + '<br>' + q(sum(x.dp, function (t) { return t.L; })) + ' qtl' : '—',
-          x.up.length ? tk(x.up.length) + '<br>' + q(sum(x.up, function (t) { return t.U; })) + ' qtl' : '—']);
+        .concat([q(x.qty), q(x.done), '<b>' + q(x.bal) + '</b>', x.dp.length ? tk(x.dp.length) + '<br>' + q(x.dq) + ' qtl' : '—',
+          x.up.length ? tk(x.up.length) + '<br>' + q(x.uq) + ' qtl' : '—']);
     }), ['Total', '', ''].concat(money ? [''] : []).concat([q(sum(sos, function (x) { return x.qty; })), q(sum(sos, function (x) { return x.done; })), q(sum(sos, function (x) { return x.bal; })),
       tk(sum(sos, function (x) { return x.dp.length; })), tk(sum(sos, function (x) { return x.up.length; }))]));
   h += '<h2>Trucks dispatched (' + disp.length + ')</h2>' + table([['#'], ['Date out'], ['Dispatch No.'], ['Vehicle'], ['Supplier / PO'], ['Customer / SO'], ['Transporter'], ['Loaded qtl', 1]].concat(money ? [['Purchase incl. GST', 1]] : []),
     disp.map(function (t, i) {
-      return [i + 1, dt(t.date), nw(esc(t.id)) + fs(t.firm), nw('<b>' + esc(t.truck) + '</b>'), esc(t.plant) + '<br><span class="mu">' + esc(t.po) + '</span>', dest(t), esc(t.transporter || '—'), q(t.L)].concat(money ? [rs(t.purTot)] : []);
+      return [i + 1, dt(t.date), nw(esc(t.id)) + fs(t.firm), nw('<b>' + esc(t.truck) + '</b>'), esc(t.plant) + '<br><span class="mu">' + esc(ordIds_(t, 'po')) + '</span>', dest(t), esc(t.transporter || '—'), q(t.L)].concat(money ? [rs(t.purTot)] : []);
     }), ['', 'Total', '', '', '', '', '', q(sum(disp, function (t) { return t.L; }))].concat(money ? [rs(sum(disp, function (t) { return t.purTot; }))] : []));
   h += '<h2>Trucks unloaded (' + unl.length + ')</h2>' + table([['#'], ['Unloaded'], ['Dispatch No.'], ['Vehicle'], ['Customer / SO'], ['Date out'], ['Loaded qtl', 1], ['Received qtl', 1], ['Shortage qtl', 1]].concat(money ? [['Sale amount', 1], ['Shortage deduction', 1]] : []),
     unl.map(function (t, i) {
@@ -2027,7 +2097,7 @@ function sendDailyReport_() {
       money_(sum(tf.filter(function (t) { return t.L && !t.plantPaid; }), function (t) { return t.purTot; })), money_(sum(tf.filter(function (t) { return t.U && !t.freightPaid; }), function (t) { return t.netPay; }))];
   }));
   var dest = function (t) { return t.plantPO ? 'Own plant' : t.buyer || 'not assigned'; };
-  h += '<h3>Trucks added today</h3>' + table(['Dispatch', 'Firm', 'Truck', 'PO / Supplier', 'Going to', 'Loaded qtl'], added.map(function (t) { return [t.id, t.firm, t.truck, t.po + ' ' + t.plant, dest(t), t.L ? q(t.L) : '-']; }));
+  h += '<h3>Trucks added today</h3>' + table(['Dispatch', 'Firm', 'Truck', 'PO / Supplier', 'Going to', 'Loaded qtl'], added.map(function (t) { return [t.id, t.firm, t.truck, ordIds_(t, 'po') + ' ' + t.plant, dest(t), t.L ? q(t.L) : '-']; }));
   h += '<h3>Unloaded / received today</h3>' + table(['Dispatch', 'Firm', 'Truck', 'At', 'Loaded', 'Unloaded', 'Short', 'Days'], unloaded.map(function (t) { return [t.id, t.firm, t.truck, dest(t), q(t.L), q(t.U), q(t.short), t.trip]; }));
   h += '<h3>Money today</h3>' + table(['What', 'Dispatch / Payment', 'Party', 'Amount'],
     plantPaid.map(function (t) { return ['Supplier paid', t.id, t.plant, money_(t.purTot)]; })
@@ -2036,7 +2106,7 @@ function sendDailyReport_() {
       .concat(pays.map(function (p) { return [(Number(p.amount) < 0 || Number(p.deduction) < 0 ? 'Reversed' : 'Received') + (p.deduction ? ' (deduction ' + p.deduction + (p.note ? ': ' + p.note : '') + ')' : ''), p.id + (p.truck ? ' / ' + p.truck : ''), p.buyer, money_(Number(p.amount || 0))]; })));
   var bal = function (map, k) {
     return Object.keys(map).filter(function (id) { return map[id].status !== 'Cancelled' && map[id].status !== 'Settled'; }).map(function (id) {
-      var o = map[id], done = sum(live.filter(function (t) { return t[k] === id; }), function (t) { return t.L; });
+      var o = map[id], done = sum(live, function (t) { return partOn_(t, k, id, t.L); });
       return [id, firmOf_(o, A.S), o.plant || o.buyer, q(Number(o.qty || 0)), q(done), q(Number(o.qty || 0) - done)];
     });
   };

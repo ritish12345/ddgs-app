@@ -79,6 +79,10 @@ EXPECTED.push('four firms: firms setting, new APP_PAYMENTS column "Firm"');
   Object.keys(X.screens).forEach(k => { if (X.screens[k].settings) delete X.screens[k].settings.firms; });
 });
 if (B.tabs.APP_PAYMENTS) { const pi = B.tabs.APP_PAYMENTS[0].indexOf('Firm'); if (pi >= 0) B.tabs.APP_PAYMENTS = B.tabs.APP_PAYMENTS.map(r => r.filter((x, i) => i !== pi)); }
+// One truck on two orders (24-11-2026): four new APP_TRUCKS columns at the end, blank on this day.
+EXPECTED.push('split trucks: new APP_TRUCKS columns Second PO ID, Qty On First PO, Second SO ID, Qty On First SO (blank here)');
+if (B.tabs.APP_TRUCKS) { const cut = ['Second PO ID', 'Qty On First PO', 'Second SO ID', 'Qty On First SO'].map(h => B.tabs.APP_TRUCKS[0].indexOf(h)).filter(i => i >= 0); B.tabs.APP_TRUCKS = B.tabs.APP_TRUCKS.map(r => r.filter((x, i) => cut.indexOf(i) < 0)); }
+Object.keys(B.screens).forEach(k => (B.screens[k].trucks || []).forEach(t => { ['po2', 'poQty', 'so2', 'soQty'].forEach(f => { delete t[f]; }); }));
 // Stage values follow the new Closed rule (checked in parity / receivables tests); here only that Dispatch still gets one.
 [A, B].forEach(X => Object.keys(X.screens).forEach(k => (X.screens[k].trucks || []).forEach(t => { if ('_st' in t) t._st = 'present'; })));
 

@@ -12,12 +12,15 @@ const today = '2026-11-19';
 const PO = {
   'PO-01-BCL': { id: 'PO-01-BCL', plant: 'BCL', rate: 1900, gst: 0.05, poType: 'trade' },
   'PO-02-OASIS': { id: 'PO-02-OASIS', plant: 'OASIS ETHANOL', rate: 1850, gst: 0.05, poType: 'plant', firm: 'SHREE RAM SOLVEX' },
-  'PO-03-MG': { id: 'PO-03-MG', plant: 'MG PETROCHEM', rate: 1950, gst: 0.05, poType: 'trade', firm: 'RAGHAV TRADING AND COMPANY' }
+  'PO-03-MG': { id: 'PO-03-MG', plant: 'MG PETROCHEM', rate: 1950, gst: 0.05, poType: 'trade', firm: 'RAGHAV TRADING AND COMPANY' },
+  'PO-04-BCL': { id: 'PO-04-BCL', plant: 'BCL', rate: 2575, gst: 0.05, poType: 'trade' }
 };
 const SO = {
   'SO-0001': { id: 'SO-0001', buyer: 'GODREJ AGROVET KHANA', rate: 2100, gst: 0.05, gstMode: 'incl', freightMode: 'ours', creditDays: 7 },
   'SO-0002': { id: 'SO-0002', buyer: 'KING FOOD MALERKOTLA', rate: 2000, gst: 0.05, gstMode: 'excl', freightMode: 'buyer', creditDays: '' },
-  'SO-0003': { id: 'SO-0003', buyer: 'SHREE RAM SOLVEX', rate: 2050, gst: 0.05, gstMode: 'incl', freightMode: 'ours' }
+  'SO-0003': { id: 'SO-0003', buyer: 'SHREE RAM SOLVEX', rate: 2050, gst: 0.05, gstMode: 'incl', freightMode: 'ours' },
+  'SO-0004': { id: 'SO-0004', buyer: 'GODREJ AGROVET KHANA', rate: 2946, gst: 0.05, gstMode: 'incl', freightMode: 'ours', creditDays: 7 },
+  'SO-0005': { id: 'SO-0005', buyer: 'GODREJ AGROVET KHANA', rate: 2700, gst: 0.05, gstMode: 'excl', freightMode: 'ours', creditDays: 7 }
 };
 const trucks = [
   { id: 'DISP-0001', date: '2026-11-10', po: 'PO-01-BCL', so: 'SO-0001', truck: 'PB29X0297', loadWt: 384.5, unloadWt: 382, unloadDate: '2026-11-16', frate: 85, advance: 10000, received: 0, deduction: '', detention: '', saleRate: '' },
@@ -29,7 +32,13 @@ const trucks = [
   { id: 'DISP-0007', date: '2026-11-01', po: 'PO-01-BCL', so: 'SO-0001', truck: 'MH04XY1111', loadWt: 395, unloadWt: 395, unloadDate: '2026-11-03', frate: 85, advance: 0, received: 829500, deduction: 0, freightPaid: true },
   { id: 'DISP-0008', date: '2026-11-02', po: 'PO-01-BCL', so: 'SO-0001', truck: 'GJ01ZZ0001', loadWt: 380, unloadWt: 372, unloadDate: '2026-11-06', frate: 85, advance: 50000, detention: 1500 },
   { id: 'DISP-0009', date: '2026-11-05', po: 'PO-01-BCL', so: 'SO-0001', truck: 'GJ 01 ZZ 0001', loadWt: 381, unloadWt: 380, unloadDate: '2026-11-09', frate: 85, advance: 0 },
-  { id: 'DISP-0010', date: '2026-11-19', po: 'PO-01-BCL', so: '', truck: 'KA01AA0001', loadWt: '', placedOn: '2026-11-19', status: 'Returned' }
+  { id: 'DISP-0010', date: '2026-11-19', po: 'PO-01-BCL', so: '', truck: 'KA01AA0001', loadWt: '', placedOn: '2026-11-19', status: 'Returned' },
+  // one truck on two orders (24-11-2026): 141.60 on PO-01 + the rest on PO-04; 104.40 on SO-0001 + the rest on SO-0004 (shortage there)
+  { id: 'DISP-0011', date: '2026-11-17', po: 'PO-01-BCL', po2: 'PO-04-BCL', poQty: 141.6, so: 'SO-0001', so2: 'SO-0004', soQty: '104.4', truck: 'PB11CJ9850', loadWt: 367.4, unloadWt: 366.4, unloadDate: '2026-11-19', frate: 85, advance: 0 },
+  // only the sale split, second SO with GST extra, not unloaded yet
+  { id: 'DISP-0012', date: '2026-11-18', po: 'PO-04-BCL', so: 'SO-0004', so2: 'SO-0005', soQty: 50, truck: 'PB11AA0012', loadWt: 300, frate: 85 },
+  // a rate typed on the truck prices the whole truck, even when split
+  { id: 'DISP-0013', date: '2026-11-18', po: 'PO-01-BCL', po2: 'PO-04-BCL', poQty: 100, so: 'SO-0001', so2: 'SO-0004', soQty: 100, saleRate: 2500, truck: 'PB11AA0013', loadWt: 350, unloadWt: 349, unloadDate: '2026-11-19', frate: 85 }
 ];
 
 // Transporter advances (24-11-2026): DISP-0007 (freight paid) took 2,000 when it was paid; the rest is shared by the
@@ -43,8 +52,8 @@ const ADVS = [{ id: 'ADV-0001', date: '2026-11-01', transporter: 'Sharma Roadlin
 const code = fs.readFileSync(path.join(ROOT, 'Code.js'), 'utf8');
 const sv = { Utilities: {}, console };
 vm.createContext(sv);
-vm.runInContext(code + '\nthis.derive_ = derive_; this.carry_ = carry_; this.custAcc_ = custAcc_; this.transAdv_ = transAdv_;', sv);
-const sOut = sv.carry_(trucks.map(t => sv.derive_(Object.assign({}, t), PO[t.po], SO[t.so], S, today)));
+vm.runInContext(code + '\nthis.derive_ = derive_; this.carry_ = carry_; this.custAcc_ = custAcc_; this.transAdv_ = transAdv_; this.partOn_ = partOn_;', sv);
+const sOut = sv.carry_(trucks.map(t => sv.derive_(Object.assign({}, t), PO[t.po], SO[t.so], S, today, PO[t.po2], SO[t.so2])));
 const sAdv = sv.transAdv_(sOut, ADVS);
 // Customer payments (money is kept per customer): part payment + TDS, a reversal, the group company, and an advance.
 const PAYS = [
@@ -60,14 +69,15 @@ const sAcc = sv.custAcc_(sOut, PAYS, S);
 // screen: everything up to flagIssues (helpers, data, fast saving, derive, CARRY)
 const html = fs.readFileSync(path.join(ROOT, 'Index.html'), 'utf8');
 const js = html.match(/<script>([\s\S]*?)<\/script>/)[1];
-const calc = js.slice(0, js.indexOf('function flagIssues'));
+const calc = js.slice(0, js.indexOf('function flagIssues')) + js.slice(js.indexOf('function partOn('), js.indexOf('function amtOn('));
 const cv = { document: { querySelector() { return null; } }, window: {}, console };
 vm.createContext(cv);
 vm.runInContext(calc + '\nD = ' + JSON.stringify({ settings: S, today }) + '; P = { money: true }; PO = ' + JSON.stringify(PO) + '; SO = ' + JSON.stringify(SO) +
   '; this.out = CARRY(' + JSON.stringify(trucks) + '.map(derive)); this.tadv = transAdv(this.out, ' + JSON.stringify(ADVS) + '); this.acc = custAcc(this.out, ' + JSON.stringify(PAYS) + ');', cv);
 
 const keys = ['shortOver', 'shortRate', 'advUsed', 'advAvail', 'L', 'U', 'R', 'A', 'FR', 'DED', 'purEx', 'purTot', 'saleWt', 'saleEx', 'saleTot', 'soBase', 'short', 'allow', 'shortDed', 'frAmt', 'trip', 'detDays', 'detSuggest', 'det',
-  'netFr', 'netPay', 'carryIn', 'carryOut', 'carryLeft', 'profit', 'st', 'credit', 'due', 'ownBuyer', 'fBuyer', 'plantPO', 'firm', 'rateUsed', 'noSlip', 'cx', 'placed', 'stage'];
+  'netFr', 'netPay', 'carryIn', 'carryOut', 'carryLeft', 'profit', 'st', 'credit', 'due', 'ownBuyer', 'fBuyer', 'plantPO', 'firm', 'rateUsed', 'noSlip', 'cx', 'placed', 'stage',
+  'poQ1', 'poQ2', 'soQ1', 'soQ2', 'pur1Tot', 'pur2Tot', 'rate2', 'sale1Qty', 'sale2Qty', 'sale1Tot', 'sale2Tot', 'soRate2'];
 let bad = 0;
 sOut.forEach((s, i) => {
   const c = cv.out[i];
@@ -85,6 +95,13 @@ names.forEach(nm => ak.forEach(k => {
 }));
 names.forEach(nm => { const a = sAcc[nm]; console.log('  ' + nm.padEnd(22) + ' sales ' + a.sales + '  received ' + a.received + '  deducted ' + a.deducted + '  outstanding ' + a.outstanding + '  overdue ' + a.overdue + (a.oldest ? ' (' + a.oldest + ' days)' : '')); });
 console.log(bad ? '\n' + bad + ' DIFFERENCES between server and screen' : '\nServer and screen give identical numbers on all ' + sOut.length + ' trucks (' + keys.length + ' values each) and all ' + names.length + ' customer accounts.');
+// Order totals: each order counts only its part of a split truck (partOn_ on the server, partOn on the screen)
+const orderSum = (fn, k, id, w) => Math.round(sOut.filter(t => !t.cx).reduce((a, t) => a + fn(t, k, id, t[w]), 0) * 100) / 100;
+[['po', Object.keys(PO)], ['so', Object.keys(SO)]].forEach(([k, ids]) => ids.forEach(id => ['L', 'U'].forEach(w => {
+  const a = orderSum(sv.partOn_, k, id, w), b = orderSum(cv.partOn, k, id, w);
+  if (a !== b) { bad++; console.log('  DIFF order ' + id + ' ' + w + ': server ' + a + ' screen ' + b); }
+})));
+console.log('  order totals (loaded): ' + ['PO-01-BCL', 'PO-04-BCL', 'SO-0001', 'SO-0004', 'SO-0005'].map(id => id + ' ' + orderSum(sv.partOn_, id.slice(0, 2).toLowerCase(), id, 'L')).join(' · '));
 if (JSON.stringify(sAdv) !== JSON.stringify(JSON.parse(JSON.stringify(cv.tadv)))) { bad++; console.log('  DIFF transporter advances: server ' + JSON.stringify(sAdv) + ' screen ' + JSON.stringify(cv.tadv)); }
 else console.log('  transporter advances ' + JSON.stringify(sAdv));
 process.exitCode = bad ? 1 : 0;
