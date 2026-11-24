@@ -22,7 +22,7 @@ const advRows = s => s.store.sheet('APP_ADVANCES').dump();
   const { acc, dis } = tokens;
   const own = s.run('api_login', 'nidhish23', 'secret1').token;
   const T = id => s.run('deriveAll_').trucks.find(t => t.id === id);
-  const left = k => (s.run('deriveAll_').tadv[k] || {}).left;
+  const left = k => (s.run('deriveAll_').tadv['RAGHAV TRADING AND COMPANY|' + k] || {}).left; // advances are kept per firm
   // two unloaded trucks of KANG TRANSPORT: freight 300 × 85 = 25,500 and 290 × 85 = 24,650 (no shortage, no truck advance)
   const trip = (truck, day) => {
     const wt = truck === 'PB10AA0002' ? '290' : '300';
@@ -33,7 +33,7 @@ const advRows = s => s.store.sheet('APP_ADVANCES').dump();
   };
 
   console.log('Tab and rights');
-  ok(!!s.store.sheet('APP_ADVANCES') && advRows(s)[0].join('|') === 'Advance No.|Date|Transporter|Vehicle No|Driver|Amount|UTR / Ref|Note|Entered By|Entered At', 'APP_ADVANCES tab made by setup');
+  ok(!!s.store.sheet('APP_ADVANCES') && advRows(s)[0].join('|') === 'Advance No.|Date|Transporter|Vehicle No|Driver|Amount|UTR / Ref|Note|Entered By|Entered At|Firm', 'APP_ADVANCES tab made by setup');
   ok(s.store.sheet('APP_TRUCKS').dump()[0].slice(-1)[0] === 'Transporter Advance Used', 'APP_TRUCKS: new column at the end only');
   ok(/Dispatch\) is not allowed/.test(err(() => s.run('api_addAdvance', dis, { transporter: 'Kang Transport', amount: 1000, date: '2026-11-20' }))), 'Dispatch cannot enter advances');
   ok(/Enter the amount/.test(err(() => s.run('api_addAdvance', acc, { transporter: 'Kang Transport', amount: 0, date: '2026-11-20' }))) && /Enter the transporter/.test(err(() => s.run('api_addAdvance', acc, { amount: 5, date: '2026-11-20' }))), 'amount and transporter are needed');
@@ -78,7 +78,7 @@ const advRows = s => s.store.sheet('APP_ADVANCES').dump();
   ok(await idle(K), 'Accounts screen loads');
   K.win.SUBF.freight = 'all'; K.win.go('freight');
   const v = K.$('#view').textContent;
-  ok(/Transporter advances/.test(v) && /KANGTRANSPORT₹30,000₹30,000₹0/.test(v.replace(/\s+/g, '')), 'Freight & Transport: Transporter advances table (given 30,000 · used 30,000 · left 0)');
+  ok(/Transporter advances/.test(v) && /KANGTRANSPORT(Raghav)?₹30,000₹30,000₹0/.test(v.replace(/\s+/g, '')), 'Freight & Transport: Transporter advances table (given 30,000 · used 30,000 · left 0)');
   const rowB = K.$$('#view .tbl .tr').find(r => r.textContent.indexOf(b) >= 0);
   ok(!!rowB && /₹4,500/.test(rowB.querySelector('[data-l="Freight adv."]').textContent) && /from transporter advance/.test(rowB.textContent) && /₹21,150/.test(rowB.querySelector('[data-l="Net freight payable"]').textContent), 'truck row: Freight adv. ₹4,500 from transporter advance, to pay ₹21,150 (24,650 + 1,000 detention − 4,500)');
   K.win.runAct('tAdv', 'KANG TRANSPORT');
@@ -86,7 +86,7 @@ const advRows = s => s.store.sheet('APP_ADVANCES').dump();
   fill(K, { amount: '5000', date: '23-11-2026', vehicle: 'PB10AA0003' });
   submit(K);
   ok(await idle(K), 'saved');
-  ok(K.win.TADV['KANG TRANSPORT'].given === 35000 && K.win.getT(b).advUsed === 9500 && K.win.getT(b).netPay === 16150, 'screen updates at once: given 35,000; the unpaid truck now takes 9,500 and pays 16,150');
+  ok(K.win.TADV['RAGHAV TRADING AND COMPANY|KANG TRANSPORT'].given === 35000 && K.win.getT(b).advUsed === 9500 && K.win.getT(b).netPay === 16150, 'screen updates at once: given 35,000; the unpaid truck now takes 9,500 and pays 16,150');
   K.win.runAct('fpaid', b);
   ok(/transporter advance/.test(K.$('#mform').textContent) && /₹16,150/.test(K.$('#fnet').textContent), 'Pay freight popup shows the transporter advance and net ₹16,150');
   K.win.closeForm();

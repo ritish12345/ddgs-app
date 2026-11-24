@@ -84,14 +84,16 @@ var SCHEMA = {
               ['by', 'Updated By', 'text'], ['at', 'Updated At', 'text']],
   APP_PAYMENTS: [['id', 'Payment ID', 'text'], ['date', 'Date', 'date'], ['truck', 'Dispatch No.', 'text'], ['so', 'SO ID', 'text'],
                  ['buyer', 'Customer', 'text'], ['amount', 'Amount Received', 'num'], ['deduction', 'Deduction', 'num'],
-                 ['note', 'Note', 'text'], ['by', 'Entered By', 'text'], ['at', 'Entered At', 'text']],
+                 ['note', 'Note', 'text'], ['by', 'Entered By', 'text'], ['at', 'Entered At', 'text'],
+                 ['firm', 'Firm', 'text']], // which firm got the money (blank on old lines = the first firm, Raghav)
   APP_NOTES: [['id', 'Note ID', 'text'], ['date', 'Date', 'date'], ['area', 'Screen', 'text'], ['text', 'Note', 'text'],
               ['status', 'Status', 'text'], ['by', 'Written By', 'text'], ['at', 'Written At', 'text']],
   APP_BANK: [['id', 'Key', 'text'], ['kind', 'Type', 'text'], ['name', 'Party', 'text'], ['accName', 'Account Name', 'text'],
              ['accNo', 'Account Number', 'text'], ['ifsc', 'IFSC', 'text'], ['by', 'Updated By', 'text'], ['at', 'Updated At', 'text']],
   // Advances given to a transporter that are not tied to a truck (e.g. before loading). A wrong one is reversed by a minus line.
   APP_ADVANCES: [['id', 'Advance No.', 'text'], ['date', 'Date', 'date'], ['transporter', 'Transporter', 'text'], ['vehicle', 'Vehicle No', 'text'], ['driver', 'Driver', 'text'],
-                 ['amount', 'Amount', 'num'], ['ref', 'UTR / Ref', 'text'], ['note', 'Note', 'text'], ['by', 'Entered By', 'text'], ['at', 'Entered At', 'text']]
+                 ['amount', 'Amount', 'num'], ['ref', 'UTR / Ref', 'text'], ['note', 'Note', 'text'], ['by', 'Entered By', 'text'], ['at', 'Entered At', 'text'],
+                 ['firm', 'Firm', 'text']]
 };
 
 var SETTINGS_DEFAULT = [
@@ -104,7 +106,7 @@ var SETTINGS_DEFAULT = [
   ['freeDays', 3, 'Days from loading to unloading before detention starts'],
   ['detentionPerDay', 500, 'Detention paid to the transporter per extra day (Rs)'],
   ['reportEmail', '', 'Daily 9 pm report goes here. Blank = the sheet owner\u2019s Gmail'],
-  ['firms', 'RAGHAV TRADING AND COMPANY, SHREE RAM SOLVEX', 'Your firms, separated by commas. Orders with no firm count under the first one'],
+  ['firms', 'RAGHAV TRADING AND COMPANY, DEVAN TRADING AND COMPANY, SARASWATI SOLVEX, JAI MAHAVIR TRADING AND COMPANY, SHREE RAM SOLVEX', 'Your firms, separated by commas: each has its own window (buttons at the top). Orders with no firm count under the first one'],
   ['plantFirm', 'SHREE RAM SOLVEX', 'Your firm that owns the solvent plant: its POs only receive trucks, no sales'],
   ['tradingFirms', 'RAGHAV TRADING AND COMPANY, DEVAN TRADING AND COMPANY, SARASWATI SOLVEX, JAI MAHAVIR TRADING AND COMPANY', 'Firms an order can be taken in (shown on the PO as Booked in the name of)'],
   ['bankUrl', '', 'Internet banking login. The Open bank button on payment popups goes here'],
@@ -340,6 +342,13 @@ function linkTruckOrders_(obj) {
     var link = rows_(T.SO).filter(function (r) { return r.id === po.linkSO && r.status !== 'Cancelled' && r.status !== 'Settled'; })[0];
     if (link) obj.so = link.id;
   }
+  // Each firm keeps its own books: a truck's sale order is in the same firm as its PO (24-11-2026).
+  // (Selling to another of your firms is a sale order whose customer is that firm.)
+  var soNow = 'so' in obj ? obj.so : so;
+  if (soNow && ('so' in obj || 'po' in obj)) {
+    var sx = rows_(T.SO).filter(function (r) { return r.id === soNow; })[0];
+    if (sx && firmOf_(sx) !== firmOf_(po)) throw new Error(soNow + ' is in ' + firmOf_(sx) + ' but ' + po.id + ' is in ' + firmOf_(po) + '. A truck\'s sale order must be in the same firm as its PO.');
+  }
 }
 var SUPPLIER_SIDE_ = ['plantPaid', 'plantPaidDate', 'plantUTR', 'billNo', 'billQty'];
 function checkTruckRules_(obj) {
@@ -443,7 +452,7 @@ function api_addPayment(token, id, amount, date, deduction, note, rid) {
     var pay = sheet_(T.PAY) || makeTab_(T.PAY);
     pay.getRange(pay.getLastRow() + 1, 1, 1, SCHEMA[T.PAY].length).setValues([rowFor_(T.PAY, {
       id: nextId_(T.PAY, rows_(T.PAY), {}), date: upd.receivedDate || Utilities.formatDate(new Date(), tz_(), 'yyyy-MM-dd'),
-      truck: id, so: t.so, buyer: so ? so.buyer : '', amount: a || '', deduction: d || '', note: d ? (note || 'Deduction') : ''
+      truck: id, so: t.so, buyer: so ? so.buyer : '', amount: a || '', deduction: d || '', note: d ? (note || 'Deduction') : '', firm: firmOf_(so)
     })]);
     dropTab_(T.PAY); markChanged_(T.PAY);
   }, cleanRid_(rid));
@@ -451,7 +460,7 @@ function api_addPayment(token, id, amount, date, deduction, note, rid) {
 
 /** Money received from a customer (factory). Customer money is kept per customer, not per truck (Nov 2026).
     One line in APP_PAYMENTS: Dispatch No. blank, Customer filled, deduction reason and bank reference in the Note. */
-function api_addCustomerPayment(token, buyer, amount, date, deduction, reason, ref, note, rid) {
+function api_addCustomerPayment(token, buyer, amount, date, deduction, reason, ref, note, rid, firm) {
   auth_(token); need_('truckMoney');
   buyer = normName_(buyer);
   var a = num_(amount) || 0, d = num_(deduction) || 0;
@@ -462,13 +471,17 @@ function api_addCustomerPayment(token, buyer, amount, date, deduction, reason, r
   if (d && !reason) throw new Error('Choose the reason for the deduction.');
   if (!/^\d{4}-\d{2}-\d{2}$/.test(String(date || ''))) throw new Error('Enter the date.');
   return withLock_(function () {
-    if (!rows_(T.SO).some(function (o) { return normName_(o.buyer) === buyer; })) throw new Error('There is no sale order for ' + buyer + '.');
+    // Customer money is kept per firm and customer (24-11-2026). A screen opened before this sends no firm: the first firm.
+    var S = readSettings_();
+    firm = firm ? normName_(firm) : firms_(S)[0];
+    if (!isFirm_(firm, S) || hiddenFirms_(S).indexOf(firm) >= 0) throw new Error('Choose the firm that received the money.');
+    if (!rows_(T.SO).some(function (o) { return normName_(o.buyer) === buyer && firmOf_(o, S) === firm; })) throw new Error('There is no sale order for ' + buyer + ' in ' + firm + '.');
     var parts = [];
     if (d) parts.push(reason);
     if (ref) parts.push('Ref ' + ref);
     if (note) parts.push(note);
-    var id = appendPay_({ date: date, truck: '', so: '', buyer: buyer, amount: a || '', deduction: d || '', note: parts.join(' · ') });
-    log_('Customer payment', buyer, id + ': received ' + a + (d ? ', ' + reason + ' ' + d : '') + (ref ? ', ref ' + ref : ''));
+    var id = appendPay_({ date: date, truck: '', so: '', buyer: buyer, amount: a || '', deduction: d || '', note: parts.join(' · '), firm: firm });
+    log_('Customer payment', buyer, id + ' (' + firm + '): received ' + a + (d ? ', ' + reason + ' ' + d : '') + (ref ? ', ref ' + ref : ''));
   }, cleanRid_(rid));
 }
 function appendPay_(o) {
@@ -491,7 +504,7 @@ function api_reversePayment(token, payId, reason) {
     if (all.some(function (r) { return String(r.note).indexOf('Reversal of ' + payId + ':') === 0; })) throw new Error(payId + ' is already reversed.');
     if (ME.role !== 'Owner' && String(p.at).slice(0, 10) !== today_()) throw new Error('Only the Owner can reverse a payment entered on an earlier day.');
     var a = num_(p.amount) || 0, d = num_(p.deduction) || 0;
-    var id = appendPay_({ date: today_(), truck: p.truck, so: p.so, buyer: p.buyer, amount: a ? -a : '', deduction: d ? -d : '', note: 'Reversal of ' + payId + ': ' + reason });
+    var id = appendPay_({ date: today_(), truck: p.truck, so: p.so, buyer: p.buyer, amount: a ? -a : '', deduction: d ? -d : '', note: 'Reversal of ' + payId + ': ' + reason, firm: p.firm });
     log_('Payment reversed', payId, id + ': ' + reason);
   });
 }
@@ -501,14 +514,15 @@ function api_reversePayment(token, payId, reason) {
 function api_addAdvance(token, o, rid) {
   auth_(token); need_('truckMoney');
   o = o || {};
-  var tr = normName_(o.transporter), a = num_(o.amount);
+  var tr = normName_(o.transporter), a = num_(o.amount), S = readSettings_(), firm = o.firm ? normName_(o.firm) : firms_(S)[0];
   if (!tr) throw new Error('Enter the transporter.');
+  if (!isFirm_(firm, S) || hiddenFirms_(S).indexOf(firm) >= 0) throw new Error('Choose the firm that gave the advance.');
   if (!(a > 0)) throw new Error('Enter the amount of the advance.');
   if (!/^\d{4}-\d{2}-\d{2}$/.test(String(o.date || ''))) throw new Error('Enter the date.');
   return withLock_(function () {
     var id = appendAdv_({ date: o.date, transporter: tr, vehicle: normTruck_(o.vehicle), driver: String(o.driver || '').trim(), amount: a,
-      ref: String(o.ref || '').trim().toUpperCase(), note: String(o.note || '').trim() });
-    log_('Transporter advance', tr, id + ': ' + a + (o.vehicle ? ', vehicle ' + normTruck_(o.vehicle) : '') + (o.ref ? ', ref ' + String(o.ref).toUpperCase() : ''));
+      ref: String(o.ref || '').trim().toUpperCase(), note: String(o.note || '').trim(), firm: firm });
+    log_('Transporter advance', tr, id + ' (' + firm + '): ' + a + (o.vehicle ? ', vehicle ' + normTruck_(o.vehicle) : '') + (o.ref ? ', ref ' + String(o.ref).toUpperCase() : ''));
   }, cleanRid_(rid));
 }
 function appendAdv_(o) {
@@ -529,7 +543,7 @@ function api_reverseAdvance(token, advId, reason) {
     if (/^Reversal of /.test(String(p.note)) || (num_(p.amount) || 0) < 0) throw new Error(advId + ' is itself a reversal.');
     if (all.some(function (r) { return String(r.note).indexOf('Reversal of ' + advId + ':') === 0; })) throw new Error(advId + ' is already reversed.');
     if (ME.role !== 'Owner' && String(p.at).slice(0, 10) !== today_()) throw new Error('Only the Owner can reverse an advance entered on an earlier day.');
-    var id = appendAdv_({ date: today_(), transporter: p.transporter, vehicle: p.vehicle, driver: p.driver, amount: -(num_(p.amount) || 0), ref: '', note: 'Reversal of ' + advId + ': ' + reason });
+    var id = appendAdv_({ date: today_(), transporter: p.transporter, vehicle: p.vehicle, driver: p.driver, amount: -(num_(p.amount) || 0), ref: '', note: 'Reversal of ' + advId + ': ' + reason, firm: p.firm });
     log_('Advance reversed', advId, id + ': ' + reason);
   });
 }
@@ -1305,7 +1319,7 @@ function writeLog_(lines) {
 
 /* ---------------- setup and import ---------------- */
 
-var SCHEMA_V = '6.7'; // 6.5: setting qtyTolerancePct; 6.6: setting hiddenFirms; 6.7: transporter advances (APP_ADVANCES, APP_TRUCKS tAdv)
+var SCHEMA_V = '6.8'; // 6.5: setting qtyTolerancePct; 6.6: setting hiddenFirms; 6.7: transporter advances (APP_ADVANCES, APP_TRUCKS tAdv); 6.8: four firms, Firm on payments and advances
 function ensureSetup_() {
   var cache = CacheService.getScriptCache();
   if (cache.get('schema_ok') === SCHEMA_V) return null; // checked in the last 6 hours (setup clears this)
@@ -1343,6 +1357,7 @@ function upgradeHeaders_() {
     SETTINGS_DEFAULT.forEach(function (s) { if (!have[s[0]]) set.getRange(set.getLastRow() + 1, 1, 1, 3).setValues([s]); });
     dropTab_(T.SET);
     renameFirm_('SRIRAM SOLVEX', 'SHREE RAM SOLVEX');
+    addTradingFirms_();
     // Slip check starts on the day the app is upgraded, unless a date was already set.
     var sdata = set.getDataRange().getValues();
     for (var si = 1; si < sdata.length; si++) {
@@ -1363,6 +1378,25 @@ function upgradeHeaders_() {
     }
   });
   REQ_.tabs = {}; REQ_.upgraded = true; // settings or firm names may have changed: read again, and send screens everything
+}
+
+/* 24-11-2026: Devan, Saraswati and Jai Mahavir (setting tradingFirms) become firms with their own window. Done once;
+   the firms cell keeps its firms, adds the missing trading firms after the shown ones, and hidden firms stay last. */
+function addTradingFirms_() {
+  var props = PropertiesService.getScriptProperties();
+  if (props.getProperty('firms_added') === 'yes') return;
+  var S = readSettings_(), cur = firms_(S).filter(String), hid = hiddenFirms_(S);
+  var tf = String(S.tradingFirms || '').split(',').map(function (f) { return normName_(f); }).filter(String);
+  var want = cur.filter(function (f) { return hid.indexOf(f) < 0; });
+  tf.forEach(function (f) { if (want.indexOf(f) < 0) want.push(f); });
+  cur.forEach(function (f) { if (want.indexOf(f) < 0) want.push(f); });
+  var row = rows_(T.SET).filter(function (r) { return r.key === 'firms'; })[0];
+  if (row && want.join(', ') !== cur.join(', ')) {
+    sheet_(T.SET).getRange(row._row, 2).setValue(want.join(', '));
+    dropTab_(T.SET);
+    log_('Firms', 'firms', cur.join(', ') + ' -> ' + want.join(', '));
+  }
+  props.setProperty('firms_added', 'yes');
 }
 
 /** One-time rename of a firm everywhere (settings, PO/SO firm, SO buyer). */
@@ -1544,19 +1578,20 @@ function derive_(t, po, so, S, today) {
    Overdue = sales past their credit days, less everything received; oldest = most days among trucks not covered
    (trucks taken oldest unload date first). The screen has the same function (custAcc in Index.html). */
 function custAcc_(trucks, pays, S) {
-  var acc = {}, r2 = function (x) { return Math.round(x * 100) / 100; };
-  var get = function (name) {
-    var k = normName_(name);
-    return acc[k] || (acc[k] = { name: k, own: isFirm_(k, S), trucks: 0, qty: 0, sales: 0, received: 0, deducted: 0, lastPaid: '', list: [] });
+  var acc = {}, r2 = function (x) { return Math.round(x * 100) / 100; }, first = firms_(S)[0];
+  // One account per firm and customer (24-11-2026), key "FIRM|CUSTOMER". Old payments without a firm: the first firm.
+  var get = function (firm, name) {
+    var f = normName_(firm) || first, k = normName_(name);
+    return acc[f + '|' + k] || (acc[f + '|' + k] = { key: f + '|' + k, firm: f, name: k, own: isFirm_(k, S), trucks: 0, qty: 0, sales: 0, received: 0, deducted: 0, lastPaid: '', list: [] });
   };
   trucks.forEach(function (t) {
     if (t.cx || !t.U || !t.so || t.plantPO || !t.buyer) return;
-    var a = get(t.buyer);
+    var a = get(t.firm, t.buyer);
     a.trucks++; a.qty += t.U; a.sales += t.saleTot; a.list.push(t);
   });
   (pays || []).forEach(function (p) {
     if (!p.buyer) return;
-    var a = get(p.buyer), amt = Number(p.amount) || 0;
+    var a = get(p.firm, p.buyer), amt = Number(p.amount) || 0;
     a.received += amt; a.deducted += Number(p.deduction) || 0;
     if (amt > 0 && String(p.date) > a.lastPaid) a.lastPaid = String(p.date);
   });
@@ -1603,14 +1638,16 @@ function carry_(list) {
    A truck whose freight is paid keeps what it took (saved in tAdv when paid). Unloaded, unpaid trucks of that transporter
    share what is left, oldest unload first. netPay (freight to pay) goes down by what is taken; left = given − used.
    The screen has the same function (transAdv in Index.html). */
-function transAdv_(list, advs) {
+function transAdv_(list, advs, first) {
+  // Per firm and transporter (24-11-2026), key "FIRM|TRANSPORTER": an advance is used only on that firm's trucks.
   var r2 = function (x) { return Math.round(x * 100) / 100; }, acc = {}, open = {};
-  var key = function (s) { return String(s || '').toUpperCase().replace(/\s+/g, ' ').trim(); };
-  var get = function (k) { return acc[k] || (acc[k] = { name: k, given: 0, used: 0, left: 0 }); };
-  (advs || []).forEach(function (a) { var k = key(a.transporter); if (k) get(k).given += Number(a.amount) || 0; });
+  var norm = function (s) { return String(s || '').toUpperCase().replace(/\s+/g, ' ').trim(); };
+  var key = function (firm, tr) { var t = norm(tr); return t ? (norm(firm) || norm(first)) + '|' + t : ''; };
+  var get = function (k) { return acc[k] || (acc[k] = { key: k, firm: k.split('|')[0], name: k.split('|')[1], given: 0, used: 0, left: 0 }); };
+  (advs || []).forEach(function (a) { var k = key(a.firm, a.transporter); if (k) get(k).given += Number(a.amount) || 0; });
   list.forEach(function (t) {
     t.advUsed = 0; t.advAvail = 0;
-    var k = key(t.transporter);
+    var k = key(t.firm, t.transporter);
     if (t.cx || t.fBuyer || !t.U || !k) return;
     if (t.freightPaid) {
       var u = Number(t.tAdv) || 0;
@@ -1647,7 +1684,7 @@ function deriveAll_(patch) {
   });
   var trucks = carry_(list.map(function (t) { return derive_(t, po[t.po], so[t.so], S, today); }));
   var pays = sheet_(T.PAY) ? rows_(T.PAY) : [], advs = sheet_(T.ADV) ? rows_(T.ADV) : [];
-  var tadv = transAdv_(trucks, advs);
+  var tadv = transAdv_(trucks, advs, firms_(S)[0]);
   return { po: po, so: so, S: S, today: today, trucks: trucks, pays: pays, accounts: custAcc_(trucks, pays, S), advs: advs, tadv: tadv };
 }
 /* What a truck takes from its transporter's advance if its freight is paid now (with the changes being saved). */
@@ -1686,7 +1723,7 @@ function tab_(name, cols, list) {
   return { name: name, rows: [['S.No.'].concat(cols.map(function (c) { return c[0]; }))].concat(body), dateCols: Object.keys(dateCols).map(Number) };
 }
 
-var ADV_COLS_ = [['Advance No.', 'id'], ['Date', 'date'], ['Transporter', 'transporter'], ['Vehicle No', 'vehicle'], ['Driver', 'driver'], ['Amount', 'amount'], ['UTR / Ref', 'ref'], ['Note', 'note'], ['Entered By', 'by']];
+var ADV_COLS_ = [['Advance No.', 'id'], ['Firm', 'firm'], ['Date', 'date'], ['Transporter', 'transporter'], ['Vehicle No', 'vehicle'], ['Driver', 'driver'], ['Amount', 'amount'], ['UTR / Ref', 'ref'], ['Note', 'note'], ['Entered By', 'by']];
 function exportTabs_(kind, key, ids, can, firm) {
   var A = deriveAll_();
   if (firm) {
@@ -1706,22 +1743,21 @@ function exportTabs_(kind, key, ids, can, firm) {
       return r;
     });
   };
-  var oc = [['ID', 'id'], ['Firm', 'firm'], ['Booked in the name of', 'takenIn'], ['Type', 'type'], ['Party', 'party'], ['Sells To SO', 'link'], ['Date', 'date'], ['Quantity', 'qty'], ['Done', 'done'], ['Balance', 'bal'], ['Trucks', 'trucks'], ['Status', 'status']];
+  var oc = [['ID', 'id'], ['Firm', 'firm'], ['Type', 'type'], ['Party', 'party'], ['Sells To SO', 'link'], ['Date', 'date'], ['Quantity', 'qty'], ['Done', 'done'], ['Balance', 'bal'], ['Trucks', 'trucks'], ['Status', 'status']];
   if (can.money) oc = oc.concat([['Rate', 'rate'], ['Terms', 'terms']]);
   var pick = function (list) { return ids ? list.filter(function (t) { return ids.indexOf(t.id) >= 0; }) : list; };
-  // Customer money is kept per customer. With a firm chosen: the payments of that firm's customers, accounts from its trucks.
-  var firmBuyers = {};
-  Object.keys(A.so).forEach(function (id) { firmBuyers[normName_(A.so[id].buyer)] = 1; });
-  var pays = A.pays.filter(function (p) { return !firm || firmBuyers[normName_(p.buyer)]; });
-  var accounts = firm ? custAcc_(A.trucks, pays, A.S) : A.accounts;
-  var accRows = Object.keys(accounts).sort().map(function (k) {
-    var a = accounts[k];
-    return { name: a.name, group: a.own ? 'Yes' : '', trucks: a.trucks, qty: a.qty, sales: a.sales, received: a.received, deducted: a.deducted,
+  // Customer money is kept per firm and customer. With a firm chosen: that firm's accounts and payments only.
+  var first = firms_(A.S)[0], fOf = function (x) { return normName_(x.firm) || first; };
+  var pays = A.pays.filter(function (p) { return !firm || fOf(p) === firm; }).map(function (p) { var c = {}; for (var k in p) c[k] = p[k]; c.firm = fOf(p); return c; });
+  var accRows = Object.keys(A.accounts).sort().filter(function (k) { return !firm || A.accounts[k].firm === firm; }).map(function (k) {
+    var a = A.accounts[k];
+    return { firm: a.firm, name: a.name, group: a.own ? 'Yes' : '', trucks: a.trucks, qty: a.qty, sales: a.sales, received: a.received, deducted: a.deducted,
       outstanding: a.outstanding, overdue: a.overdue, oldest: a.oldest || '', lastPaid: a.lastPaid };
   });
-  var ac = [['Customer', 'name'], ['Group company', 'group'], ['Trucks unloaded', 'trucks'], ['Qty unloaded (qtl)', 'qty'], ['Sales incl GST', 'sales'], ['Received', 'received'],
+  var ac = [['Firm', 'firm'], ['Customer', 'name'], ['Group company', 'group'], ['Trucks unloaded', 'trucks'], ['Qty unloaded (qtl)', 'qty'], ['Sales incl GST', 'sales'], ['Received', 'received'],
     ['Deductions', 'deducted'], ['Outstanding', 'outstanding'], ['Overdue', 'overdue'], ['Oldest overdue (days)', 'oldest'], ['Last received', 'lastPaid']];
-  var pc = [['Payment ID', 'id'], ['Date', 'date'], ['Dispatch No.', 'truck'], ['SO', 'so'], ['Customer', 'buyer'], ['Amount', 'amount'], ['Deduction', 'deduction'], ['Note', 'note'], ['Entered By', 'by']];
+  var pc = [['Payment ID', 'id'], ['Firm', 'firm'], ['Date', 'date'], ['Dispatch No.', 'truck'], ['SO', 'so'], ['Customer', 'buyer'], ['Amount', 'amount'], ['Deduction', 'deduction'], ['Note', 'note'], ['Entered By', 'by']];
+  var advRows = A.advs.filter(function (a) { return !firm || fOf(a) === firm; }).map(function (a) { var c = {}; for (var k in a) c[k] = a[k]; c.firm = fOf(a); return c; });
   if (kind === 'full') {
     tabs.push(tab_('Trucks', tc, A.trucks));
     tabs.push(tab_('Purchase Orders', oc, orderRows(A.po, 'po')));
@@ -1734,16 +1770,21 @@ function exportTabs_(kind, key, ids, can, firm) {
         var b = by[k]; b.trucks++; b.freight += t.frAmt; b.short += t.shortDed; b.det += t.det; b.adv += t.A;
         if (t.U && !t.freightPaid) b.payable += t.netPay; if (t.freightPaid) b.paid += t.netPay;
       });
-      Object.keys(A.tadv).forEach(function (k) { by[k] = by[k] || { name: k, trucks: 0, freight: 0, short: 0, det: 0, adv: 0, payable: 0, paid: 0 }; by[k].tGiven = A.tadv[k].given; by[k].tUsed = A.tadv[k].used; by[k].tLeft = A.tadv[k].left; });
+      Object.keys(A.tadv).forEach(function (k) {
+        var x = A.tadv[k];
+        if (firm && x.firm !== firm) return;
+        var b = by[x.name] = by[x.name] || { name: x.name, trucks: 0, freight: 0, short: 0, det: 0, adv: 0, payable: 0, paid: 0, tGiven: 0, tUsed: 0, tLeft: 0 };
+        b.tGiven = (b.tGiven || 0) + x.given; b.tUsed = (b.tUsed || 0) + x.used; b.tLeft = (b.tLeft || 0) + x.left;
+      });
       tabs.push(tab_('Transporters', [['Transporter', 'name'], ['Trucks', 'trucks'], ['Freight', 'freight'], ['Shortage Deduction', 'short'], ['Detention', 'det'], ['Freight Advance', 'adv'], ['Net Paid', 'paid'], ['Net Payable Now', 'payable'],
         ['Transporter Advance Given', 'tGiven'], ['Transporter Advance Used', 'tUsed'], ['Transporter Advance Left', 'tLeft']], Object.keys(by).map(function (k) { return by[k]; })));
-      tabs.push(tab_('Transporter Advances', ADV_COLS_, A.advs));
+      tabs.push(tab_('Transporter Advances', ADV_COLS_, advRows));
       tabs.push(tab_('Customer Accounts', ac, accRows));
       tabs.push(tab_('Customer Payments', pc, pays));
     }
   } else if (kind === 'accounts') { // Receivables page: one row per customer, and all customer payments
     if (!can.money) throw new Error('Your role cannot download money figures.');
-    tabs.push(tab_('Customer Accounts', ac, ids ? accRows.filter(function (r) { return ids.indexOf(r.name) >= 0; }) : accRows));
+    tabs.push(tab_('Customer Accounts', ac, ids ? accRows.filter(function (r) { return ids.indexOf(r.firm + '|' + r.name) >= 0 || ids.indexOf(r.name) >= 0; }) : accRows));
     tabs.push(tab_('Customer Payments', pc, pays));
   } else if (kind === 'orders') { // a list of orders shown on screen (e.g. Closed & cancelled page): ids = the order ids
     tabs.push(tab_('Purchase Orders', oc, pick(orderRows(A.po, 'po'))));
@@ -1757,7 +1798,7 @@ function exportTabs_(kind, key, ids, can, firm) {
     }[kind];
     if (!match) throw new Error('Unknown export');
     tabs.push(tab_(kind === 'transporter' ? 'Statement' : 'Trucks', tc, pick(A.trucks.filter(match))));
-    if (kind === 'transporter' && can.money) tabs.push(tab_('Advances', ADV_COLS_, A.advs.filter(function (a) { return normName_(a.transporter) === normName_(key); })));
+    if (kind === 'transporter' && can.money) tabs.push(tab_('Advances', ADV_COLS_, advRows.filter(function (a) { return normName_(a.transporter) === normName_(key); })));
     if (kind === 'po') tabs.push(tab_('PO', oc, orderRows(A.po, 'po').filter(function (r) { return r.id === key; })));
     if (kind === 'so') tabs.push(tab_('SO', oc, orderRows(A.so, 'so').filter(function (r) { return r.id === key; })));
     if (kind === 'buyer') tabs.push(tab_('Sale Orders', oc, orderRows(A.so, 'so').filter(function (r) { return normName_(r.party) === normName_(key); })));
@@ -1856,6 +1897,12 @@ function sendDailyReport_() {
     money_(sum(live.filter(function (t) { return t.U && !t.freightPaid; }), function (t) { return t.netPay; })) + ' · transporter advances left ' +
     money_(sum(Object.keys(A.tadv).map(function (k) { return A.tadv[k]; }), function (a) { return Math.max(0, a.left); })) + ' · on the road ' +
     q(sum(live.filter(function (t) { return t.L && !t.U; }), function (t) { return t.L; })) + ' qtl</p>';
+  var shown = firms_(A.S).filter(function (f) { return f && hiddenFirms_(A.S).indexOf(f) < 0; });
+  if (shown.length > 1) h += '<h3>By firm</h3>' + table(['Firm', 'New trucks', 'Unloaded', 'Customers owe', 'Overdue', 'Suppliers unpaid', 'Freight payable'], shown.map(function (f) {
+    var tf = live.filter(function (t) { return t.firm === f; }), af = accs.filter(function (a) { return a.firm === f; });
+    return [f, added.filter(function (t) { return t.firm === f; }).length, unloaded.filter(function (t) { return t.firm === f; }).length, money_(sum(af, owes)), money_(sum(af, function (a) { return a.overdue; })),
+      money_(sum(tf.filter(function (t) { return t.L && !t.plantPaid; }), function (t) { return t.purTot; })), money_(sum(tf.filter(function (t) { return t.U && !t.freightPaid; }), function (t) { return t.netPay; }))];
+  }));
   var dest = function (t) { return t.plantPO ? 'Own plant' : t.buyer || 'not assigned'; };
   h += '<h3>Trucks added today</h3>' + table(['Dispatch', 'Firm', 'Truck', 'PO / Supplier', 'Going to', 'Loaded qtl'], added.map(function (t) { return [t.id, t.firm, t.truck, t.po + ' ' + t.plant, dest(t), t.L ? q(t.L) : '-']; }));
   h += '<h3>Unloaded / received today</h3>' + table(['Dispatch', 'Firm', 'Truck', 'At', 'Loaded', 'Unloaded', 'Short', 'Days'], unloaded.map(function (t) { return [t.id, t.firm, t.truck, dest(t), q(t.L), q(t.U), q(t.short), t.trip]; }));
@@ -1874,7 +1921,7 @@ function sendDailyReport_() {
   h += '<h3>Sale orders</h3>' + table(['SO', 'Firm', 'Customer', 'Ordered', 'Dispatched', 'Outstanding'], bal(A.so, 'so'));
   var probs = [];
   accs.forEach(function (a) {
-    if (a.overdue > 0) probs.push([a.name, '', 'Customer payment overdue ' + money_(a.overdue) + (a.oldest ? ', oldest ' + a.oldest + ' days past credit' : '') + ' · outstanding ' + money_(a.outstanding)]);
+    if (a.overdue > 0) probs.push([a.name, a.firm, 'Customer payment overdue ' + money_(a.overdue) + (a.oldest ? ', oldest ' + a.oldest + ' days past credit' : '') + ' · outstanding ' + money_(a.outstanding)]);
   });
   live.forEach(function (t) {
     if (t.L && !t.U && t.detDays > 0) probs.push([t.id, t.truck, 'On the road ' + t.trip + ' days (over the free days: detention claim possible, ' + money_(t.detSuggest) + ' if agreed)']);

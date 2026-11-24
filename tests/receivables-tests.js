@@ -17,6 +17,7 @@ const openApp = (s, token) => B.openApp(s, token, null, msg => { console.log('  
 const pad = n => String(n).padStart(2, '0');
 const ymd = d => d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
 const daysAgo = k => { const d = new Date(); d.setDate(d.getDate() - k); return ymd(d); };
+const RG = 'RAGHAV TRADING AND COMPANY|'; // customer accounts are kept per firm and customer (24-11-2026)
 const GOD = 'GODREJ AGROVET KHANA', KING = 'KING FOOD MALERKOTLA', SR = 'SHREE RAM SOLVEX';
 
 (async () => {
@@ -34,16 +35,16 @@ const GOD = 'GODREJ AGROVET KHANA', KING = 'KING FOOD MALERKOTLA', SR = 'SHREE R
 
   console.log('Customer accounts');
   let a = accounts();
-  ok(a[GOD].sales === 802200 && a[GOD].received === 400000 && a[GOD].deducted === 802 && a[GOD].outstanding === 401398, 'Godrej: sales 8,02,200 − received 4,00,000 − TDS 802 = 4,01,398');
-  ok(a[KING].outstanding === 0 && a[KING].received === 733950, 'King Food paid in full: outstanding 0');
-  ok(a[SR].own === true && a[SR].sales === 819520 && a[SR].outstanding === 819520, 'Shree Ram (group company): 8,19,520 (invoice rate 2,080 on 394 qtl)');
-  ok(!a['AMAN FEED KHANA'], 'a customer with no unloaded truck and no payment is not listed');
+  ok(a[RG + GOD].sales === 802200 && a[RG + GOD].received === 400000 && a[RG + GOD].deducted === 802 && a[RG + GOD].outstanding === 401398, 'Godrej: sales 8,02,200 − received 4,00,000 − TDS 802 = 4,01,398');
+  ok(a[RG + KING].outstanding === 0 && a[RG + KING].received === 733950, 'King Food paid in full: outstanding 0');
+  ok(a[RG + SR].own === true && a[RG + SR].sales === 819520 && a[RG + SR].outstanding === 819520, 'Shree Ram (group company): 8,19,520 (invoice rate 2,080 on 394 qtl)');
+  ok(!a[RG + 'AMAN FEED KHANA'], 'a customer with no unloaded truck and no payment is not listed');
 
   console.log('Overdue: sales past their credit days, less everything received');
   const x = (s.run('api_saveTruck', dis, { truck: 'PB65OD0001', po: 'PO-01-BCL', placedOn: daysAgo(25), date: daysAgo(25), loadWt: '380', transporter: 'Sharma Roadlines', frate: '85', so: 'SO-0001' }), s.store.sheet('APP_TRUCKS').dump().slice(1).filter(r => r[4] === 'PB65OD0001')[0][0]);
   s.run('api_saveTruck', dis, { id: x, unloadDate: daysAgo(20), unloadWt: '379' });
   a = accounts();
-  ok(a[GOD].sales === 1598100 && a[GOD].overdue === 395098 && a[GOD].oldest === 13, 'Godrej: truck unloaded 20 days ago (7 credit days) is 13 days past credit; overdue 7,95,900 − 4,00,802 = 3,95,098');
+  ok(a[RG + GOD].sales === 1598100 && a[RG + GOD].overdue === 395098 && a[RG + GOD].oldest === 13, 'Godrej: truck unloaded 20 days ago (7 credit days) is 13 days past credit; overdue 7,95,900 − 4,00,802 = 3,95,098');
   s.run('sendDailyReport_');
   const mail = s.store.mails[s.store.mails.length - 1].htmlBody;
   ok(/Customer payment overdue Rs 3,95,098, oldest 13 days past credit/.test(mail) && /outside customers owe Rs/.test(mail), '9 pm report shows the customer overdue line and what customers owe');
@@ -61,9 +62,9 @@ const GOD = 'GODREJ AGROVET KHANA', KING = 'KING FOOD MALERKOTLA', SR = 'SHREE R
   s.run('api_addCustomerPayment', D(acc), GOD, 400000, daysAgo(0), 800, 'TDS', 'sbin777', 'part payment', 'cpay-rid-0001');
   ok(payRows().filter(p => p[5] === 400000 && p[2] === '').length === 1, 'the same payment sent twice (same id) is saved once');
   a = accounts();
-  ok(a[GOD].received === 800000 && a[GOD].deducted === 1602 && a[GOD].overdue === 0 && a[GOD].outstanding === 796498, 'Godrej now: received 8,00,000, deductions 1,602, nothing overdue, outstanding 7,96,498');
+  ok(a[RG + GOD].received === 800000 && a[RG + GOD].deducted === 1602 && a[RG + GOD].overdue === 0 && a[RG + GOD].outstanding === 796498, 'Godrej now: received 8,00,000, deductions 1,602, nothing overdue, outstanding 7,96,498');
   s.run('api_addCustomerPayment', D(acc), KING, 50000, daysAgo(0), '', '', '', '', '');
-  ok(accounts()[KING].outstanding === -50000, 'King Food paid 50,000 extra: advance (outstanding −50,000)');
+  ok(accounts()[RG + KING].outstanding === -50000, 'King Food paid 50,000 extra: advance (outstanding −50,000)');
   ok(!('pays' in s.run('api_getData', D(dis))) && Array.isArray(s.run('api_getData', D(view)).pays), 'Dispatch never receives payments; Viewer sees them');
 
   console.log('Reversal (nothing is deleted)');
@@ -71,7 +72,7 @@ const GOD = 'GODREJ AGROVET KHANA', KING = 'KING FOOD MALERKOTLA', SR = 'SHREE R
   ok(err(() => s.run('api_reversePayment', D(acc), pid, 'entered on the wrong customer')) === '', 'Accounts reverses a payment entered today');
   const rev = payRows().find(p => String(p[7]).indexOf('Reversal of ' + pid + ':') === 0);
   ok(rev && rev[5] === -400000 && rev[6] === -800 && rev[4] === GOD, 'a minus line is added (−4,00,000 and −800)');
-  ok(accounts()[GOD].received === 400000 && accounts()[GOD].deducted === 802, 'Godrej back to 4,00,000 received');
+  ok(accounts()[RG + GOD].received === 400000 && accounts()[RG + GOD].deducted === 802, 'Godrej back to 4,00,000 received');
   ok(/already reversed/.test(err(() => s.run('api_reversePayment', D(acc), pid, 'again'))), 'cannot reverse twice');
   ok(/itself a reversal/.test(err(() => s.run('api_reversePayment', D(acc), rev[0], 'x'))), 'a reversal line cannot be reversed');
   const sh = s.store.sheet('APP_PAYMENTS');
@@ -92,7 +93,7 @@ const GOD = 'GODREJ AGROVET KHANA', KING = 'KING FOOD MALERKOTLA', SR = 'SHREE R
   const tabs = s.run('exportTabs_', 'full', '', null, { money: true, profit: true }, '');
   const th = tabs[0].rows[0], ca = tabs.find(x2 => x2.name === 'Customer Accounts');
   ok(th.indexOf('Outstanding') < 0 && th.indexOf('Received') < 0 && th.indexOf('Overdue Days') < 0 && th.indexOf('Sale Total') >= 0, 'truck sheet has no per-truck Received / Outstanding / Overdue');
-  ok(ca && ca.rows[0].indexOf('Outstanding') >= 0 && ca.rows.some(row => row[1] === GOD), 'new "Customer Accounts" sheet, one row per customer');
+  ok(ca && ca.rows[0].indexOf('Outstanding') >= 0 && ca.rows.some(row => row[1] === 'RAGHAV TRADING AND COMPANY' && row[2] === GOD), 'new "Customer Accounts" sheet, one row per firm and customer');
   ok(s.run('exportTabs_', 'accounts', '', null, { money: true }, '').length === 2, 'Receivables download: accounts + payments');
 
   console.log('Screen (Accounts, Keshav)');
@@ -103,20 +104,20 @@ const GOD = 'GODREJ AGROVET KHANA', KING = 'KING FOOD MALERKOTLA', SR = 'SHREE R
   A.win.go('receivables');
   const rhead = A.$$('#view .tr.th div').map(d => d.textContent);
   ok(rhead.join('|') === 'S.No.|Customer|Trucks|Sales|Received|Deductions|Outstanding|Overdue|Last received|', 'Receivables columns: ' + rhead.filter(String).join(', '));
-  ok(A.$$('#view .td.sn').length === Object.keys(A.win.ACC).length && !!A.$('#view [data-act="custPay"][data-id="' + GOD + '"]'), 'one row per customer, each with "+ Received"');
+  ok(A.$$('#view .td.sn').length === Object.keys(A.win.ACC).length && !!A.$('#view [data-act="custPay"][data-id="' + RG + GOD + '"]'), 'one row per firm and customer, each with "+ Received"');
   ok(/Advance/.test(A.$('#view').innerHTML), 'King Food shows its advance');
-  const before = A.win.ACC[GOD].received;
+  const before = A.win.ACC[RG + GOD].received;
   A.win.runAct('custPay', GOD);
   fill(A, { amt: '', deduction: '500' });
   submit(A);
   ok(/reason/.test(A.$('#ferr').textContent), 'deduction without a reason: stopped in the form');
   fill(A, { amt: '25000', deduction: '', date: '20-11-2026'.replace('20-11-2026', daysAgo(0).split('-').reverse().join('-')), ref: 'hdfc888' });
   submit(A);
-  ok(A.$('#modal').hidden && A.win.ACC[GOD].received === before + 25000 && /Saving/.test(A.$('#view').innerHTML), '+ Received shows at once (received +25,000, "Saving…")');
+  ok(A.$('#modal').hidden && A.win.ACC[RG + GOD].received === before + 25000 && /Saving/.test(A.$('#view').innerHTML), '+ Received shows at once (received +25,000, "Saving…")');
   ok(await idle(A) && payRows().some(p => p[5] === 25000 && p[4] === GOD && /Ref HDFC888/.test(p[7])), 'confirmed by the server');
   A.win.go('buyer', GOD);
   const st = A.$$('#view table.t')[0], lastBal = st ? st.querySelector('tbody tr:last-child td:last-child').textContent : '';
-  ok(!!st && /Statement/.test(A.$('#view').innerHTML) && lastBal.replace(/[₹,]/g, '') === String(Math.round(A.win.ACC[GOD].outstanding)), 'customer page: statement, last balance = outstanding (' + lastBal + ')');
+  ok(!!st && /Statement/.test(A.$('#view').innerHTML) && lastBal.replace(/[₹,]/g, '') === String(Math.round(A.win.ACC[RG + GOD].outstanding)), 'customer page: statement, last balance = outstanding (' + lastBal + ')');
   const revBtn = A.$('#view [data-act="reversePay"]');
   ok(!!revBtn, 'payments list has Reverse buttons');
   revBtn.click();

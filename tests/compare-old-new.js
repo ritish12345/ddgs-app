@@ -72,6 +72,13 @@ Object.keys(B.screens).forEach(k => { if (B.screens[k].settings) { delete B.scre
 EXPECTED.push('transporter advances: new APP_TRUCKS column "Transporter Advance Used" (blank here), advances sent to money roles');
 if (B.tabs.APP_TRUCKS) { const ci = B.tabs.APP_TRUCKS[0].indexOf('Transporter Advance Used'); if (ci >= 0) B.tabs.APP_TRUCKS = B.tabs.APP_TRUCKS.map(r => r.filter((x, i) => i !== ci)); }
 Object.keys(B.screens).forEach(k => { delete B.screens[k].advances; (B.screens[k].trucks || []).forEach(t => { delete t.tAdv; }); });
+// Four firms (24-11-2026): the firms setting lists Devan, Saraswati and Jai Mahavir too; payments carry a Firm column (last).
+EXPECTED.push('four firms: firms setting, new APP_PAYMENTS column "Firm"');
+[A, B].forEach(X => {
+  if (X.tabs.APP_SETTINGS) X.tabs.APP_SETTINGS = X.tabs.APP_SETTINGS.filter(r => r[0] !== 'firms');
+  Object.keys(X.screens).forEach(k => { if (X.screens[k].settings) delete X.screens[k].settings.firms; });
+});
+if (B.tabs.APP_PAYMENTS) { const pi = B.tabs.APP_PAYMENTS[0].indexOf('Firm'); if (pi >= 0) B.tabs.APP_PAYMENTS = B.tabs.APP_PAYMENTS.map(r => r.filter((x, i) => i !== pi)); }
 // Stage values follow the new Closed rule (checked in parity / receivables tests); here only that Dispatch still gets one.
 [A, B].forEach(X => Object.keys(X.screens).forEach(k => (X.screens[k].trucks || []).forEach(t => { if ('_st' in t) t._st = 'present'; })));
 

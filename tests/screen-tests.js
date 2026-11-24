@@ -74,7 +74,8 @@ const openApp = (s, token, storage) => B.openApp(s, token, storage, msg => { con
   console.log('Accounts (Keshav): customer payment, internet lost after the server saved it');
   const B = openApp(s, tokens.acc);
   ok(await idle(B), 'app loads');
-  const GOD = 'GODREJ AGROVET KHANA', before = B.win.ACC[GOD].received;
+  const RG = 'RAGHAV TRADING AND COMPANY|'; // accounts are kept per firm and customer
+  const GOD = 'GODREJ AGROVET KHANA', before = B.win.ACC[RG + GOD].received;
   const payLines = () => s.store.sheet('APP_PAYMENTS').dump().slice(1).filter(r => r[4] === GOD && r[5] === 1000 && r[2] === '').length;
   let lostOnce = true;
   B.br.net = fn => (fn === 'api_addCustomerPayment' && lostOnce ? (lostOnce = false, 'lost') : 'ok');
@@ -82,12 +83,12 @@ const openApp = (s, token, storage) => B.openApp(s, token, storage, msg => { con
   B.win.runAct('custPay', GOD);
   fill(B, { amt: '1000', date: '19-11-2026' });
   submit(B);
-  ok(B.win.ACC[GOD].received === before + 1000, 'received goes up by 1,000 at once (' + before + ' -> ' + B.win.ACC[GOD].received + ')');
+  ok(B.win.ACC[RG + GOD].received === before + 1000, 'received goes up by 1,000 at once (' + before + ' -> ' + B.win.ACC[RG + GOD].received + ')');
   await sleep(300);
   ok(B.win.Q.length === 1 && /No internet/.test(B.$('#sync').textContent), 'reply lost: still waiting, header says "No internet?"');
   ok(await idle(B, 15000), 'tries again by itself and finishes');
   ok(payLines() === 1, 'the sheet has the payment ONCE (one line in APP_PAYMENTS)');
-  ok(B.br.calls.filter(f => f === 'api_addCustomerPayment').length === 2 && B.win.ACC[GOD].received === before + 1000, 'sent twice, counted once; screen shows the right total');
+  ok(B.br.calls.filter(f => f === 'api_addCustomerPayment').length === 2 && B.win.ACC[RG + GOD].received === before + 1000, 'sent twice, counted once; screen shows the right total');
 
   console.log('Two quick saves on one truck go in order');
   s.run('api_saveTruck', own, { truck: 'PB65QQ4321', po: 'PO-01-BCL', placedOn: '2026-11-19' });
