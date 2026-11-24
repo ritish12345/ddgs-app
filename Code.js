@@ -1548,6 +1548,9 @@ function derive_(t, po, so, S, today) {
   x.short = U ? r2(Math.max(0, L - U)) : 0;
   x.allow = L * n(S.shortageAllowancePct);
   x.shortDed = !U || x.fBuyer ? 0 : plantPO ? r2(Math.max(0, x.short - x.allow) * poRate * (1 + poG)) : so ? r2(Math.max(0, x.short - x.allow) * x.soBase * (1 + soG)) : 0;
+  // For showing the working: the charged shortage (above the free allowance) and the rate it is charged at (incl. GST)
+  x.shortOver = U ? r2(Math.max(0, x.short - x.allow)) : 0;
+  x.shortRate = !U || x.fBuyer ? 0 : plantPO ? r2(poRate * (1 + poG)) : so ? r2(x.soBase * (1 + soG)) : 0;
   x.frAmt = x.fBuyer ? 0 : r2(U * FR);
   x.trip = t.date ? days_(t.date, t.unloadDate || today) : 0;
   x.detDays = Math.max(0, x.trip - n(S.freeDays === undefined || S.freeDays === '' ? 3 : S.freeDays));
@@ -1704,7 +1707,7 @@ function truckColumns_(can) {
     ['Unload Date', 'unloadDate'], ['Received Wt (qtl)', 'U'], ['Shortage (qtl)', 'short'], ['Days on trip', 'trip'], ['Stage', 'stage']];
   if (can.money) c = c.concat([['Supplier Amount incl GST', 'purTot'], ['Supplier Paid', 'plantPaid'], ['Supplier Paid Date', 'plantPaidDate'], ['Supplier UTR', 'plantUTR'],
     ['Sale Rate', 'rateUsed'], ['Sale Total', 'saleTot'],
-    ['Freight Rate', 'FR'], ['Freight Amount', 'frAmt'], ['Shortage Deduction', 'shortDed'], ['Detention', 'det'],
+    ['Freight Rate', 'FR'], ['Freight Amount', 'frAmt'], ['Free Shortage (qtl)', 'allowX'], ['Charged Shortage (qtl)', 'shortOver'], ['Shortage Rate incl GST', 'shortRate'], ['Shortage Deduction', 'shortDed'], ['Detention', 'det'],
     ['Freight Advance', 'A'], ['Trip Net Freight', 'netFr'], ['Earlier Advance Adjusted', 'carryIn'], ['Transporter Advance Used', 'advUsed'], ['Net Freight Payable', 'netPay'], ['Freight Paid', 'freightPaid'], ['Freight Paid Date', 'freightPaidDate'], ['Freight UTR', 'freightUTR']]);
   if (can.profit) c.push(['Profit before GST', 'profit']);
   c.push(['Note', 'note']);
@@ -1729,6 +1732,7 @@ function tab_(name, cols, list) {
 var ADV_COLS_ = [['Advance No.', 'id'], ['Firm', 'firm'], ['Date', 'date'], ['Transporter', 'transporter'], ['Vehicle No', 'vehicle'], ['Driver', 'driver'], ['Amount', 'amount'], ['UTR / Ref', 'ref'], ['Note', 'note'], ['Entered By', 'by']];
 function exportTabs_(kind, key, ids, can, firm) {
   var A = deriveAll_();
+  A.trucks.forEach(function (t) { t.allowX = Math.round((t.allow || 0) * 1000) / 1000; }); // free shortage, 3 decimals for Excel
   if (firm) {
     firm = normName_(firm);
     A.trucks = A.trucks.filter(function (t) { return t.firm === firm; });

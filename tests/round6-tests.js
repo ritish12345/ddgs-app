@@ -81,6 +81,28 @@ const R = 'RAGHAV TRADING AND COMPANY';
   ok(await idle(O) && truckRow(s, tid)['Freight Advance'] === 25000, 'Owner corrects the total to 25,000');
   O.win.close();
 
+  console.log('Shortage deduction worked out on every truck (like DISP-0022: 284 → 283 qtl, SO rate 2,770 incl. GST)');
+  s.run('api_saveSO', own, { buyer: 'King Food Malerkotla', date: '2026-11-14', qty: 2500, rate: 2770, gst: 0.05, gstMode: 'incl', freightMode: 'ours', creditDays: 7, commodity: 'DDGS' });
+  const kso = Object.keys(s.run('deriveAll_').so).filter(k => s.run('deriveAll_').so[k].rate === 2770)[0];
+  s.run('api_saveTruck', dis, { truck: 'HR63B5735', po: 'PO-01-BCL', so: kso, placedOn: '2026-11-15', date: '2026-11-15', loadWt: '284', transporter: 'NA', frate: '85' });
+  const st = s.store.sheet('APP_TRUCKS').dump().slice(1).filter(r => r[4] === 'HR63B5735').map(r => r[0]).pop();
+  s.run('api_saveTruck', dis, { id: st, unloadDate: '2026-11-16', unloadWt: '283' });
+  const t22 = s.run('deriveAll_').trucks.find(t => t.id === st);
+  ok(t22.short === 1 && t22.shortOver === 0.43 && t22.shortRate === 2770 && t22.shortDed === 1196.64, 'shortage 1.00 − free 0.568 = 0.432 qtl × ₹2,770 = ₹1,196.64');
+  const F = openApp(s, own);
+  ok(await idle(F), 'Owner screen loads');
+  F.win.QS = 'hr63b5735'; F.win.SUBF.freight = 'all'; F.win.go('freight');
+  const fr = F.$$('#view .tbl .tr').find(r => r.textContent.indexOf(st) >= 0);
+  ok(!!fr && /₹1,197/.test(fr.querySelector('[data-l="Short ded."]').textContent) && /1\.00 − 0\.57 free = 0\.43 qtl × ₹2,770/.test(fr.querySelector('[data-l="Short ded."]').textContent), 'Freight & Transport row: ₹1,197 with "1.00 − 0.57 free = 0.43 qtl × ₹2,770"');
+  F.win.QS = ''; F.win.go('truck', st);
+  ok(/Shortage 1\.00 qtl − free 0\.2% of 284\.00 \(0\.57 qtl\) = 0\.43 qtl × ₹2,770 \(sale rate incl\. GST\) = ₹1,197/.test(F.$('#view').textContent), 'truck page: the whole working in words');
+  F.win.runAct('fpaid', st);
+  ok(/− shortage ₹1,197 \(1\.00 − 0\.57 free = 0\.43 qtl × ₹2,770\)/.test(F.$('#mform').textContent), 'Pay freight popup shows it too');
+  F.win.closeForm(); F.win.close();
+  const xl = s.run('exportTabs_', 'trucks', '', [st], { money: true, profit: true }, '')[0];
+  const hd = xl.rows[0], rw = xl.rows[1];
+  ok(rw[hd.indexOf('Free Shortage (qtl)')] === 0.568 && rw[hd.indexOf('Charged Shortage (qtl)')] === 0.43 && rw[hd.indexOf('Shortage Rate incl GST')] === 2770 && rw[hd.indexOf('Shortage Deduction')] === 1196.64, 'Excel: free shortage, charged shortage, rate and deduction columns');
+
   console.log(fails ? '\n' + fails + ' FAILED' : '\nAll Advances tab tests passed.');
   process.exit(fails ? 1 : 0);
 })().catch(e => { console.log('CRASH ' + (e && e.stack || e)); process.exit(1); });

@@ -745,6 +745,9 @@ function derive(t) {
   x.short = U ? r2(Math.max(0, L - U)) : 0;
   x.allow = L * n(S.shortageAllowancePct);
   x.shortDed = !U || x.fBuyer ? 0 : plantPO ? r2(Math.max(0, x.short - x.allow) * poRate * (1 + poG)) : so ? r2(Math.max(0, x.short - x.allow) * x.soBase * (1 + soG)) : 0;
+  // For showing the working: the charged shortage (above the free allowance) and the rate it is charged at (incl. GST)
+  x.shortOver = U ? r2(Math.max(0, x.short - x.allow)) : 0;
+  x.shortRate = !U || x.fBuyer ? 0 : plantPO ? r2(poRate * (1 + poG)) : so ? r2(x.soBase * (1 + soG)) : 0;
   x.frAmt = x.fBuyer ? 0 : r2(U * FR);
   x.trip = t.date ? days(t.date, t.unloadDate || D.today) : 0;
   x.freeDays = S.freeDays === undefined || S.freeDays === '' ? 3 : n(S.freeDays);
@@ -1124,7 +1127,7 @@ function vTruck(id) {
     h += '<h2>Money</h2><dl class="dl">' + (t.plantUTR ? row('Supplier payment UTR', esc(t.plantUTR)) : '') + (t.freightUTR ? row('Freight payment UTR', esc(t.freightUTR)) : '') + row('Supplier amount', !t.L ? '— <span class="mu">(after weight)</span>' : inr(t.purTot) + (t.plantPaid ? ' · <span style="color:var(--ok)">paid ' + dmy(t.plantPaidDate) + '</span>' : ' · <span class="over">unpaid</span>')) +
       (t.plantPO ? '' : row('Invoice rate', t.so ? inr(t.rateUsed) + '/qtl' + (t.rateOwn ? ' <span class="tag wn">this truck only</span>' : '') : '—') + row('Sale total', t.so ? inr(t.saleTot) + (t.U ? '' : ' <span class="mu">(on loaded wt)</span>') : '—') +
       row('Customer money', t.so ? 'kept per customer · ' + lnk('buyer', t.buyer, t.buyer + ' account') : '—')) +
-      (t.fBuyer ? row('Freight', 'Paid by buyer') : row('Freight', t.U ? inr(t.frAmt) + ' (' + inr(t.FR) + '/qtl)' : (t.FR ? inr(t.FR) + '/qtl' : '—')) + row('Shortage deduction', inr(t.shortDed)) +
+      (t.fBuyer ? row('Freight', 'Paid by buyer') : row('Freight', t.U ? inr(t.frAmt) + ' (' + inr(t.FR) + '/qtl)' : (t.FR ? inr(t.FR) + '/qtl' : '—')) + row('Shortage deduction', inr(t.shortDed) + (t.U ? '<small class="mu" style="display:block;font-weight:400">' + esc(shortWork(t)) + '</small>' : '')) +
         row('Detention', (t.det ? inr(t.det) : '₹0') + (t.detSuggest && !t.det ? ' <span class="mu">(suggested ' + inr(t.detSuggest) + ' if you agree to pay)</span>' : '')) + row('Freight advance', inr(t.A + t.carryIn) + (t.carryIn ? ' <span class="mu">(' + (t.A ? inr(t.A) + ' this trip + ' : '') + inr(t.carryIn) + ' extra advance from an earlier trip of this truck)</span>' : '')) +
         row('Net freight', t.U ? '<b>' + inr(t.netPay) + '</b>' + (t.carryOut ? ' <span class="mu">(' + inr(t.carryOut) + ' extra advance carried to the next trip)</span>' : '') + (t.freightPaid ? ' · <span style="color:var(--ok)">paid ' + dmy(t.freightPaidDate) + '</span>' : '') : '—')) +
       (P.profit && t.U && !t.plantPO ? row('Profit before GST', inr(t.profit)) : '') + '</dl>';
@@ -1417,6 +1420,18 @@ function actReversePay(id) {
 }
 /* Freight advance set against this trip: its own advance plus extra advance carried from an earlier trip of the same truck
    (Nitish, 23-11-2026). So on every row: freight − shortage − advance + detention = net freight payable. */
+/* The shortage deduction worked out, for one truck (same numbers as derive):
+   shortage − free allowance (0.2% of dispatch weight) = charged qtl × rate incl. GST (sale rate; purchase rate for own plant). */
+function rs2(x) { return '₹' + Number(x || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 }); }
+function shortWork(t, short) {
+  if (!t.U) return '';
+  if (t.fBuyer) return 'Customer pays the freight: no deduction';
+  if (!(t.short > 0)) return 'No shortage';
+  var pct = r2(n(D.settings.shortageAllowancePct) * 100);
+  if (!(t.shortOver > 0)) return 'Shortage ' + qt(t.short) + ' qtl is within the free ' + pct + '% (' + qt(t.allow) + ' qtl): no deduction';
+  if (short) return qt(t.short) + ' − ' + qt(t.allow) + ' free = ' + qt(t.shortOver) + ' qtl × ' + rs2(t.shortRate);
+  return 'Shortage ' + qt(t.short) + ' qtl − free ' + pct + '% of ' + qt(t.L) + ' (' + qt(t.allow) + ' qtl) = ' + qt(t.shortOver) + ' qtl × ' + rs2(t.shortRate) + (t.plantPO ? ' (purchase rate incl. GST)' : ' (sale rate incl. GST)') + ' = ' + inr(t.shortDed);
+}
 function advCell(t, inline) {
   var tv = t.advUsed || 0, a = r2(t.A + t.carryIn + tv);
   if (!a) return '—';
@@ -1548,7 +1563,7 @@ function vFreight() {
       '<div class="td" data-l="Transporter">' + lnk('transporter', t.transporter || '(none)', t.transporter || '—') + '</div>' +
       '<div class="td r num" data-l="Loaded">' + (t.L ? qt(t.L) : '—') + '</div><div class="td r num" data-l="Unloaded">' + (t.U ? qt(t.U) : '—') + '</div><div class="td r num" data-l="Rate">' + (t.FR ? inr(t.FR) : '—') + '</div>' +
       '<div class="td r num" data-l="Freight">' + (t.U && !t.fBuyer ? inr(t.frAmt) : '—') + '</div>' +
-      '<div class="td r num" data-l="Short ded.">' + (t.shortDed ? inr(t.shortDed) + '<small>' + qt(t.short) + ' qtl</small>' : '—') + '</div>' +
+      '<div class="td r num" data-l="Short ded.">' + (t.shortDed ? inr(t.shortDed) + '<small title="' + esc(shortWork(t)) + '">' + esc(shortWork(t, true)) + '</small>' : (t.U && t.short > 0 && !t.fBuyer ? '—<small>' + qt(t.short) + ' qtl, within free</small>' : '—')) + '</div>' +
       '<div class="td r num" data-l="Detention">' + (t.det ? inr(t.det) : t.detSuggest ? '<span class="mu" title="Suggestion only, not added">' + inr(t.detSuggest) + '?</span>' : '—') + '</div>' +
       '<div class="td r num" data-l="Freight adv.">' + advCell(t) + '</div>' +
       '<div class="td r num" data-l="Net freight payable"><b>' + (t.fBuyer ? '<span class="mu">—</span>' : t.U ? inr(t.netPay) : '—') + '</b>' + (t.carryOut ? '<small class="over">' + inr(t.carryOut) + ' extra adv. → next trip</small>' : '') + '</div>' +
@@ -1893,7 +1908,7 @@ function actAdvance(id) {
 function actFPaid(id) {
   var t = getT(id);
   var fields = [{ k: 'detention', label: 'Detention (₹) – only if you agree to pay', type: 'number', help: t.detDays > 0 ? t.trip + ' days on trip, ' + t.freeDays + ' free, so ' + t.detDays + ' extra day' + (t.detDays > 1 ? 's' : '') + '. Suggestion: ' + inr(t.detSuggest) + ' (' + inr(t.perDay) + '/day). Leave 0 if not paying.' : 'Trip within the ' + t.freeDays + ' free days. Leave 0.', fill: t.detSuggest || null, fillLabel: 'Add suggested ' + inr(t.detSuggest) }, { k: 'freightPaidDate', label: 'Payment date', type: 'date', req: 1 }, { k: 'freightUTR', label: 'UTR (bank reference, optional)', ph: 'e.g. SBIN52345678901', full: 1 }];
-  openForm({ title: 'Pay freight', sub: esc(t.truck + ' · ' + t.id + ' · ' + (t.transporter || 'no transporter')) + '<br>Freight ' + inr(t.frAmt) + ' − shortage ' + inr(t.shortDed) + ' − advance ' + inr(t.A) + ' + detention' + (t.carryIn ? ' − ' + inr(t.carryIn) + ' extra advance from earlier trip' : '') + (t.advAvail > 0 ? ' − transporter advance <b id="ftadv">' + inr(t.advUsed) + '</b> (left before this truck ' + inr(t.advAvail) + ')' : '') + '<br>Net to pay <b id="fnet">' + inr(t.netPay) + '</b>' + (t.transporter ? bankBox(bankFor('transporter', t.transporter), 'transporter', t.transporter) : '<div class="mu">No transporter on this truck.</div>') + payPhotoInput('freightPay', t) + (t.carryOut ? '<br><span class="mu">Advance is more than freight: ' + inr(t.carryOut) + ' will be adjusted on this truck\u2019s next trip.</span>' : ''),
+  openForm({ title: 'Pay freight', sub: esc(t.truck + ' · ' + t.id + ' · ' + (t.transporter || 'no transporter')) + '<br>Freight ' + inr(t.frAmt) + ' − shortage ' + inr(t.shortDed) + (t.shortDed ? ' <span class="mu">(' + esc(shortWork(t, true)) + ')</span>' : '') + ' − advance ' + inr(t.A) + ' + detention' + (t.carryIn ? ' − ' + inr(t.carryIn) + ' extra advance from earlier trip' : '') + (t.advAvail > 0 ? ' − transporter advance <b id="ftadv">' + inr(t.advUsed) + '</b> (left before this truck ' + inr(t.advAvail) + ')' : '') + '<br>Net to pay <b id="fnet">' + inr(t.netPay) + '</b>' + (t.transporter ? bankBox(bankFor('transporter', t.transporter), 'transporter', t.transporter) : '<div class="mu">No transporter on this truck.</div>') + payPhotoInput('freightPay', t) + (t.carryOut ? '<br><span class="mu">Advance is more than freight: ' + inr(t.carryOut) + ' will be adjusted on this truck\u2019s next trip.</span>' : ''),
     fn: 'api_saveTruck', submit: 'Confirm freight paid', done: 'Freight marked paid', values: { detention: t.det || 0, freightPaidDate: D.today }, fields: fields,
     check: function (v) { return v.detention === '' ? 'Enter the detention amount (0 if none).' : null; },
     build: function (v) { return { id: id, freightPaid: true, freightPaidDate: v.freightPaidDate, detention: v.detention, freightUTR: v.freightUTR }; } });

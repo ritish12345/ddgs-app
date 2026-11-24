@@ -66,7 +66,7 @@ vm.createContext(cv);
 vm.runInContext(calc + '\nD = ' + JSON.stringify({ settings: S, today }) + '; P = { money: true }; PO = ' + JSON.stringify(PO) + '; SO = ' + JSON.stringify(SO) +
   '; this.out = CARRY(' + JSON.stringify(trucks) + '.map(derive)); this.tadv = transAdv(this.out, ' + JSON.stringify(ADVS) + '); this.acc = custAcc(this.out, ' + JSON.stringify(PAYS) + ');', cv);
 
-const keys = ['advUsed', 'advAvail', 'L', 'U', 'R', 'A', 'FR', 'DED', 'purEx', 'purTot', 'saleWt', 'saleEx', 'saleTot', 'soBase', 'short', 'allow', 'shortDed', 'frAmt', 'trip', 'detDays', 'detSuggest', 'det',
+const keys = ['shortOver', 'shortRate', 'advUsed', 'advAvail', 'L', 'U', 'R', 'A', 'FR', 'DED', 'purEx', 'purTot', 'saleWt', 'saleEx', 'saleTot', 'soBase', 'short', 'allow', 'shortDed', 'frAmt', 'trip', 'detDays', 'detSuggest', 'det',
   'netFr', 'netPay', 'carryIn', 'carryOut', 'carryLeft', 'profit', 'st', 'credit', 'due', 'ownBuyer', 'fBuyer', 'plantPO', 'firm', 'rateUsed', 'noSlip', 'cx', 'placed', 'stage'];
 let bad = 0;
 sOut.forEach((s, i) => {
