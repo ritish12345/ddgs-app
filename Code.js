@@ -341,6 +341,7 @@ function linkTruckOrders_(obj) {
     if (link) obj.so = link.id;
   }
 }
+var SUPPLIER_SIDE_ = ['plantPaid', 'plantPaidDate', 'plantUTR', 'billNo', 'billQty'];
 function checkTruckRules_(obj) {
   var t = rows_(T.TR).filter(function (r) { return r.id === obj.id; })[0];
   if (!t) return;
@@ -350,7 +351,10 @@ function checkTruckRules_(obj) {
     var po = rows_(T.PO).filter(function (r) { return r.id === t.po; })[0];
     var so = rows_(T.SO).filter(function (r) { return r.id === t.so; })[0];
     var d = derive_(t, po, so, readSettings_(), today);
-    if (d.st === 6) throw new Error(t.id + ' is closed. Only the Owner can change it.');
+    // A closed truck may still have its supplier unpaid: staff can pay the supplier and enter the supplier invoice on it.
+    // Paying freight closes a truck: staff can still undo a freight payment made today (that reopens the truck).
+    var undoFr = obj.freightPaid === false && t.freightPaid && t.freightPaidDate === today;
+    if (d.st === 6 && Object.keys(obj).some(function (k) { return k !== 'id' && SUPPLIER_SIDE_.indexOf(k) < 0 && !(undoFr && ['freightPaid', 'freightPaidDate', 'freightUTR'].indexOf(k) >= 0); })) throw new Error(t.id + ' is closed. Only the Owner can change it.');
     if (obj.plantPaid === false && t.plantPaid && t.plantPaidDate !== today) throw new Error('Only the Owner can undo a supplier payment from an earlier day.');
     if (obj.freightPaid === false && t.freightPaid && t.freightPaidDate !== today) throw new Error('Only the Owner can undo a freight payment from an earlier day.');
     if ('received' in obj || 'deduction' in obj) throw new Error('Only the Owner can correct customer payments. Use + Payment to add money received.');
@@ -1517,11 +1521,11 @@ function derive_(t, po, so, S, today) {
   // Sales to your own firm: freight and detention are not taken off the margin (shortage recovered from the transporter still counts).
   x.profit = U && so && po ? r2(x.saleEx - x.purEx - (x.ownBuyer ? -x.shortDed : x.frAmt - x.shortDed + x.det)) : 0;
   x.cx = t.status === 'Cancelled' || t.status === 'Returned';
-  // Customer money is kept per customer (custAcc_), not per truck (Nov 2026). A truck is Closed when it is unloaded,
-  // the supplier is paid and the freight is paid (or the customer pays the freight). Own-plant trucks the same.
+  // Customer money is kept per customer (custAcc_), not per truck (Nov 2026). A truck is Closed when it is unloaded
+  // and the freight is paid (or the customer pays the freight); the supplier payment does not count (Nitish, 24-11-2026).
   var st;
   if (x.cx) st = -1;
-  else if (U && t.plantPaid && (t.freightPaid || x.fBuyer)) st = 6;
+  else if (U && (t.freightPaid || x.fBuyer)) st = 6;
   else if (U) st = 3;
   else if (t.plantPaid) st = 2;
   else if (L) st = 1;

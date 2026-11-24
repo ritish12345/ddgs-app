@@ -735,11 +735,11 @@ function derive(t) {
   // Sales to your group company: freight and detention are not taken off the margin (shortage recovered from the transporter still counts).
   x.profit = U && so && po ? r2(x.saleEx - x.purEx - (x.ownBuyer ? -x.shortDed : x.frAmt - x.shortDed + x.det)) : 0;
   x.cx = t.status === 'Cancelled' || t.status === 'Returned'; x.returned = t.status === 'Returned';
-  // Customer money is kept per customer (custAcc), not per truck. A truck is Closed when it is unloaded, the supplier
-  // is paid and the freight is paid (or the customer pays the freight). Own-plant trucks the same. Same as the server.
+  // Customer money is kept per customer (custAcc), not per truck. A truck is Closed when it is unloaded and the freight
+  // is paid (or the customer pays the freight); the supplier payment does not count (24-11-2026). Same as the server.
   var st;
   if (x.cx) st = -1;
-  else if (U && t.plantPaid && (t.freightPaid || x.fBuyer)) st = 6;
+  else if (U && (t.freightPaid || x.fBuyer)) st = 6;
   else if (U) st = 3;
   else if (t.plantPaid) st = 2;
   else if (L) st = 1;
@@ -1111,7 +1111,13 @@ function vTruck(id) {
 function menuItems(t) {
   var m = [];
   if (t.cx) { if (t.returned ? P.trucks : P.cancelTruck) m.push({ a: 'restore', l: t.returned ? 'Undo returned' : 'Restore truck' }); return m; }
-  if (t.st === 6 && !P.editClosed) return m;
+  if (t.st === 6 && !P.editClosed) { // closed: staff can still pay the supplier and enter its invoice
+    if (P.truckMoney && t.L && !t.plantPaid) m.push({ a: 'paid', l: 'Mark supplier paid' });
+    if (P.truckMoney && t.plantPaid) m.push({ a: 'unpaid', l: 'Undo supplier payment' });
+    if (P.trucks && t.L) m.push({ a: 'bill', l: t.billQ === null ? 'Enter supplier invoice' : 'Change supplier invoice' });
+    if (P.truckMoney && t.freightPaid && t.freightPaidDate === D.today) m.push({ a: 'funpaid', l: 'Undo freight payment (made today)' });
+    return m;
+  }
   if (P.trucks) m.push({ a: 'editTruck', l: 'Edit details' });
   if (P.trucks && t.L) m.push({ a: 'load', l: 'Change loaded weight' });
   if (P.trucks && t.L) m.push({ a: 'bill', l: t.billQ === null ? 'Enter supplier invoice' : 'Change supplier invoice' });
@@ -1510,7 +1516,7 @@ function closedTruckRows(list) {
       '<div class="td wide" data-l="Supplier → customer">' + lnk('plant', t.plant) + ' → ' + (t.plantPO ? esc(shortFirm(plantFirm())) + ' plant' : t.so ? lnk('buyer', t.buyer) : '<span class="mu">no customer</span>') + '</div>' +
       '<div class="td r num" data-l="Loaded">' + (t.L ? qt(t.L) : '—') + '</div><div class="td r num" data-l="Unloaded">' + (t.U ? qt(t.U) : '—') + '</div>' +
       (M ? '<div class="td r num" data-l="Sale total">' + (t.saleTot ? inr(t.saleTot) : '—') + '</div>' : '') +
-      '<div class="td" data-l="Status"><span class="stage ' + (t.st < 0 ? 'sx' : 's' + t.st) + '">' + t.stage + '</span>' + (why ? '<small>' + esc(why) + '</small>' : '') + '</div>' +
+      '<div class="td" data-l="Status"><span class="stage ' + (t.st < 0 ? 'sx' : 's' + t.st) + '">' + t.stage + '</span>' + (why ? '<small>' + esc(why) + '</small>' : '') + (P.money && !t.cx && t.L && !t.plantPaid ? '<small class="over">supplier not paid</small>' : '') + '</div>' +
       '<div class="td acts"><button type="button" class="ib" data-act="menu" data-id="' + esc(t.id) + '" aria-label="More actions">⋯</button></div></div>';
   }).join('') + '</div>' + more(list);
 }

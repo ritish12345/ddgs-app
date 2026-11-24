@@ -79,12 +79,14 @@ const GOD = 'GODREJ AGROVET KHANA', KING = 'KING FOOD MALERKOTLA', SR = 'SHREE R
   ok(/Only the Owner/.test(err(() => s.run('api_reversePayment', D(acc), 'PAY-09000', 'x'))), 'Accounts cannot reverse a payment from an earlier day');
   ok(err(() => s.run('api_reversePayment', D(own), 'PAY-09000', 'wrong amount')) === '', 'the Owner can');
 
-  console.log('Closed = unloaded + supplier paid + freight paid (or customer pays freight)');
+  console.log('Closed = unloaded + freight paid (or customer pays freight); the supplier payment does not count (24-11-2026)');
   let t = trucks();
-  ok(t['DISP-0001'].st === 6 && t['DISP-0002'].st === 6, 'DISP-0001 (all paid) and DISP-0002 (customer pays freight) are Closed, without any customer money per truck');
-  ok(t['DISP-0005'].st === 3 && t['DISP-0003'].st === 3 && t['DISP-0003'].stage === 'Received', 'supplier not paid yet: DISP-0005 Unloaded, DISP-0003 (own plant) Received — not Closed');
-  s.run('api_saveTruck', acc, { id: 'DISP-0003', plantPaid: true, plantPaidDate: daysAgo(0), plantUTR: 'UTR5' });
-  ok(trucks()['DISP-0003'].st === 6, 'own-plant truck closes once the supplier is paid too');
+  ok(t['DISP-0001'].st === 6 && t['DISP-0002'].st === 6, 'DISP-0001 (freight paid) and DISP-0002 (customer pays freight) are Closed, without any customer money per truck');
+  ok(t['DISP-0005'].st === 6 && t['DISP-0003'].st === 6 && !t['DISP-0005'].plantPaid && !t['DISP-0003'].plantPaid, 'DISP-0005 and DISP-0003 (own plant): freight paid, supplier not paid → Closed too');
+  ok(t['DISP-0004'].st === 2, 'DISP-0004: supplier paid but not unloaded → still open (Supplier paid)');
+  ok(/is closed/.test(err(() => s.run('api_saveTruck', acc, { id: 'DISP-0003', note: 'x' }))), 'Accounts still cannot change a closed truck…');
+  ok(err(() => s.run('api_saveTruck', acc, { id: 'DISP-0003', plantPaid: true, plantPaidDate: daysAgo(0), plantUTR: 'UTR5' })) === '' && trucks()['DISP-0003'].plantPaid, '…but can mark its supplier paid');
+  ok(err(() => s.run('api_saveTruck', dis, { id: 'DISP-0005', billNo: 'BCL/9', billQty: '390' })) === '', 'and Dispatch can enter the supplier invoice on a closed truck');
 
   console.log('Excel');
   const tabs = s.run('exportTabs_', 'full', '', null, { money: true, profit: true }, '');

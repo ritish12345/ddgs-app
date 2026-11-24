@@ -61,7 +61,7 @@ const SR = 'SHREE RAM SOLVEX';
   ok(err(() => s.run('api_saveTruck', dis, { truck: 'PB29X0297', po: 'PO-01-BCL', placedOn: '2026-11-14', date: '2026-11-14' })) === '', 'same-vehicle check ignores Shree Ram\'s trucks');
   const ids = s.store.sheet('APP_TRUCKS').dump().slice(1).map(r => r[0]).sort();
   ok(ids[ids.length - 1] === 'DISP-' + String(maxBefore + 1).padStart(4, '0') && ids.indexOf('DISP-0003') >= 0, 'Dispatch numbers keep counting over all rows (new truck ' + ids[ids.length - 1] + ', after DISP-' + String(maxBefore).padStart(4, '0') + ')');
-  ok(err(() => s.run('api_saveTruck', dis, { id: 'DISP-0005', note: 'checked at the plant' })) === '', 'Raghav\'s truck to Shree Ram can be changed');
+  ok(err(() => s.run('api_saveTruck', own, { id: 'DISP-0005', note: 'checked at the plant' })) === '', 'Raghav\'s truck to Shree Ram can be changed (it is closed now, so by the Owner)');
 
   console.log('Nothing in the sheet was changed or deleted');
   const after = ['APP_PO', 'APP_SO', 'APP_TRUCKS'].map(n => s.store.sheet(n).dump());

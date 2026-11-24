@@ -118,8 +118,11 @@ const lastId = (s, truck) => s.store.sheet('APP_TRUCKS').dump().slice(1).filter(
   ok(A.win.LASTIDS.indexOf(tq) >= 0 && !/Short-closed|Fully paid/.test(A.$('#view').innerHTML) && salesHead.indexOf('Received') < 0 && salesHead.indexOf('Balance') < 0 && salesHead.indexOf('Next step') < 0,
     '5. Sales page lists the unloaded truck, with no Received / Balance / Next step');
   A.win.go('closed');
-  // New Closed rule: unloaded + supplier paid + freight paid (or customer pays freight). DISP-0003 (own plant) has no supplier payment.
-  ok(A.win.LASTIDS.indexOf('DISP-0001') >= 0 && A.win.LASTIDS.indexOf('DISP-0002') >= 0 && A.win.LASTIDS.indexOf('DISP-0003') < 0, '5. Closed & cancelled → Completed trucks: DISP-0001, DISP-0002 (not DISP-0003: supplier unpaid)');
+  // Closed rule (Nitish, 24-11-2026): unloaded + freight paid (or customer pays freight); the supplier payment does not count.
+  // DISP-0003 (own plant) has its freight paid but no supplier payment: completed, marked "supplier not paid".
+  const row3 = A.$$('#view .tr').find(r => r.textContent.indexOf('DISP-0003') >= 0);
+  ok(A.win.LASTIDS.indexOf('DISP-0001') >= 0 && A.win.LASTIDS.indexOf('DISP-0002') >= 0 && A.win.LASTIDS.indexOf('DISP-0003') >= 0 && !!row3 && /supplier not paid/.test(row3.textContent),
+    '5. Closed & cancelled → Completed trucks: DISP-0001, DISP-0002 and DISP-0003 (freight paid; marked "supplier not paid")');
   A.win.SUBF.closed = 'cx'; A.win.render();
   ok(A.win.LASTIDS.indexOf('DISP-0006') >= 0 && /duplicate entry/.test(A.$('#view').innerHTML), '5. Cancelled / returned: DISP-0006 with its reason');
   A.win.runAct('closedOrders');
