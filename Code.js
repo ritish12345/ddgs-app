@@ -1793,6 +1793,11 @@ function exportTabs_(kind, key, ids, can, firm) {
     if (!can.money) throw new Error('Your role cannot download money figures.');
     tabs.push(tab_('Customer Accounts', ac, ids ? accRows.filter(function (r) { return ids.indexOf(r.firm + '|' + r.name) >= 0 || ids.indexOf(r.name) >= 0; }) : accRows));
     tabs.push(tab_('Customer Payments', pc, pays));
+  } else if (kind === 'shortage') { // Disputes tab: loaded / unloaded weight and how each shortage deduction was worked out. key = transporter (or blank)
+    if (!can.money) throw new Error('Your role cannot download money figures.');
+    var shc = [['Dispatch No.', 'id'], ['Firm', 'firm'], ['Date Out', 'date'], ['Unload Date', 'unloadDate'], ['Vehicle No', 'truck'], ['Transporter', 'transporter'], ['Customer', 'buyer'],
+      ['Loaded (qtl)', 'L'], ['Unloaded (qtl)', 'U'], ['Shortage (qtl)', 'short'], ['Free 0.2% (qtl)', 'allowX'], ['Charged Shortage (qtl)', 'shortOver'], ['Rate incl GST', 'shortRate'], ['Shortage Deduction', 'shortDed']];
+    tabs.push(tab_('Shortage', shc, pick(A.trucks.filter(function (t) { return !t.cx && t.U && !t.fBuyer && (!key || normName_(t.transporter || '(none)') === normName_(key)); }))));
   } else if (kind === 'orders') { // a list of orders shown on screen (e.g. Closed & cancelled page): ids = the order ids
     tabs.push(tab_('Purchase Orders', oc, pick(orderRows(A.po, 'po'))));
     tabs.push(tab_('Sale Orders', oc, pick(orderRows(A.so, 'so'))));
