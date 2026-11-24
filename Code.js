@@ -1174,6 +1174,7 @@ function readAll_() {
   out.notes = sheet_(T.NOTE) ? rows_(T.NOTE).reverse() : [];
   if (can.money) out.pays = sheet_(T.PAY) ? rows_(T.PAY) : []; // customer payments (Receivables page)
   if (can.money) out.advances = sheet_(T.ADV) ? rows_(T.ADV) : []; // transporter advances (Freight & Transport)
+  else out.advNames = advNames_(); // names only (no amounts): transporters with an advance show in the truck forms' list
   if (can.bank) out.banks = sheet_(T.BANK) ? rows_(T.BANK) : [];
   if (can.users) out.users = userList_();
   return out;
@@ -1182,6 +1183,12 @@ function userList_() { return users_().map(function (u) { return { id: u.id, nam
 
 /* Role rules for what is sent to the screen. Staff without money access still need the correct stage,
    so it is worked out here before the amounts are removed. */
+/* Transporter names from APP_ADVANCES (no amounts), for roles without money. */
+function advNames_() {
+  var m = {};
+  (sheet_(T.ADV) ? rows_(T.ADV) : []).forEach(function (a) { var k = normName_(a.transporter); if (k) m[k] = 1; });
+  return Object.keys(m).sort();
+}
 function shape_(po, so, trucks, can) {
   if (can.money || !(po.length || so.length || trucks.length)) return;
   var S = readSettings_(), today = today_(), pm = {}, sm = {};
@@ -1206,6 +1213,7 @@ function changes_() {
   if (ch[T.NOTE]) out.notes = rows_(T.NOTE).reverse();
   if (ch[T.PAY] && can.money) out.pays = rows_(T.PAY);
   if (ch[T.ADV] && can.money) out.advances = rows_(T.ADV);
+  if (ch[T.ADV] && !can.money) out.advNames = advNames_();
   if (ch[T.BANK] && can.bank) out.banks = rows_(T.BANK);
   if (ch[T.US] && can.users) out.users = userList_();
   return out;

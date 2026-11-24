@@ -562,6 +562,7 @@ function applyResult(d) {
   if (d.notes) D.notes = d.notes;
   if (d.pays) D.pays = d.pays; // customer payments (Receivables)
   if (d.advances) D.advances = d.advances; // transporter advances
+  if (d.advNames) D.advNames = d.advNames; // transporter names with an advance (roles without money)
   if (d.banks) D.banks = d.banks;
   if (d.users) D.users = d.users;
   if (d.today) D.today = d.today;
@@ -1880,7 +1881,14 @@ function poOpts(cur, firm) { firm = firm || (FIRM !== 'all' ? FIRM : ''); return
 function soOpts(cur, firm) { firm = firm || (FIRM !== 'all' ? FIRM : ''); return D.so.filter(function (s) { return ((s.status !== 'Cancelled' && s.status !== 'Settled') && (!firm || firmOf(s) === firm)) || (!!cur && s.id === cur); }).map(function (o) { var s = orderStats('so', o); return [o.id, o.id + (multiFirm() ? ' · ' + shortFirm(firmOf(o)) : '') + ' · ' + o.buyer + (P.money ? ' · ' + inr(o.rate) + ' ' + terms(o) : '') + ' · bal ' + qt(s.bal) + (s.complete ? ' · complete' : '') + closedMark(o)]; }); }
 function firmOpts() { return visFirms().map(function (f) { return [f, f]; }); }
 function names(list, key) { var m = {}; list.forEach(function (x) { if (x[key]) m[normName(x[key])] = 1; }); return Object.keys(m).sort(); }
-function transporters() { return D ? names(D.trucks, 'transporter') : []; }
+/* Transporter names for the truck forms: from the trucks, and from transporter advances (a transporter can have an
+   advance before its first truck; Dispatch gets the names only, advNames). The same spelling = the advance is used. */
+function transporters() {
+  if (!D) return [];
+  var m = {};
+  names(D.trucks, 'transporter').concat(names(D.advances || [], 'transporter'), D.advNames || []).forEach(function (x) { var k = normName(x); if (k) m[k] = 1; });
+  return Object.keys(m).sort();
+}
 function getT(id) { return T.filter(function (t) { return t.id === id; })[0]; }
 /* Warnings before saving a truck. v = only the fields being saved; orig = the truck as it is now (blank for a new truck). */
 function truckWarn(id, orig) {
