@@ -29,7 +29,7 @@ Read this file fully before doing any work in this folder.
 - **Dispatch date** = date the truck left the plant (date out on the slip), not the placement date.
 - **Purchase** = dispatch weight × PO rate × (1 + GST).
 - **Sale** = received weight (or dispatch weight until received) × SO rate; SO says if GST is included and who pays freight. A per-truck invoice rate can override the SO rate.
-- **Shortage deduction** = (shortage − 0.2% of dispatch weight) × sale rate ex-GST, only if positive; own-plant trucks use the purchase rate.
+- **Shortage deduction** = (shortage − 0.2% of dispatch weight) × sale rate **incl. GST** (Nitish, 24-11-2026), only if positive; own-plant trucks use the purchase rate incl. GST. The sale rate is the SO rate as agreed: when the SO rate includes freight, freight is not taken out of it. No deduction when the customer pays the freight. The working is shown on every truck (truck page, Freight & Transport, Pay freight, Excel).
 - **Net freight = received weight × freight rate − freight advance − shortage deduction.**
 - **Detention is only a suggestion** (3 free days, then ₹500/day). It is never added unless someone types an amount when paying freight.
 - Extra freight advance on one trip carries forward to the same vehicle's next trip. On Freight & Transport (and the truck page and statements), the next trip's "Freight adv." shows it ("from earlier trip"), so every row reads freight − shortage − advance + detention = net payable. Statement totals count each advance once ("given").
