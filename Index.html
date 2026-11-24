@@ -1538,24 +1538,31 @@ function vDisputes() {
   var list = byTr.filter(fn).filter(matchQ).sort(function (a, b) { return String(b.unloadDate).localeCompare(String(a.unloadDate)) || b.id.localeCompare(a.id); });
   LASTIDS = list.map(function (t) { return t.id; });
   var pct = r2(n(D.settings.shortageAllowancePct) * 100), tot = function (k) { return r2(sum(list, function (t) { return n(t[k]); })); };
-  var h = '<div class="ph" style="margin-bottom:6px"><h1>Shortage disputes</h1><div class="sub">For a transporter who questions a deduction: loaded and unloaded weight of every truck, the free ' + pct + '% of the loaded weight, the shortage above it that was charged, the rate (sale rate incl. GST; own plant: purchase rate) and the deduction.</div></div>';
+  var h = '<div class="ph" style="margin-bottom:6px"><h1>Shortage disputes</h1><div class="sub">Per truck: loaded and unloaded weight, shortage (first ' + pct + '% of the loaded weight is free), the deduction (charged shortage × sale rate incl. GST; own plant: purchase rate), freight, advance and the net freight paid.</div></div>';
   h += '<div class="bar"><label class="inl">Transporter <select id="dp_tr"><option value="">All transporters</option>' + trs.map(function (x) { return '<option value="' + esc(x) + '"' + (x === DISP_TR ? ' selected' : '') + '>' + esc(x) + '</option>'; }).join('') + '</select></label>' +
     '<label class="inl">Unloaded <select id="dp_per">' + [['all', 'Any time'], ['month', 'This month'], ['last', 'Last month']].map(function (x) { return '<option value="' + x[0] + '"' + (x[0] === DISP_PER ? ' selected' : '') + '>' + x[1] + '</option>'; }).join('') + '</select></label>' +
     '<span class="sp"></span>' + (P.exportX ? '<button type="button" class="btn sm" data-act="exportDisputes">Download for the transporter</button>' : '') + '</div>';
   h += subChips('disputes', opts, byTr);
-  h += '<div class="kpis" style="margin-bottom:14px">' + kpi('Trucks', list.length, DISP_TR ? esc(DISP_TR) : 'all transporters') + kpi('Shortage', qt(tot('short')) + ' qtl', 'loaded ' + qt(tot('L')) + ' · unloaded ' + qt(tot('U'))) +
-    kpi('Free (' + pct + '%)', qt(r2(sum(list, function (t) { return Math.min(t.short, t.allow); }))) + ' qtl', 'not charged') + kpi('Charged', qt(tot('shortOver')) + ' qtl', '') + kpi('Deducted', inr(tot('shortDed')), 'from freight', 'warn') + '</div>';
+  var advT = function (t) { return r2(t.A + t.carryIn + (t.advUsed || 0)); };
+  var paidL = list.filter(function (t) { return t.freightPaid; }), paid = r2(sum(paidL, function (t) { return t.netPay; })), toPay = r2(sum(list, function (t) { return t.freightPaid ? 0 : t.netPay; }));
+  h += '<div class="kpis" style="margin-bottom:14px">' + kpi('Trucks', list.length, DISP_TR ? esc(DISP_TR) : 'all transporters') +
+    kpi('Shortage', qt(tot('short')) + ' qtl', 'free ' + qt(r2(sum(list, function (t) { return Math.min(t.short, t.allow); }))) + ' · charged ' + qt(tot('shortOver'))) +
+    kpi('Deducted', inr(tot('shortDed')), 'from freight', 'warn') + kpi('Freight', inr(tot('frAmt')), 'advance ' + inr(r2(sum(list, advT)))) +
+    kpi('Net freight', inr(r2(paid + toPay)), 'paid ' + inr(paid) + (toPay ? ' · to pay ' + inr(toPay) : '')) + '</div>';
   if (!list.length) return h + '<div class="panel empty">No trucks here.</div>';
-  var cols = '44px 120px 96px 1fr 1.3fr .75fr .75fr .7fr .6fr .7fr .85fr .85fr';
-  h += '<div class="tbl" style="--cols:' + cols + '"><div class="tr th"><div>S.No.</div><div>Dispatch</div><div>Unloaded on</div><div>Vehicle</div><div>Transporter</div><div class="r">Loaded</div><div class="r">Unloaded</div><div class="r">Shortage</div><div class="r">Free ' + pct + '%</div><div class="r">Charged</div><div class="r">Rate incl. GST</div><div class="r">Deduction</div></div>';
+  var cols = '40px 128px 1.25fr .7fr .7fr .75fr 1fr 1fr 1.1fr 1fr';
+  h += '<div class="tbl" style="--cols:' + cols + '"><div class="tr th"><div>S.No.</div><div>Dispatch</div><div>Vehicle / transporter</div><div class="r">Loaded</div><div class="r">Unloaded</div><div class="r">Shortage</div><div class="r">Deduction</div><div class="r">Freight</div><div class="r">Advance</div><div class="r">Net freight</div></div>';
   h += list.slice(0, LIMIT).map(function (t, i) {
     var c = function (l, v) { return '<div class="td r num" data-l="' + l + '">' + v + '</div>'; };
-    return '<div class="tr"><div class="td sn" data-l="S.No.">' + (i + 1) + '</div><div class="td">' + lnk('truck', t.id) + ' ' + firmTag(t.firm) + '<small>out ' + dmy(t.date) + '</small></div>' +
-      '<div class="td" data-l="Unloaded on">' + dmy(t.unloadDate) + '</div><div class="td" data-l="Vehicle"><b>' + esc(t.truck) + '</b></div>' +
-      '<div class="td wide" data-l="Transporter">' + (t.transporter ? lnk('transporter', t.transporter) : '—') + '</div>' +
-      c('Loaded', qt(t.L)) + c('Unloaded', qt(t.U)) + c('Shortage', t.short > 0 ? qt(t.short) : '—') + c('Free ' + pct + '%', qt(t.allow)) +
-      c('Charged', t.shortOver > 0 ? '<b>' + qt(t.shortOver) + '</b>' : '—') + c('Rate incl. GST', t.shortOver > 0 ? rs2(t.shortRate) : '—') +
-      c('Deduction', t.shortDed ? '<b>' + inr(t.shortDed) + '</b>' : '—') + '</div>';
+    var sm = function (x) { return '<small>' + x + '</small>'; }, adv = advT(t);
+    return '<div class="tr"><div class="td sn" data-l="S.No.">' + (i + 1) + '</div><div class="td">' + lnk('truck', t.id) + ' ' + firmTag(t.firm) + sm('out ' + dmy(t.date) + '<br>unl. ' + dmy(t.unloadDate)) + '</div>' +
+      '<div class="td wide" data-l="Vehicle"><b>' + esc(t.truck) + '</b>' + sm(t.transporter ? lnk('transporter', t.transporter) : 'no transporter') + '</div>' +
+      c('Loaded', qt(t.L)) + c('Unloaded', qt(t.U)) +
+      c('Shortage', t.short > 0 ? qt(t.short) + sm('free ' + qt(t.allow)) : '—') +
+      c('Deduction', t.shortDed ? '<b>' + inr(t.shortDed) + '</b>' + sm(qt(t.shortOver) + ' × ' + rs2(t.shortRate)) : '—') +
+      c('Freight', inr(t.frAmt) + sm(qt(t.U) + ' × ' + rs2(t.FR))) +
+      c('Advance', adv ? advCell(t) : '—') +
+      c('Net freight', '<b>' + inr(t.netPay) + '</b>' + (t.det ? sm('incl. ' + inr(t.det) + ' detention') : '') + sm(t.freightPaid ? '<span class="ok">✓ paid ' + dmy(t.freightPaidDate) + '</span>' : 'to pay')) + '</div>';
   }).join('') + '</div>' + more(list);
   return h;
 }

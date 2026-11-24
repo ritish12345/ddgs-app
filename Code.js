@@ -1796,8 +1796,10 @@ function exportTabs_(kind, key, ids, can, firm) {
   } else if (kind === 'shortage') { // Disputes tab: loaded / unloaded weight and how each shortage deduction was worked out. key = transporter (or blank)
     if (!can.money) throw new Error('Your role cannot download money figures.');
     var shc = [['Dispatch No.', 'id'], ['Firm', 'firm'], ['Date Out', 'date'], ['Unload Date', 'unloadDate'], ['Vehicle No', 'truck'], ['Transporter', 'transporter'], ['Customer', 'buyer'],
-      ['Loaded (qtl)', 'L'], ['Unloaded (qtl)', 'U'], ['Shortage (qtl)', 'short'], ['Free 0.2% (qtl)', 'allowX'], ['Charged Shortage (qtl)', 'shortOver'], ['Rate incl GST', 'shortRate'], ['Shortage Deduction', 'shortDed']];
-    tabs.push(tab_('Shortage', shc, pick(A.trucks.filter(function (t) { return !t.cx && t.U && !t.fBuyer && (!key || normName_(t.transporter || '(none)') === normName_(key)); }))));
+      ['Loaded (qtl)', 'L'], ['Unloaded (qtl)', 'U'], ['Shortage (qtl)', 'short'], ['Free 0.2% (qtl)', 'allowX'], ['Charged Shortage (qtl)', 'shortOver'], ['Rate incl GST', 'shortRate'], ['Shortage Deduction', 'shortDed'],
+      ['Freight Rate', 'FR'], ['Freight', 'frAmt'], ['Freight Advance', 'advTot'], ['Detention', 'det'], ['Net Freight', 'netPay'], ['Freight Paid', 'freightPaid'], ['Freight Paid Date', 'freightPaidDate']];
+    var shl = pick(A.trucks.filter(function (t) { return !t.cx && t.U && !t.fBuyer && (!key || normName_(t.transporter || '(none)') === normName_(key)); }));
+    tabs.push(tab_('Shortage', shc, shl.map(function (t) { var o = {}; for (var k in t) o[k] = t[k]; o.advTot = Math.round(((t.A || 0) + (t.carryIn || 0) + (t.advUsed || 0)) * 100) / 100; return o; })));
   } else if (kind === 'orders') { // a list of orders shown on screen (e.g. Closed & cancelled page): ids = the order ids
     tabs.push(tab_('Purchase Orders', oc, pick(orderRows(A.po, 'po'))));
     tabs.push(tab_('Sale Orders', oc, pick(orderRows(A.so, 'so'))));

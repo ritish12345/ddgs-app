@@ -45,7 +45,8 @@ const openApp = (s, token) => B.openApp(s, token, null, msg => { console.log('  
   const r = rows();
   const c = l => cell(r[0], l);
   ok(r.length === 1 && /HR63B5735/.test(r[0].textContent), 'only KANG TRANSPORT\'s truck');
-  ok(c('Loaded') === '284.00' && c('Unloaded') === '283.00' && c('Shortage') === '1.00' && c('Free 0.2%') === '0.57' && c('Charged') === '0.43' && c('Rate incl. GST') === '₹2,770' && c('Deduction') === '₹1,197', 'loaded 284.00 · unloaded 283.00 · shortage 1.00 · free 0.57 · charged 0.43 · rate ₹2,770 · deduction ₹1,197');
+  ok(c('Loaded') === '284.00' && c('Unloaded') === '283.00' && c('Shortage') === '1.00free 0.57' && c('Deduction') === '₹1,1970.43 × ₹2,770', 'loaded 284.00 · unloaded 283.00 · shortage 1.00 (free 0.57) · deduction ₹1,197 (0.43 × ₹2,770)');
+  ok(c('Freight') === '₹24,055283.00 × ₹85' && c('Advance') === '—' && c('Net freight') === '₹22,858to pay', 'freight ₹24,055 (283 × ₹85) · no advance · net freight ₹22,858 to pay (24,055 − 1,197)');
   ok(/Deducted₹1,197/.test(K.$('#view .kpis').textContent.replace(/\s+/g, '')), 'total deducted ₹1,197');
   ok(K.win.rs2(1942.5) === '₹1,942.50' && K.win.rs2(2770) === '₹2,770', 'rate shows paise as 2 digits (₹1,942.50), whole rupees without');
   K.$('#view [data-sf="all"]').click();
@@ -61,6 +62,14 @@ const openApp = (s, token) => B.openApp(s, token, null, msg => { console.log('  
   const h = xl.rows[0], v = xl.rows[1];
   ok(xl.name === 'Shortage' && xl.rows.length === 2 && v[h.indexOf('Loaded (qtl)')] === 284 && v[h.indexOf('Unloaded (qtl)')] === 283 && v[h.indexOf('Free 0.2% (qtl)')] === 0.568 &&
     v[h.indexOf('Charged Shortage (qtl)')] === 0.43 && v[h.indexOf('Rate incl GST')] === 2770 && v[h.indexOf('Shortage Deduction')] === 1196.64, 'Shortage sheet: loaded, unloaded, free 0.568, charged 0.43, rate 2,770, deduction 1,196.64');
+  ok(v[h.indexOf('Freight Rate')] === 85 && v[h.indexOf('Freight')] === 24055 && v[h.indexOf('Freight Advance')] === 0 && v[h.indexOf('Net Freight')] === 22858.36 && v[h.indexOf('Freight Paid')] === 'No', 'and freight 24,055, advance 0, net freight 22,858.36, paid No');
+  s.run('api_payBatch', acc, 'freight', [id], s.run('today_'), '', 0);
+  const K2 = openApp(s, acc);
+  ok(await idle(K2), 'after paying the freight');
+  K2.win.go('disputes'); K2.win.DISP_TR = 'KANG TRANSPORT'; K2.win.render();
+  const r2 = K2.$$('#view .tbl .tr:not(.th)')[0];
+  ok(/₹22,858✓ paid \d\d-\d\d-\d{4}/.test(r2.querySelector('[data-l="Net freight"]').textContent) && /paid₹22,858/.test(K2.$('#view .kpis').textContent.replace(/\s+/g, '')), 'net freight shows ✓ paid with the date; Net freight box: paid ₹22,858');
+  K2.win.close();
   let e = ''; try { s.run('exportTabs_', 'shortage', '', null, { money: false }, ''); } catch (x) { e = x.message; }
   ok(/cannot download money/.test(e), 'not for roles without money');
 
