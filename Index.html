@@ -923,7 +923,8 @@ function mainTabs() {
   var tabs = [['home', 'Overview'], ['pos', 'Purchase Orders', D.po.filter(inFirm).filter(isOpen).length], ['sos', 'Sale Orders', D.so.filter(inFirm).filter(isOpen).length], ['dispatch', 'Dispatch Register', working]];
   if (P.money) tabs.push(['settle', 'Sales', live().filter(function (t) { return t.so && !t.plantPO && t.U && t.st !== 6; }).length],
     ['receivables', 'Receivables', accList().filter(function (a) { return a.outstanding > 0.5; }).length],
-    ['freight', 'Freight & Transport', live().filter(function (t) { return t.L && !t.fBuyer; }).length]);
+    ['freight', 'Freight & Transport', live().filter(function (t) { return t.L && !t.fBuyer; }).length],
+    ['advances', 'Advances', Object.keys(TADV).filter(function (k) { return fIn(TADV[k].firm) && TADV[k].left > 0.5; }).length]);
   tabs.push(['closed', 'Closed & cancelled']);
   if (P.review) tabs.push(['activity', 'Activity']);
   tabs.push(['more', 'More']);
@@ -938,7 +939,7 @@ function back() { ROUTE = HIST.pop() || { v: 'home' }; render(); window.scrollTo
 
 function render() {
   if (!D) return;
-  if (!P.money && (ROUTE.v === 'settle' || ROUTE.v === 'freight')) ROUTE = { v: 'home' };
+  if (!P.money && (ROUTE.v === 'settle' || ROUTE.v === 'freight' || ROUTE.v === 'advances')) ROUTE = { v: 'home' };
   if (!P.review && ROUTE.v === 'activity') ROUTE = { v: 'home' };
   var tab = { po: 'pos', so: 'sos', buyer: 'sos', plant: 'pos', transporter: P.money ? 'freight' : 'dispatch', truck: 'dispatch', users: 'more' }[ROUTE.v] || ROUTE.v;
   $('#nav').innerHTML = mainTabs().map(function (v) { return '<button type="button" class="' + (tab === v[0] ? 'on' : '') + '" data-tab="' + v[0] + '">' + v[1] + (v[2] != null ? ' <span class="cnt">' + v[2] + '</span>' : '') + '</button>'; }).join('');
@@ -952,7 +953,7 @@ function render() {
     else if (r.left < left) nv.scrollLeft -= left - r.left + 12;
   }
   $('#fab').hidden = !(P.trucks && ROUTE.v === 'dispatch');
-  var f = { home: vHome, pos: function () { return orderTable('po'); }, sos: function () { return orderTable('so'); }, dispatch: vDispatch, settle: vSettle, receivables: vReceivables, freight: vFreight, closed: vClosed,
+  var f = { home: vHome, pos: function () { return orderTable('po'); }, sos: function () { return orderTable('so'); }, dispatch: vDispatch, settle: vSettle, receivables: vReceivables, freight: vFreight, advances: vAdvances, closed: vClosed,
     more: vMore, activity: vActivity, users: P.users ? vUsers : vMore, notes: vNotes, po: function () { return vOrder('po', ROUTE.id); }, so: function () { return vOrder('so', ROUTE.id); },
     buyer: function () { return vParty('buyer', ROUTE.id); }, plant: function () { return vParty('plant', ROUTE.id); }, transporter: function () { return vParty('transporter', ROUTE.id); }, truck: function () { return vTruck(ROUTE.id); } }[ROUTE.v] || vHome;
   if (FIRM !== 'all' && visFirms().indexOf(FIRM) < 0) FIRM = 'all'; // the remembered firm is no longer shown
@@ -1057,7 +1058,7 @@ function vDispatch() {
   var base = T.filter(tInFirm);
   var list = base.filter(filterFn(FILTER)).filter(matchQ).sort(sortT);
   LASTIDS = list.map(function (t) { return t.id; });
-  var h = '<div class="bar">' + searchBox() + (P.truckMoney ? '<button type="button" class="btn" data-act="payPlantBatch">Pay supplier (several trucks)</button>' : '') + (P.trucks ? '<button type="button" class="btn pri hide-phone" data-act="newTruck">+ New truck</button>' : '') + '</div>';
+  var h = '<div class="bar">' + searchBox() + (P.truckMoney ? '<button type="button" class="btn" data-act="payPlantBatch">Pay supplier (several trucks)</button><button type="button" class="btn" data-act="tAdv" data-id="' + (FIRM !== 'all' ? esc(FIRM + '|') : '') + '">+ Transporter advance</button>' : '') + (P.trucks ? '<button type="button" class="btn pri hide-phone" data-act="newTruck">+ New truck</button>' : '') + '</div>';
   h += '<div class="chips">' + avail.map(function (f) { var c = base.filter(filterFn(f[0])).length; if (!c && f[0] !== 'todo' && f[0] !== 'all' && f[0] !== FILTER) return ''; return '<button type="button" class="chip ' + (FILTER === f[0] ? 'on' : '') + '" data-filter="' + f[0] + '">' + f[1] + ' <b>' + c + '</b></button>'; }).join('') + '</div>';
   h += '<div class="bar"><span class="mu">' + trk(list.length) + '</span><span class="sp"></span>' + (P.exportX ? '<button type="button" class="btn sm" data-act="exportList">Download this list</button>' : '') + '</div>';
   if (isPhone()) return h + truckList(list);
@@ -1441,8 +1442,18 @@ function actTAdv(id) {
       { k: 'ref', label: 'UTR / bank reference (optional)', full: 1 }, { k: 'note', label: 'Note', type: 'textarea', full: 1 }
     ]),
     check: function (v) { return n(v.amount) > 0 ? null : 'Enter the amount of the advance.'; },
-    warn: function (v) { return v.transporter && transporters().indexOf(normName(v.transporter)) < 0 ? 'New transporter name "' + normName(v.transporter) + '". Check the spelling matches the one on the trucks, or the advance will not be used on them.' : null; },
+    warn: function (v) { return v.transporter && transporters().indexOf(normName(v.transporter)) < 0 && !TADV[(v.firm || firm) + '|' + normName(v.transporter)] ? 'New transporter name "' + normName(v.transporter) + '". Check the spelling matches the one on the trucks, or the advance will not be used on them.' : null; },
     custom: function (v) { if (!v.firm) v.firm = firm; return callSafe('api_addAdvance', v, newRid()); } });
+  // "Left now ₹20,000 → after saving ₹30,000", updated while typing
+  var box = document.createElement('div'); box.className = 'hint'; box.id = 'advAfter'; box.style.margin = '0 18px';
+  $('#mform .fg').insertAdjacentElement('afterend', box);
+  var show = function () {
+    var f = $('#f_firm') ? $('#f_firm').value : firm, k = normName($('#f_transporter').value), cur = TADV[f + '|' + k], left = cur ? cur.left : 0, amt = n($('#f_amount').value);
+    box.textContent = k ? k + (multiFirm() ? ' · ' + shortFirm(f) : '') + ': left now ' + inr(left) + (amt > 0 ? ' → after saving ' + inr(left + amt) : '') : '';
+  };
+  // on this form's own boxes (they are replaced when another form opens)
+  ['f_amount', 'f_transporter', 'f_firm'].forEach(function (x) { var el = document.getElementById(x); if (el) { el.addEventListener('input', show); el.addEventListener('change', show); } });
+  show();
 }
 /* A wrong advance is reversed (a minus line), never deleted. */
 function actReverseAdv(id) {
@@ -1464,6 +1475,37 @@ function advList(key) {
       (!gone && !rev && P.truckMoney ? '<button type="button" class="btn sm ghost" data-act="reverseAdv" data-id="' + esc(a.id) + '">Reverse</button>' : '') + '</div>';
   }).join('') + '</div>';
 }
+/* ---------- Advances: money given to transporters that is not on a truck (e.g. before loading) ----------
+   Each advance is its own line (ADV-xxxx); adding more = a new line. Used automatically on that firm's unloaded, unpaid
+   trucks of the transporter, oldest first (transAdv). Left = given − used. */
+function vAdvances() {
+  var q = QS.replace(/\s+/g, '');
+  var rows = Object.keys(TADV).map(function (k) { return TADV[k]; }).filter(function (a) { return fIn(a.firm) && (!q || (a.name + a.firm).toLowerCase().replace(/\s+/g, '').indexOf(q) >= 0); })
+    .sort(function (x, y) { return y.left - x.left || x.name.localeCompare(y.name) || x.firm.localeCompare(y.firm); });
+  var lines = (D.advances || []).filter(function (a) { return fIn(payFirm(a)) && (!q || [a.transporter, a.id, a.vehicle, a.driver, a.ref, a.note, payFirm(a)].join('|').toLowerCase().replace(/\s+/g, '').indexOf(q) >= 0); });
+  var last = {}, reversed = {};
+  (D.advances || []).forEach(function (a) { var k = payFirm(a) + '|' + normName(a.transporter); if (n(a.amount) > 0 && String(a.date) > (last[k] || '')) last[k] = String(a.date); var m = /^Reversal of (ADV-\d+):/.exec(String(a.note || '')); if (m) reversed[m[1]] = 1; });
+  var h = '<div class="ph" style="margin-bottom:6px"><h1>Transporter advances</h1><div class="sub">Money given to a transporter or driver before loading. It is taken off that transporter\u2019s freight (same firm) automatically, oldest trip first. To add more, tap + Add advance: each advance is kept as its own line.</div></div>';
+  h += '<div class="kpis" style="margin-bottom:14px">' + kpi('Given', inr(sum(rows, function (a) { return a.given; })), rows.length + (rows.length === 1 ? ' transporter' : ' transporters')) +
+    kpi('Used on freight', inr(sum(rows, function (a) { return a.used; })), 'taken off their trucks') + kpi('Left', inr(sum(rows, function (a) { return Math.max(0, a.left); })), 'still to be used', 'good') + '</div>';
+  h += '<div class="bar">' + searchBox() + (P.truckMoney ? '<button type="button" class="btn pri" data-act="tAdv" data-id="' + (FIRM !== 'all' ? esc(FIRM + '|') : '') + '">+ Advance</button>' : '') + (P.exportX ? '<button type="button" class="btn sm" data-act="exportFull">Download</button>' : '') + '</div>';
+  if (!rows.length && !lines.length) return h + '<div class="panel empty">' + (q ? 'Nothing matches the search.' : 'No advances to transporters yet.' + (P.truckMoney ? ' Use + Advance for money given before loading.' : '')) + '</div>';
+  if (rows.length) h += '<div class="tbl" style="--cols:44px 1.7fr 1fr 1fr 1fr 1fr 150px"><div class="tr th"><div>S.No.</div><div>Transporter</div><div class="r">Given</div><div class="r">Used on freight</div><div class="r">Left</div><div>Last advance</div><div></div></div>' +
+    rows.map(function (a, i) {
+      return '<div class="tr"><div class="td sn" data-l="S.No.">' + (i + 1) + '</div><div class="td wide" data-l="Transporter">' + lnk('transporter', a.name) + ' ' + firmTag(a.firm) + '</div>' +
+        '<div class="td r num" data-l="Given">' + inr(a.given) + '</div><div class="td r num" data-l="Used on freight">' + inr(a.used) + '</div>' +
+        '<div class="td r num" data-l="Left"><b class="' + (a.left < -0.5 ? 'over' : '') + '">' + inr(a.left) + '</b></div>' +
+        '<div class="td" data-l="Last advance">' + (last[a.key] ? dmy(last[a.key]) : '—') + '</div>' +
+        '<div class="td acts">' + (P.truckMoney ? '<button type="button" class="nx money" data-act="tAdv" data-id="' + esc(a.key) + '">+ Add advance</button>' : '') + '</div></div>';
+    }).join('') + '</div>';
+  h += '<h2>All advances (' + lines.length + ')</h2>' + (lines.length ? '<div class="list">' + lines.slice().reverse().slice(0, LIMIT).map(function (a, i) {
+    var rev = n(a.amount) < 0, gone = reversed[a.id];
+    return '<div class="row" style="' + (gone || rev ? 'opacity:.6' : '') + '"><div class="m"><span class="sn">' + (i + 1) + '.</span> <b>' + inr(n(a.amount)) + '</b> ' + lnk('transporter', normName(a.transporter)) + ' ' + firmTag(payFirm(a)) +
+      ' <span class="mu">· ' + dmy(a.date) + ' · ' + esc(a.id) + (a.vehicle ? ' · ' + esc(a.vehicle) : '') + (a.driver ? ' · ' + esc(a.driver) : '') + (a.ref ? ' · Ref ' + esc(a.ref) : '') + (a.note ? ' · ' + esc(a.note) : '') + ' · ' + esc(a.by) + '</span>' + (gone ? ' <span class="tag">Reversed</span>' : '') + '</div>' +
+      (!gone && !rev && P.truckMoney ? '<button type="button" class="btn sm ghost" data-act="reverseAdv" data-id="' + esc(a.id) + '">Reverse</button>' : '') + '</div>';
+  }).join('') + '</div>' + (lines.length > LIMIT ? '<button type="button" class="btn showmore" data-act="showmore">Show more (' + (lines.length - LIMIT) + ' left)</button>' : '') : '<div class="panel empty">None.</div>');
+  return h;
+}
 function vFreight() {
   // Transporter totals use all loaded trucks; the list shows only open ones (closed / cancelled are on the "Closed & cancelled" page).
   var all = T.filter(function (t) { return t.L && tInFirm(t); }), lv = all.filter(function (t) { return !t.cx && !t.fBuyer; }), base = all.filter(function (t) { return !t.cx && t.st !== 6; });
@@ -1482,16 +1524,18 @@ function vFreight() {
     var ta = advSum(k);
     return kpi(lnk('transporter', k), inr(by[k].due), trk(by[k].n) + ' · advance ' + inr(by[k].adv) + (ta ? ' · transporter advance left ' + inr(ta.left) : ''), by[k].due < 0 ? 'bad' : '');
   }).join('') || '<div class="panel empty">No loaded trucks.</div>') + '</div>';
-  // Advances given to transporters (not tied to a truck): given, used on their freight, left
-  var tk = Object.keys(TADV).filter(function (k) { return fIn(TADV[k].firm); }).sort(function (x, y) { return TADV[x].name.localeCompare(TADV[y].name) || x.localeCompare(y); });
-  h += '<h2>Transporter advances</h2>' + (tk.length ? '<div class="tbl" style="--cols:44px 1.6fr 1fr 1fr 1fr 130px"><div class="tr th"><div>S.No.</div><div>Transporter</div><div class="r">Given</div><div class="r">Used on freight</div><div class="r">Left</div><div></div></div>' +
+  // Advances given to transporters (not tied to a truck) have their own tab; here only what is left
+  var al = Object.keys(TADV).map(function (k) { return TADV[k]; }).filter(function (a) { return fIn(a.firm); });
+  h += '<div class="note" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><span>Transporter advances left <b>' + inr(sum(al, function (a) { return Math.max(0, a.left); })) + '</b> · ' + al.filter(function (a) { return a.left > 0.5; }).length + ' transporters</span><span class="sp" style="flex:1"></span><button type="button" class="btn sm" data-tab="advances">Advances →</button></div>';
+  var tk = [];
+  h += (tk.length ? '<div class="tbl" style="--cols:44px 1.6fr 1fr 1fr 1fr 130px"><div class="tr th"><div>S.No.</div><div>Transporter</div><div class="r">Given</div><div class="r">Used on freight</div><div class="r">Left</div><div></div></div>' +
     tk.map(function (k, i) {
       var a = TADV[k];
       return '<div class="tr"><div class="td sn" data-l="S.No.">' + (i + 1) + '</div><div class="td wide" data-l="Transporter">' + lnk('transporter', a.name) + ' ' + firmTag(a.firm) + '</div>' +
         '<div class="td r num" data-l="Given">' + inr(a.given) + '</div><div class="td r num" data-l="Used on freight">' + inr(a.used) + '</div>' +
         '<div class="td r num" data-l="Left"><b class="' + (a.left < -0.5 ? 'over' : '') + '">' + inr(a.left) + '</b></div>' +
         '<div class="td acts">' + (P.truckMoney ? '<button type="button" class="nx money" data-act="tAdv" data-id="' + esc(k) + '">+ Advance</button>' : '') + '</div></div>';
-    }).join('') + '</div>' : '<div class="panel empty" style="margin-bottom:14px">No advances to transporters yet.' + (P.truckMoney ? ' Use "+ Transporter advance" for money given before loading.' : '') + '</div>');
+    }).join('') + '</div>' : '');
   h += '<div class="bar" style="margin-top:14px">' + searchBox() + (P.truckMoney ? '<button type="button" class="btn" data-act="tAdv" data-id="' + (FIRM !== 'all' ? esc(FIRM + '|') : '') + '">+ Transporter advance</button><button type="button" class="btn" data-act="payFreightBatch">Pay freight (several trucks)</button>' : '') + (P.exportX ? '<button type="button" class="btn sm" data-act="exportList">Download this list</button>' : '') + '</div>' + subChips('freight', opts, base);
   if (!list.length) return h + '<div class="panel empty">No trucks here.</div>';
   var cols = '44px 112px 1fr 1fr .75fr .75fr .6fr .85fr .8fr .8fr .85fr .95fr 112px 40px';
@@ -1823,9 +1867,28 @@ function actUnload(id) {
 }
 function actUnpaid(id) { var t = getT(id); openForm({ title: 'Undo supplier payment?', sub: esc(t.truck + ' · ' + t.id + ' · ' + inr(t.purTot)), fn: 'api_saveTruck', danger: 1, submit: 'Mark unpaid', done: 'Marked unpaid', fields: [], build: function () { return { id: id, plantPaid: false, plantPaidDate: '' }; } }); }
 function actFUnpaid(id) { var t = getT(id); openForm({ title: 'Undo freight payment?', sub: esc(t.truck + ' · ' + t.id), fn: 'api_saveTruck', danger: 1, submit: 'Mark unpaid', done: 'Marked unpaid', fields: [], build: function () { return { id: id, freightPaid: false, freightPaidDate: '' }; } }); }
+/* Freight advance on one truck (its driver): type what is given now; it is added to what was given before (24-11-2026).
+   The truck keeps one total (advance), as before. The Owner can also correct the total. */
 function actAdvance(id) {
-  var t = getT(id);
-  quick(id, 'Freight advance', esc(t.truck + ' · ' + t.id), [{ k: 'advance', label: 'Total freight advance paid (₹)', type: 'number', req: 1, help: 'The total for this truck, not just today’s amount.' }, { k: 'transporter', label: 'Transporter', list: transporters() }], 'Freight advance saved', null, truckWarn(id, t));
+  var t = getT(id), before = n(t.advance), owner = D.me.role === 'Owner';
+  var fields = [{ k: 'addNow', label: 'Advance given now (₹)', type: 'number', help: 'Added to the ' + inr(before) + ' given before.' }, { k: 'transporter', label: 'Transporter', list: transporters() }];
+  if (owner) fields.push({ sec: 'Owner: correct the total' }, { k: 'total', label: 'Total advance for this truck (₹)', type: 'number', help: 'Only to correct a mistake. Leave as it is otherwise.' });
+  openForm({ title: 'Freight advance', sub: esc(t.truck + ' · ' + t.id) + '<br>Given so far <b>' + inr(before) + '</b><div class="hint" id="advTot"></div>', fn: 'api_saveTruck', done: 'Freight advance saved',
+    values: { transporter: t.transporter, total: before || '' }, fields: fields, warn: truckWarn(id, t),
+    check: function (v) {
+      if (n(v.addNow) < 0) return 'Enter the amount given now (0 or more).';
+      var tot = owner && v.total !== '' && n(v.total) !== before ? n(v.total) : before + n(v.addNow);
+      if (tot === before && normName(v.transporter) === normName(t.transporter)) return 'Enter the advance given now.';
+      return null;
+    },
+    build: function (v) {
+      var out = { id: id }, tot = owner && v.total !== '' && n(v.total) !== before ? n(v.total) : r2(before + n(v.addNow));
+      if (tot !== before) out.advance = String(tot);
+      if (normName(v.transporter) !== normName(t.transporter)) out.transporter = v.transporter;
+      return out;
+    } });
+  var show = function () { var a = n($('#f_addNow').value); $('#advTot').textContent = a > 0 ? 'New total ' + inr(before + a) : ''; };
+  $('#f_addNow').addEventListener('input', show);
 }
 function actFPaid(id) {
   var t = getT(id);
@@ -2268,7 +2331,7 @@ window.addEventListener('beforeunload', function (e) { if (Q.length) { e.prevent
 (function boot() {
   var init = window.INIT || {};
   if (init.view && ['po', 'so', 'buyer', 'plant', 'transporter', 'truck'].indexOf(init.view) >= 0) { ROUTE = { v: init.view, id: init.id }; HIST = [{ v: 'home' }]; }
-  else if (init.view && ['pos', 'sos', 'dispatch', 'settle', 'receivables', 'freight', 'closed'].indexOf(init.view) >= 0) ROUTE = { v: init.view };
+  else if (init.view && ['pos', 'sos', 'dispatch', 'settle', 'receivables', 'freight', 'advances', 'closed'].indexOf(init.view) >= 0) ROUTE = { v: init.view };
   TOKEN = getTok();
   try { FIRM = localStorage.getItem('ddgs_firm') || 'all'; } catch (x) {} // the firm window chosen last time on this phone
   loadQ(); // saves that were still waiting when the app was last closed

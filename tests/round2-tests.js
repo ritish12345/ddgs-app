@@ -206,7 +206,7 @@ const lastId = (s, truck) => s.store.sheet('APP_TRUCKS').dump().slice(1).filter(
   s.run('api_saveTruck', own, { id: 'DISP-0005', note: 'owner checked the bill' });
   A.br.calls.length = 0;
   A.win.runAct('advance', 'DISP-0004'); // an open truck (DISP-0001 is now Closed: only the Owner may change it)
-  fill(A, { advance: '12000' });
+  fill(A, { addNow: '12000' }); // the truck had no advance: given now = the total
   submit(A);
   ok(await idle(A), 'saved');
   ok(A.win.getT('DISP-0005').note === 'owner checked the bill' && A.br.calls.join(',') === 'api_saveTruck,api_sync', 'the owner\'s note is already on this screen (' + A.br.calls.join(',') + '), no waiting' +

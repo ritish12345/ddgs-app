@@ -132,7 +132,7 @@ const openApp = (s, token, storage) => B.openApp(s, token, storage, msg => { con
   console.log('Closing the app while a save is waiting (no internet)');
   B.br.net = () => 'offline';
   B.win.runAct('advance', 'DISP-0004');
-  fill(B, { advance: '2500' });
+  fill(B, { addNow: '2500' }); // given now (the truck had none)
   submit(B);
   await sleep(200);
   ok(B.win.Q.length === 1, 'save waiting');
