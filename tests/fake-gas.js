@@ -112,7 +112,8 @@ function makeStore(opts) {
 
 function blob(bytes, type, name) {
   let nm = name || 'blob';
-  return { getBytes: () => bytes, getName: () => nm, setName(n) { nm = n; return this; }, getContentType: () => type };
+  return { getBytes: () => bytes, getName: () => nm, setName(n) { nm = n; return this; }, getContentType: () => type, getDataAsString: () => String(bytes),
+    getAs(t) { const b = blob(bytes, t, nm); b.converted = true; return b; } }; // getAs: the fake keeps the source (e.g. the report HTML) as the bytes
 }
 
 function folder(store, name) {

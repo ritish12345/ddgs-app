@@ -1860,6 +1860,115 @@ function api_export(token, kind, key, ids, firm) {
   return { name: blob.getName(), url: file.getUrl(), b64: Utilities.base64Encode(blob.getBytes()) };
 }
 
+/* ---------------- Dispatch report (PDF) ----------------
+   For a from–to range: every open PO and SO (and any order with trucks in the range) with its balance, the trucks
+   dispatched (date out) and the trucks unloaded, day by day. Rates and amounts only for money roles (Dispatch: weights only). */
+function api_reportPdf(token, from, to, firm) {
+  auth_(token);
+  var re = /^\d{4}-\d{2}-\d{2}$/;
+  if (!re.test(String(from || '')) || !re.test(String(to || ''))) throw new Error('Choose the from and to dates.');
+  if (from > to) throw new Error('The from date is after the to date.');
+  var day = function (s) { var p = s.split('-'); return Date.UTC(+p[0], +p[1] - 1, +p[2]) / 864e5; };
+  if (day(to) - day(from) > 366) throw new Error('Choose at most one year.');
+  var A = deriveAll_(), f = firm ? normName_(firm) : '';
+  if (f && (firms_(A.S).indexOf(f) < 0 || hiddenFirms_(A.S).indexOf(f) >= 0)) throw new Error('Unknown firm: ' + f);
+  var name = 'DDGS Dispatch report ' + (f ? shortFirm_(f) + ' ' : '') + dmy_(from) + (to !== from ? ' to ' + dmy_(to) : '');
+  var html = reportHtml_(A, from, to, f, !!(ME.can && ME.can.money), ME.name || ME.id);
+  var pdf = Utilities.newBlob(html, 'text/html', name + '.html').getAs('application/pdf').setName(name + '.pdf');
+  var file = folder_('DDGS Exports').createFile(pdf);
+  log_('Report PDF', f || 'All firms', dmy_(from) + ' to ' + dmy_(to));
+  return { name: pdf.getName(), url: file.getUrl(), b64: Utilities.base64Encode(pdf.getBytes()) };
+}
+function shortFirm_(f) {
+  var w = normName_(f).split(' '), keep = [];
+  for (var i = 0; i < w.length; i++) { if (i > 0 && /^(SOLVEX|TRADING|TRADERS|AND|&|COMPANY|CO\.?|PVT|LTD|PRIVATE|LIMITED)$/.test(w[i])) break; keep.push(w[i]); }
+  return keep.map(function (x) { return x.charAt(0) + x.slice(1).toLowerCase(); }).join(' ');
+}
+function reportHtml_(A, from, to, f, money, who) {
+  var S = A.S, all = !f && firms_(S).filter(function (x) { return hiddenFirms_(S).indexOf(x) < 0; }).length > 1;
+  var esc = function (s) { return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); };
+  var q = function (x) { return qtl_(Number(x) || 0); }, rs = function (x) { return money_(Number(x) || 0); };
+  var nw = function (x) { return '<span class="nw">' + x + '</span>'; }, dt = function (d) { return nw(dmy_(d)); }, tk = function (k) { return k + (k === 1 ? ' truck' : ' trucks'); };
+  var sum = function (a, fn) { return Math.round(a.reduce(function (s, t) { return s + (Number(fn(t)) || 0); }, 0) * 100) / 100; };
+  var byId = function (a, b) { return String(a).localeCompare(String(b), 'en', { numeric: true }); };
+  var inR = function (d) { return !!d && d >= from && d <= to; };
+  var live = A.trucks.filter(function (t) { return !t.cx && (!f || t.firm === f); });
+  var disp = live.filter(function (t) { return t.L && inR(t.date); }).sort(function (a, b) { return byId(a.date, b.date) || byId(a.id, b.id); });
+  var unl = live.filter(function (t) { return t.U && inR(t.unloadDate); }).sort(function (a, b) { return byId(a.unloadDate, b.unloadDate) || byId(a.id, b.id); });
+  var fs = function (x) { return all ? '<br><span class="mu">' + esc(shortFirm_(x)) + '</span>' : ''; };
+  var dest = function (t) { return t.plantPO ? 'Own plant' : t.buyer ? esc(t.buyer) + (t.so ? '<br><span class="mu">' + esc(t.so) + '</span>' : '') : '<span class="mu">not assigned</span>'; };
+  // a table: cols = [[heading, right-aligned?]], rows = arrays of cell html, tot = totals row (or null)
+  var table = function (cols, rows, tot) {
+    if (!rows.length) return '<p class="mu">None.</p>';
+    var cell = function (tag, c, i) { return '<' + tag + (cols[i][1] ? ' class="r"' : '') + '>' + c + '</' + tag + '>'; };
+    return '<table><thead><tr>' + cols.map(function (c, i) { return cell('th', c[0], i); }).join('') + '</tr></thead><tbody>' +
+      rows.map(function (r) { return '<tr>' + r.map(function (c, i) { return cell('td', c, i); }).join('') + '</tr>'; }).join('') +
+      (tot ? '<tr class="tot">' + tot.map(function (c, i) { return cell('td', c, i); }).join('') + '</tr>' : '') + '</tbody></table>';
+  };
+  var title = f || (all ? 'All firms' : firms_(S)[0]);
+  var period = dmy_(from) + (to !== from ? ' to ' + dmy_(to) : '');
+  var h = '<!DOCTYPE html><html><head><meta charset="utf-8"><style>' +
+    '@page{size:A4;margin:12mm}body{font-family:Arial,Helvetica,sans-serif;font-size:8pt;color:#14201e}.nw,td.r{white-space:nowrap}' +
+    'h1{font-size:16pt;color:#0f6b5c;margin:0 0 2px}h2{font-size:11pt;color:#0f6b5c;margin:16px 0 5px;padding-bottom:2px;border-bottom:1.5px solid #0f6b5c}' +
+    'table{border-collapse:collapse;width:100%;font-size:8pt}th{background:#0f6b5c;color:#fff;text-align:left;padding:4px 5px;font-size:7.5pt;font-weight:bold}' +
+    'td{border-bottom:1px solid #dfe6e3;padding:3px 5px;vertical-align:top}.r{text-align:right}tr.tot td{font-weight:bold;background:#eef4f2;border-top:1px solid #14201e}' +
+    '.mu{color:#5d6b68;font-size:7pt}.kp td{border:1px solid #cfdad6;padding:6px 8px;width:25%;vertical-align:top}.kp b{font-size:13pt}.top{color:#5d6b68;margin-bottom:10px}' +
+    '</style></head><body>';
+  h += '<h1>Dispatch report · ' + esc(title) + '</h1><div class="top">' + esc(period) + ' · made by ' + esc(who) + ' on ' + Utilities.formatDate(new Date(), tz_(), 'dd-MM-yyyy HH:mm') + (money ? '' : ' · weights only') + '</div>';
+  var shortT = unl.filter(function (t) { return t.short > 0; });
+  h += '<table class="kp"><tr>' +
+    '<td>Trucks dispatched<br><b>' + disp.length + '</b><br>' + q(sum(disp, function (t) { return t.L; })) + ' qtl' + (money ? '<br><span class="mu">purchase ' + rs(sum(disp, function (t) { return t.purTot; })) + '</span>' : '') + '</td>' +
+    '<td>Trucks unloaded<br><b>' + unl.length + '</b><br>' + q(sum(unl, function (t) { return t.U; })) + ' qtl received' + (money ? '<br><span class="mu">sale ' + rs(sum(unl, function (t) { return t.saleTot; })) + '</span>' : '') + '</td>' +
+    '<td>Shortage<br><b>' + q(sum(unl, function (t) { return t.short; })) + '</b> qtl<br>' + shortT.length + ' trucks' + (money ? '<br><span class="mu">deducted ' + rs(sum(unl, function (t) { return t.shortDed; })) + '</span>' : '') + '</td>' +
+    '<td>On the road now<br><b>' + live.filter(function (t) { return t.L && !t.U; }).length + '</b><br>' + q(sum(live.filter(function (t) { return t.L && !t.U; }), function (t) { return t.L; })) + ' qtl</td>' +
+    '</tr></table>';
+  if (to !== from) {
+    var days = {};
+    disp.forEach(function (t) { var d = days[t.date] = days[t.date] || { dn: 0, dq: 0, un: 0, uq: 0, sh: 0 }; d.dn++; d.dq += t.L; });
+    unl.forEach(function (t) { var d = days[t.unloadDate] = days[t.unloadDate] || { dn: 0, dq: 0, un: 0, uq: 0, sh: 0 }; d.un++; d.uq += t.U; d.sh += t.short; });
+    var dk = Object.keys(days).sort();
+    h += '<h2>Day by day</h2>' + table([['Date'], ['Trucks dispatched', 1], ['Dispatched qtl', 1], ['Trucks unloaded', 1], ['Received qtl', 1], ['Shortage qtl', 1]],
+      dk.map(function (k) { var d = days[k]; return [dt(k), d.dn || '—', d.dn ? q(d.dq) : '—', d.un || '—', d.un ? q(d.uq) : '—', d.sh ? q(d.sh) : '—']; }),
+      ['Total', disp.length, q(sum(disp, function (t) { return t.L; })), unl.length, q(sum(unl, function (t) { return t.U; })), q(sum(unl, function (t) { return t.short; }))]);
+  }
+  // orders: every open one in this firm, plus closed ones that had trucks in the range
+  var orders = function (map, k) {
+    return Object.keys(map).map(function (id) { return map[id]; }).filter(function (o) {
+      if (f && firmOf_(o, S) !== f) return false;
+      var open = o.status !== 'Cancelled' && o.status !== 'Settled';
+      return open || disp.some(function (t) { return t[k] === o.id; }) || unl.some(function (t) { return t[k] === o.id; });
+    }).sort(function (a, b) { return byId(a.id, b.id); }).map(function (o) {
+      var on = function (t) { return t[k] === o.id; }, done = sum(live.filter(on), function (t) { return t.L; }), qty = Number(o.qty) || 0;
+      return { o: o, qty: qty, done: done, bal: Math.round((qty - done) * 100) / 100, dp: disp.filter(on), up: unl.filter(on) };
+    });
+  };
+  var st = function (o) { return o.status === 'Settled' ? ' <span class="mu">short-closed</span>' : o.status === 'Cancelled' ? ' <span class="mu">cancelled</span>' : ''; };
+  var pos = orders(A.po, 'po');
+  h += '<h2>Purchase orders</h2>' + table([['PO'], ['Date'], ['Supplier']].concat(money ? [['Rate', 1]] : []).concat([['Ordered qtl', 1], ['Loaded qtl', 1], ['Balance qtl', 1], ['In period', 1]]),
+    pos.map(function (x) {
+      return [nw(esc(x.o.id)) + fs(firmOf_(x.o, S)) + st(x.o), dt(x.o.date), esc(x.o.plant)].concat(money ? [rs(x.o.rate) + '<br><span class="mu">+ GST ' + Math.round((Number(x.o.gst) || 0) * 100) + '%</span>'] : [])
+        .concat([q(x.qty), q(x.done), '<b>' + q(x.bal) + '</b>', x.dp.length ? tk(x.dp.length) + '<br>' + q(sum(x.dp, function (t) { return t.L; })) + ' qtl' : '—']);
+    }), ['Total', '', ''].concat(money ? [''] : []).concat([q(sum(pos, function (x) { return x.qty; })), q(sum(pos, function (x) { return x.done; })), q(sum(pos, function (x) { return x.bal; })), tk(disp.filter(function (t) { return t.po; }).length)]));
+  var sos = orders(A.so, 'so');
+  var terms = function (o) { return (o.gstMode === 'incl' ? 'GST incl.' : o.gstMode === 'excl' ? '+ GST' : '') + (o.freightMode === 'buyer' ? ', customer pays freight' : o.freightMode === 'ours' ? ', freight incl.' : ''); };
+  h += '<h2>Sale orders</h2>' + table([['SO'], ['Date'], ['Customer']].concat(money ? [['Rate', 1]] : []).concat([['Ordered qtl', 1], ['Dispatched qtl', 1], ['Balance qtl', 1], ['Dispatched in period', 1], ['Unloaded in period', 1]]),
+    sos.map(function (x) {
+      return [nw(esc(x.o.id)) + fs(firmOf_(x.o, S)) + st(x.o), dt(x.o.date), esc(x.o.buyer)].concat(money ? [rs(x.o.rate) + '<br><span class="mu">' + esc(terms(x.o)) + '</span>'] : [])
+        .concat([q(x.qty), q(x.done), '<b>' + q(x.bal) + '</b>', x.dp.length ? tk(x.dp.length) + '<br>' + q(sum(x.dp, function (t) { return t.L; })) + ' qtl' : '—',
+          x.up.length ? tk(x.up.length) + '<br>' + q(sum(x.up, function (t) { return t.U; })) + ' qtl' : '—']);
+    }), ['Total', '', ''].concat(money ? [''] : []).concat([q(sum(sos, function (x) { return x.qty; })), q(sum(sos, function (x) { return x.done; })), q(sum(sos, function (x) { return x.bal; })),
+      tk(sum(sos, function (x) { return x.dp.length; })), tk(sum(sos, function (x) { return x.up.length; }))]));
+  h += '<h2>Trucks dispatched (' + disp.length + ')</h2>' + table([['#'], ['Date out'], ['Dispatch No.'], ['Vehicle'], ['Supplier / PO'], ['Customer / SO'], ['Transporter'], ['Loaded qtl', 1]].concat(money ? [['Purchase incl. GST', 1]] : []),
+    disp.map(function (t, i) {
+      return [i + 1, dt(t.date), nw(esc(t.id)) + fs(t.firm), nw('<b>' + esc(t.truck) + '</b>'), esc(t.plant) + '<br><span class="mu">' + esc(t.po) + '</span>', dest(t), esc(t.transporter || '—'), q(t.L)].concat(money ? [rs(t.purTot)] : []);
+    }), ['', 'Total', '', '', '', '', '', q(sum(disp, function (t) { return t.L; }))].concat(money ? [rs(sum(disp, function (t) { return t.purTot; }))] : []));
+  h += '<h2>Trucks unloaded (' + unl.length + ')</h2>' + table([['#'], ['Unloaded'], ['Dispatch No.'], ['Vehicle'], ['Customer / SO'], ['Date out'], ['Loaded qtl', 1], ['Received qtl', 1], ['Shortage qtl', 1]].concat(money ? [['Sale amount', 1], ['Shortage deduction', 1]] : []),
+    unl.map(function (t, i) {
+      return [i + 1, dt(t.unloadDate), nw(esc(t.id)) + fs(t.firm), nw('<b>' + esc(t.truck) + '</b>'), dest(t), dt(t.date), q(t.L), q(t.U), t.short ? q(t.short) : '—'].concat(money ? [t.plantPO ? '—' : rs(t.saleTot), t.shortDed ? rs(t.shortDed) : '—'] : []);
+    }), ['', 'Total', '', '', '', '', q(sum(unl, function (t) { return t.L; })), q(sum(unl, function (t) { return t.U; })), q(sum(unl, function (t) { return t.short; }))].concat(money ? [rs(sum(unl, function (t) { return t.saleTot; })), rs(sum(unl, function (t) { return t.shortDed; }))] : []));
+  return h + '<p class="mu" style="margin-top:14px">Weights in quintals. Dispatched = date the truck left the plant (date out). Cancelled and returned trucks are not counted. DDGS Trade Control.</p></body></html>';
+}
+
 /* ---------------- daily report and weekly backup ---------------- */
 
 function ensureTriggers_() {

@@ -1062,7 +1062,7 @@ function vDispatch() {
   var base = T.filter(tInFirm);
   var list = base.filter(filterFn(FILTER)).filter(matchQ).sort(sortT);
   LASTIDS = list.map(function (t) { return t.id; });
-  var h = '<div class="bar">' + searchBox() + (P.truckMoney ? '<button type="button" class="btn" data-act="payPlantBatch">Pay supplier (several trucks)</button><button type="button" class="btn" data-act="tAdv" data-id="' + (FIRM !== 'all' ? esc(FIRM + '|') : '') + '">+ Transporter advance</button>' : '') + (P.trucks ? '<button type="button" class="btn pri hide-phone" data-act="newTruck">+ New truck</button>' : '') + '</div>';
+  var h = '<div class="bar">' + searchBox() + (P.truckMoney ? '<button type="button" class="btn" data-act="payPlantBatch">Pay supplier (several trucks)</button><button type="button" class="btn" data-act="tAdv" data-id="' + (FIRM !== 'all' ? esc(FIRM + '|') : '') + '">+ Transporter advance</button>' : '') + '<button type="button" class="btn" data-act="report">Report PDF</button>' + (P.trucks ? '<button type="button" class="btn pri hide-phone" data-act="newTruck">+ New truck</button>' : '') + '</div>';
   h += '<div class="chips">' + avail.map(function (f) { var c = base.filter(filterFn(f[0])).length; if (!c && f[0] !== 'todo' && f[0] !== 'all' && f[0] !== FILTER) return ''; return '<button type="button" class="chip ' + (FILTER === f[0] ? 'on' : '') + '" data-filter="' + f[0] + '">' + f[1] + ' <b>' + c + '</b></button>'; }).join('') + '</div>';
   h += '<div class="bar"><span class="mu">' + trk(list.length) + '</span><span class="sp"></span>' + (P.exportX ? '<button type="button" class="btn sm" data-act="exportList">Download this list</button>' : '') + '</div>';
   if (isPhone()) return h + truckList(list);
@@ -2086,17 +2086,40 @@ function actMe() {
 function logout() {
   if (Q.length) { closeForm(); toast('Wait a moment: ' + (Q.length === 1 ? '1 entry is' : Q.length + ' entries are') + ' still saving.'); return; }
   var t = TOKEN || getTok(); closeForm(); cacheClear(); setTok(null); ROUTE = { v: 'home' }; HIST = []; QS = ''; FILTER = 'todo'; FIRM = 'all'; call('api_logout', t).catch(function () {}); showAuth('You are logged out.'); }
+/* "File is ready" popup: download to this device, or open the copy saved in Google Drive › DDGS Exports. */
+function showFile(r, title, mime) {
+  var href = '';
+  try { var bin = atob(r.b64), arr = new Uint8Array(bin.length); for (var i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i); href = URL.createObjectURL(new Blob([arr], { type: mime })); } catch (e) {}
+  FORM = { noSave: true };
+  $('#mform').innerHTML = '<h3>' + title + '</h3><div class="sub">' + esc(r.name) + '</div><div class="menu">' + (href ? '<a href="' + href + '" download="' + esc(r.name) + '">⬇ Download to this device</a>' : '') +
+    '<a href="' + esc(r.url) + '" target="_blank" rel="noopener">Open in Google Drive › DDGS Exports</a></div><div class="foot"><button type="button" class="btn ghost" data-act="close">Done</button></div>';
+  $('#modal').hidden = false;
+}
+/* Dispatch report PDF: open orders with balance, trucks dispatched and unloaded in a from–to range (money only for money roles). */
+function actReport() {
+  var mf = multiFirm();
+  openForm({ title: 'Dispatch report (PDF)', sub: 'Open purchase and sale orders with their balance, and the trucks dispatched (date out) and unloaded between these dates.' + (P.money ? '' : ' Weights only.'),
+    values: { from: D.today, to: D.today, firm: FIRM !== 'all' ? FIRM : '' }, submit: 'Make PDF', done: 'PDF ready',
+    fields: [{ k: 'from', label: 'From', type: 'date', req: 1 }, { k: 'to', label: 'To', type: 'date', req: 1 }].concat(mf ? [{ k: 'firm', label: 'Firm', type: 'select', options: [['', 'All firms']].concat(firmOpts().map(function (o) { return [o[0], shortFirm(o[0])]; })), full: 1 }] : []),
+    check: function (v) { return v.from > v.to ? 'The from date is after the to date.' : null; },
+    custom: function (v) { toast('Making the PDF… this takes a few seconds'); return call('api_reportPdf', v.from, v.to, v.firm || '').then(function (r) { setTimeout(function () { $('#toast').hidden = true; showFile(r, 'PDF is ready', 'application/pdf'); }, 0); return null; }); } });
+  // quick dates
+  var box = document.createElement('div'); box.className = 'chips'; box.style.margin = '0 18px 6px';
+  var mon = D.today.slice(0, 8) + '01', y = new Date(D.today + 'T12:00:00'); y.setDate(y.getDate() - 1);
+  var yd = y.getFullYear() + '-' + ('0' + (y.getMonth() + 1)).slice(-2) + '-' + ('0' + y.getDate()).slice(-2);
+  [['Today', D.today, D.today], ['Yesterday', yd, yd], ['This month', mon, D.today]].forEach(function (x) {
+    var b = document.createElement('button'); b.type = 'button'; b.className = 'chip'; b.textContent = x[0];
+    b.onclick = function () { $('#f_from').value = dmy(x[1]); $('#f_to').value = dmy(x[2]); };
+    box.appendChild(b);
+  });
+  $('#mform .fg').insertAdjacentElement('beforebegin', box);
+}
 function doExport(kind, key, ids) {
   if (BUSY) return;
   BUSY = true; closeForm(); toast('Preparing Excel… this takes a few seconds');
   call('api_export', kind, key || '', ids || null, kind === 'full' && FIRM !== 'all' ? FIRM : '').then(function (r) {
     BUSY = false; $('#toast').hidden = true;
-    var href = '';
-    try { var bin = atob(r.b64), arr = new Uint8Array(bin.length); for (var i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i); href = URL.createObjectURL(new Blob([arr], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' })); } catch (e) {}
-    FORM = { noSave: true };
-    $('#mform').innerHTML = '<h3>Excel is ready</h3><div class="sub">' + esc(r.name) + '</div><div class="menu">' + (href ? '<a href="' + href + '" download="' + esc(r.name) + '">⬇ Download to this device</a>' : '') +
-      '<a href="' + esc(r.url) + '" target="_blank" rel="noopener">Open in Google Drive › DDGS Exports</a></div><div class="foot"><button type="button" class="btn ghost" data-act="close">Done</button></div>';
-    $('#modal').hidden = false;
+    showFile(r, 'Excel is ready', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
   }).catch(function (e) { BUSY = false; toast(e.message || 'Could not create the Excel'); });
 }
 function showImport(r) {
@@ -2373,6 +2396,7 @@ function runAct(a, id, kind) {
     unsettle: function () { BUSY = true; closeForm(); callSafe('api_settle', kind, id, false).then(function (d) { BUSY = false; applyResult(d); toast(id + ' open again'); }).catch(function (e) { BUSY = false; toast(e.message); }); },
     openBank: openBank, bankAdd: function () { actBank(kind, id); }, verifyAll: verifyAllShown, revRefresh: function () { REVKEY = ''; REVOK = ''; render(); },
     exportFull: function () { doExport('full'); }, exportPage: function () { doExport(kind, id); },
+    report: actReport,
     exportDisputes: function () { if (!LASTIDS.length) { toast('No trucks in this list.'); return; } doExport('shortage', DISP_TR, LASTIDS.slice()); },
     exportList: function () { if (!LASTIDS.length) { toast('No trucks in this list.'); return; } doExport('trucks', '', LASTIDS.slice()); }
   }[a] || function () {})();
