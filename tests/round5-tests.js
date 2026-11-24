@@ -25,7 +25,9 @@ const R = 'RAGHAV TRADING AND COMPANY', DV = 'DEVAN TRADING AND COMPANY', GOD = 
   const firmsCell = st => st.sheet('APP_SETTINGS').dump().find(r => r[0] === 'firms')[1];
   ok(firmsCell(old.store) === R + ', SHREE RAM SOLVEX', 'before: Raghav and Shree Ram (hidden)');
   const neu = makeServer({ store: old.store });
+  const v0 = old.store.props.data_v || '0';
   neu.run('api_authState');
+  ok(old.store.props.data_v !== v0 && old.store.cache.data_v === old.store.props.data_v, 'the upgrade tells every open screen to fetch everything (data version changed)');
   ok(firmsCell(old.store) === R + ', ' + DV + ', SARASWATI SOLVEX, JAI MAHAVIR TRADING AND COMPANY, SHREE RAM SOLVEX', 'after: Raghav, Devan, Saraswati, Jai Mahavir, Shree Ram (hidden, last)');
   ok(old.store.sheet('APP_LOG').dump().some(r => r[2] === 'Firms'), 'the change is in the log');
   setSetting(old.store, 'firms', R + ', ' + DV + ', SHREE RAM SOLVEX'); // the Owner later removes two firms by hand

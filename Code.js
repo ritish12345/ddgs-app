@@ -1319,14 +1319,17 @@ function writeLog_(lines) {
 
 /* ---------------- setup and import ---------------- */
 
-var SCHEMA_V = '6.8'; // 6.5: setting qtyTolerancePct; 6.6: setting hiddenFirms; 6.7: transporter advances (APP_ADVANCES, APP_TRUCKS tAdv); 6.8: four firms, Firm on payments and advances
+var SCHEMA_V = '6.9'; // 6.9: open screens fetch everything once after an upgrade; 6.5: setting qtyTolerancePct; 6.6: setting hiddenFirms; 6.7: transporter advances (APP_ADVANCES, APP_TRUCKS tAdv); 6.8: four firms, Firm on payments and advances
 function ensureSetup_() {
   var cache = CacheService.getScriptCache();
   if (cache.get('schema_ok') === SCHEMA_V) return null; // checked in the last 6 hours (setup clears this)
   if (sheet_(T.TR)) {
     // Checking and upgrading the tabs is slow, so it runs only once after each new version of the code.
     var props = PropertiesService.getScriptProperties();
-    if (props.getProperty('schema_v') !== SCHEMA_V) { upgradeHeaders_(); props.setProperty('schema_v', SCHEMA_V); }
+    if (props.getProperty('schema_v') !== SCHEMA_V) {
+      upgradeHeaders_(); props.setProperty('schema_v', SCHEMA_V);
+      bumpVersion_(); // settings may have changed (e.g. new firms): every open screen fetches everything at its next check
+    }
     try { cache.put('schema_ok', SCHEMA_V, 21600); } catch (e) {}
     return null;
   }
