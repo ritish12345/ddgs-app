@@ -1166,7 +1166,7 @@ function vTruck(id) {
   if (!t) return pageHead('Not found') + '<div class="panel empty">Truck ' + esc(id) + ' was not found.</div>';
   var ns = nextStep(t);
   var row = function (l, v) { return '<div><dt>' + l + '</dt><dd>' + v + '</dd></div>'; };
-  var h = pageHead(esc(t.truck) + ' <span class="stage ' + (t.st < 0 ? 'sx' : 's' + t.st) + '" style="vertical-align:4px">' + t.stage + '</span> ' + pendTag(t), esc(t.id) + ' · dispatched ' + dmy(t.date), '', newTab('truck', t.id));
+  var h = pageHead((esc(t.truck) || '<span class="mu">No vehicle no.</span>') + ' <span class="stage ' + (t.st < 0 ? 'sx' : 's' + t.st) + '" style="vertical-align:4px">' + t.stage + '</span> ' + pendTag(t), esc(t.id) + ' · dispatched ' + dmy(t.date), '', newTab('truck', t.id));
   if (ns) h += '<div style="margin-bottom:12px"><button type="button" class="next ' + (ns.m ? 'money' : '') + '" style="width:100%;max-width:360px" data-act="' + ns.a + '" data-id="' + esc(t.id) + '">' + ns.l + '</button></div>';
   if (t.issues.length) h += '<div class="panel" style="margin-bottom:12px">' + t.issues.map(function (i) { return '<div class="prob"><span class="dot" style="' + (i.bad ? '' : 'background:var(--wn)') + '"></span><span>' + esc(i.msg) + '</span></div>'; }).join('') + '</div>';
   h += '<h2>Trip</h2><dl class="dl">' + (multiFirm() ? row('Firm', esc(t.firm)) : '') + row('Purchase order', ordLinks(t, 'po')) + row('Supplier', lnk('plant', t.plant)) +
@@ -1291,7 +1291,7 @@ function truckTable(tr, kind, oid) {
   if (M) head = head.concat([['Supplier amt', 1], ['Freight', 1], ['Short ded.', 1], ['Detention', 1], ['Freight adv.', 1], ['Net freight', 1], ['Freight paid'], ['Sale total', 1]]);
   var cell = function (v, r) { return '<td' + (r ? ' class="r"' : '') + '>' + v + '</td>'; };
   var body = tr.map(function (t, i) {
-    var c = cell('<span class="sn">' + (i + 1) + '</span>') + cell(lnk('truck', t.id)) + cell(dm(t.date)) + (mf ? cell(firmTag(t.firm)) : '') + cell('<b>' + esc(t.truck) + '</b>') + cell(kind === 'po' || kind === 'plant' ? (t.plantPO ? '<span class="tag own">Own plant</span>' : lnk('buyer', t.buyer)) : lnk('plant', t.plant)) + cell(lnk('transporter', t.transporter)) +
+    var c = cell('<span class="sn">' + (i + 1) + '</span>') + cell(lnk('truck', t.id)) + cell(dm(t.date)) + (mf ? cell(firmTag(t.firm)) : '') + cell('<b>' + (esc(t.truck) || '—') + '</b>') + cell(kind === 'po' || kind === 'plant' ? (t.plantPO ? '<span class="tag own">Own plant</span>' : lnk('buyer', t.buyer)) : lnk('plant', t.plant)) + cell(lnk('transporter', t.transporter)) +
       cell(t.L ? qt(pL(t)) + (pL(t) !== t.L ? '<small class="mu" style="display:block">of ' + qt(t.L) + ' (2 orders)</small>' : '') : '—', 1) + cell(t.U ? qt(pU(t)) : '—', 1) + cell(t.U ? qt(pS(t)) : '—', 1) + cell(t.trip + (t.detDays && !t.fBuyer ? ' <span class="over">+' + t.detDays + '</span>' : ''), 1) + cell('<span class="stage ' + (t.st < 0 ? 'sx' : 's' + t.st) + '">' + t.stage + '</span>');
     if (M) c += cell(t.L ? inr(pA(t, 'po')) : '—', 1) + cell(t.fBuyer ? 'customer' : t.U ? inr(t.frAmt) : '—', 1) + cell(t.shortDed ? inr(t.shortDed) : '—', 1) + cell(t.det ? inr(t.det) : '—', 1) + cell(advCell(t, true), 1) +
       cell(t.U && !t.fBuyer ? inr(t.netPay) + (t.carryOut ? ' <span class="mu" title="' + inr(t.carryOut) + ' extra advance carried to the next trip">*</span>' : '') : '—', 1) + cell(t.fBuyer ? '—' : t.freightPaid ? '✓ ' + dm(t.freightPaidDate) : (t.U ? 'unpaid' : '—')) + cell(t.so && t.saleTot ? inr(pA(t, 'so')) : '—', 1);
@@ -2791,7 +2791,7 @@ function vGaps() {
   h += '<h2>Trucks from Busy (' + B.length + ')</h2><div class="tbl" style="--cols:44px 3fr .8fr 130px"><div class="tr th"><div>S.No.</div><div>Gap</div><div class="r">Trucks</div><div></div></div>' +
     gaps.map(function (g, i) {
       var k = B.filter(g[2]).length;
-      return '<div class="tr"><div class="td sn" data-l="S.No.">' + (i + 1) + '</div><div class="td wide" data-l="Gap">' + esc(g[1]) + '</div><div class="td r num" data-l="Trucks"><b>' + k + '</b></div><div class="td acts">' + (k ? '<button type="button" class="btn sm' + (GAPSEL === g[0] ? ' pri' : '') + '" data-act="gapsel" data-id="' + g[0] + '">' + (GAPSEL === g[0] ? 'Hide' : 'Show') + '</button>' : '') + '</div></div>';
+      return '<div class="tr"><div class="td sn" data-l="S.No.">' + (i + 1) + '</div><div class="td wide" data-l="Gap">' + esc(g[1]) + '</div><div class="td r num" data-l="Trucks"><b>' + k + '</b></div><div class="td acts">' + (k ? '<button type="button" class="btn' + (GAPSEL === g[0] ? ' pri' : '') + '" data-act="gapsel" data-id="' + g[0] + '">' + (GAPSEL === g[0] ? 'Hide' : 'Show') + '</button>' : '') + '</div></div>';
     }).join('') + '</div>';
   var sel = gaps.filter(function (g) { return g[0] === GAPSEL; })[0];
   if (sel) { var gl = B.filter(sel[2]).sort(sortT); h += '<h2>' + esc(sel[1]) + ' (' + gl.length + ')</h2>' + truckTable(gl.slice(0, LIMIT)) + more(gl); }
