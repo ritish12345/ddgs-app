@@ -75,7 +75,9 @@ var SCHEMA = {
     ['placedOn', 'Vehicle Placed On', 'date'], ['slipPhoto', 'Slip Photo Link', 'text'], ['plantPayPhoto', 'Supplier Payment Screenshot', 'text'], ['freightPayPhoto', 'Freight Payment Screenshot', 'text'],
     ['tAdv', 'Transporter Advance Used', 'num'], // what this truck took from its transporter's advance, saved when its freight is paid
     // One truck on two orders (Nitish, 24-11-2026): poQty qtl on po, the rest of the weight on po2 (the same for so / so2).
-    ['po2', 'Second PO ID', 'text'], ['poQty', 'Qty On First PO', 'num'], ['so2', 'Second SO ID', 'text'], ['soQty', 'Qty On First SO', 'num']
+    ['po2', 'Second PO ID', 'text'], ['poQty', 'Qty On First PO', 'num'], ['so2', 'Second SO ID', 'text'], ['soQty', 'Qty On First SO', 'num'],
+    // both quantities are typed (25-11-2026): first + second = the dispatch weight, or the save is refused
+    ['po2Qty', 'Qty On Second PO', 'num'], ['so2Qty', 'Qty On Second SO', 'num']
   ],
   APP_LOG: [['time', 'Time', 'text'], ['user', 'User', 'text'], ['action', 'Action', 'text'],
             ['record', 'Record', 'text'], ['details', 'Details', 'text'],
@@ -371,15 +373,17 @@ function linkTruckOrders_(obj) {
    (po2 / so2) the rest of the weight. The second order has the same supplier / customer and firm as the first (and
    the same PO type / freight terms), and must be open when it is chosen. A blank second order removes the split. */
 function checkSplit_(obj) {
-  if (!['po', 'so', 'po2', 'so2', 'poQty', 'soQty', 'loadWt'].some(function (k) { return k in obj; })) return;
+  if (!['po', 'so', 'po2', 'so2', 'poQty', 'soQty', 'po2Qty', 'so2Qty', 'loadWt'].some(function (k) { return k in obj; })) return;
   var cur = obj.id ? rows_(T.TR).filter(function (r) { return r.id === obj.id; })[0] : null;
   var get = function (k) { return (k in obj) ? obj[k] : cur ? cur[k] : ''; };
   var L = num_(get('loadWt')) || 0, po = rows_(T.PO).filter(function (r) { return r.id === get('po'); })[0];
+  var wChanged = !!cur && ('loadWt' in obj) && Math.abs((num_(obj.loadWt) || 0) - (num_(cur.loadWt) || 0)) > 0.005;
   [['po', T.PO, 'PO', 'supplier', 'plant'], ['so', T.SO, 'SO', 'customer', 'buyer']].forEach(function (c) {
-    var k = c[0], k2 = k + '2', kq = k + 'Qty', id1 = get(k), id2 = get(k2);
+    var k = c[0], k2 = k + '2', kq = k + 'Qty', kq2 = k + '2Qty', id1 = get(k), id2 = get(k2);
     if (k === 'so' && po && po.poType === 'plant') id2 = ''; // own-plant trucks have no sale order
     if (id2 && !id1 && obj[k2]) throw new Error('Choose the first ' + c[2] + ' before a second one.');
-    if (!id2 || !id1) { if (get(k2) || (get(kq) !== '' && get(kq) != null)) { obj[k2] = ''; obj[kq] = ''; } return; }
+    var has = function (f) { return get(f) !== '' && get(f) != null; };
+    if (!id2 || !id1) { if (get(k2) || has(kq) || has(kq2)) { obj[k2] = ''; obj[kq] = ''; obj[kq2] = ''; } return; }
     if (id2 === id1) throw new Error('The second ' + c[2] + ' is the same as the first (' + id1 + ').');
     var list = rows_(c[1]), o1 = list.filter(function (r) { return r.id === id1; })[0], o2 = list.filter(function (r) { return r.id === id2; })[0];
     if (!o2) throw new Error(id2 + ' was not found.');
@@ -391,7 +395,15 @@ function checkSplit_(obj) {
     if (k === 'so' && String(o1.freightMode || '') !== String(o2.freightMode || '')) throw new Error(id1 + ' and ' + id2 + ' have different freight terms. A truck can be split only between sale orders with the same freight terms.');
     var q = num_(get(kq));
     if (!(L > 0)) throw new Error('Enter the dispatch weight before splitting the truck between two orders.');
-    if (!(q > 0) || q > L - 0.005) throw new Error('The qty on ' + id1 + ' must be more than 0 and less than the dispatch weight (' + qtl_(L) + ' qtl). The rest goes on ' + id2 + '.');
+    // Both quantities are typed and must add up to the dispatch weight (Nitish, 25-11-2026). The second qty: as typed;
+    // else as saved; else (a split saved before, or only the first qty sent) the rest of the weight, but never after the
+    // weight changed: then the two quantities must be changed in the same save.
+    var q2 = (kq2 in obj) && obj[kq2] !== '' && obj[kq2] != null ? num_(obj[kq2]) :
+      cur && cur[k2] === id2 && cur[kq2] !== '' && cur[kq2] != null ? num_(cur[kq2]) :
+      cur && cur[k2] && wChanged ? (num_(cur.loadWt) || 0) - (num_(cur[kq]) || 0) : L - q;
+    if (!(q > 0) || !(q2 > 0)) throw new Error('Enter the qty on ' + id1 + ' and the qty on ' + id2 + ' (both more than 0). Together they are the dispatch weight (' + qtl_(L) + ' qtl).');
+    if (Math.abs(q + q2 - L) > 0.005) throw new Error(c[2] + ' split: ' + qtl_(q) + ' on ' + id1 + ' + ' + qtl_(q2) + ' on ' + id2 + ' = ' + qtl_(q + q2) + ' qtl, but the dispatch weight is ' + qtl_(L) + ' qtl. Change the two quantities so they add up to ' + qtl_(L) + '.');
+    obj[kq2] = Math.round(q2 * 100) / 100;
   });
 }
 var SUPPLIER_SIDE_ = ['plantPaid', 'plantPaidDate', 'plantUTR', 'billNo', 'billQty'];
@@ -1374,7 +1386,7 @@ function writeLog_(lines) {
 
 /* ---------------- setup and import ---------------- */
 
-var SCHEMA_V = '7.0'; // 7.0: APP_TRUCKS po2 / poQty / so2 / soQty (one truck on two orders); 6.9: open screens fetch everything once after an upgrade; 6.5: setting qtyTolerancePct; 6.6: setting hiddenFirms; 6.7: transporter advances (APP_ADVANCES, APP_TRUCKS tAdv); 6.8: four firms, Firm on payments and advances
+var SCHEMA_V = '7.1'; // 7.1: APP_TRUCKS po2Qty / so2Qty (both quantities of a split truck typed); 7.0: APP_TRUCKS po2 / poQty / so2 / soQty (one truck on two orders); 6.9: open screens fetch everything once after an upgrade; 6.5: setting qtyTolerancePct; 6.6: setting hiddenFirms; 6.7: transporter advances (APP_ADVANCES, APP_TRUCKS tAdv); 6.8: four firms, Firm on payments and advances
 function ensureSetup_() {
   var cache = CacheService.getScriptCache();
   if (cache.get('schema_ok') === SCHEMA_V) return null; // checked in the last 6 hours (setup clears this)
@@ -1778,7 +1790,7 @@ function advForPay_(obj) {
 /* ---------------- Excel export ---------------- */
 
 function truckColumns_(can) {
-  var c = [['Dispatch No.', 'id'], ['Status', 'status'], ['Firm', 'firm'], ['Dispatch Date', 'date'], ['Vehicle Placed On', 'placedOn'], ['PO', 'po'], ['Supplier', 'plant'], ['Second PO', 'po2'], ['Qty on First PO', 'poQty'], ['SO', 'so'], ['Customer', 'buyer'], ['Second SO', 'so2'], ['Qty on First SO', 'soQty'],
+  var c = [['Dispatch No.', 'id'], ['Status', 'status'], ['Firm', 'firm'], ['Dispatch Date', 'date'], ['Vehicle Placed On', 'placedOn'], ['PO', 'po'], ['Supplier', 'plant'], ['Second PO', 'po2'], ['Qty on First PO', 'poQty'], ['Qty on Second PO', 'po2Qty'], ['SO', 'so'], ['Customer', 'buyer'], ['Second SO', 'so2'], ['Qty on First SO', 'soQty'], ['Qty on Second SO', 'so2Qty'],
     ['Vehicle No', 'truck'], ['Transporter', 'transporter'], ['Driver', 'driver'], ['RST / Weighment Slip No', 'slip'], ['Slip Photo Link', 'slipPhoto'], ['Dispatch Wt (qtl)', 'L'], ['Supplier Invoice No', 'billNo'], ['Supplier Invoice Qty', 'billQty'],
     ['Unload Date', 'unloadDate'], ['Received Wt (qtl)', 'U'], ['Shortage (qtl)', 'short'], ['Days on trip', 'trip'], ['Stage', 'stage']];
   if (can.money) c = c.concat([['Supplier Amount incl GST', 'purTot'], ['Supplier Paid', 'plantPaid'], ['Supplier Paid Date', 'plantPaidDate'], ['Supplier UTR', 'plantUTR'],

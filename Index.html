@@ -2071,9 +2071,9 @@ function showSplit(offers, v, orig) {
     var radio = function (val, on, body) { return '<label class="rad"><input type="radio" name="sp' + i + '" value="' + val + '"' + (on ? ' checked' : '') + '>' + body + '</label>'; };
     if (x.type === 'move') return '<div class="spl">' + head + radio('move', 1, 'Put this truck (' + qt(x.L) + ' qtl) on ' + esc(x.first)) + radio('no', 0, 'No, keep it on ' + esc(x.chosen)) + '</div>';
     return '<div class="spl">' + head +
-      radio('split', 1, 'Split: <input id="spq' + i + '" class="spq" inputmode="decimal" value="' + x.left.toFixed(2) + '"> qtl on ' + esc(x.first) + ' + <b id="spr' + i + '">' + qt(r2(x.L - x.left)) + '</b> qtl on ' +
+      radio('split', 1, 'Split: <input id="spq' + i + '" class="spq" inputmode="decimal" value="' + x.left.toFixed(2) + '"> qtl on ' + esc(x.first) + ' + <input id="spr' + i + '" class="spq" inputmode="decimal" value="' + r2(x.L - x.left).toFixed(2) + '"> qtl on ' +
         '<select id="sps' + i + '">' + x.others.map(function (id) { return '<option value="' + esc(id) + '"' + (id === x.second ? ' selected' : '') + '>' + esc(id) + ' · bal ' + qt(orderLeft(x.k, map[id], orig ? orig.id : '').left) + '</option>'; }).join('') + '</select>') +
-      radio('no', 0, 'No split: all ' + qt(x.L) + ' qtl on ' + esc(x.chosen)) + '</div>';
+      '<div class="mu" id="spt' + i + '" style="margin:0 0 4px 28px"></div>' + radio('no', 0, 'No split: all ' + qt(x.L) + ' qtl on ' + esc(x.chosen)) + '</div>';
   }).join('');
   // the supplier was already paid: show what the supplier amount becomes
   var po = offers.filter(function (x) { return x.k === 'po'; })[0];
@@ -2084,20 +2084,59 @@ function showSplit(offers, v, orig) {
   h += '<div style="margin-top:6px">Tap Save again to save your choice.</div></div>';
   $('#fwarn').insertAdjacentHTML('beforebegin', h);
   offers.forEach(function (x, i) {
-    var q = document.getElementById('spq' + i);
-    if (q) q.addEventListener('input', function () { $('#spr' + i).textContent = qt(Math.max(0, r2(x.L - n(q.value)))); });
+    var q = document.getElementById('spq' + i), q2 = document.getElementById('spr' + i), tl = document.getElementById('spt' + i);
+    var show = function () { if (tl) tl.innerHTML = splitTotal(n(q.value), n(q2.value), x.L); };
+    if (q && q2) { q.addEventListener('input', show); q2.addEventListener('input', show); show(); }
   });
   var box = $('#fsplit');
   if (box && box.scrollIntoView) box.scrollIntoView({ block: 'nearest' });
 }
+/* "141.60 + 225.80 = 367.40 ✓ matches the dispatch weight" (or how much is short / over) */
+function splitTotal(q1, q2, L) {
+  var d = r2(q1 + q2 - L);
+  return qt(q1) + ' + ' + qt(q2) + ' = <b>' + qt(r2(q1 + q2)) + '</b> qtl · dispatch weight ' + qt(L) + (Math.abs(d) <= 0.005 ? ' <span style="color:var(--ok)">✓ matches</span>' : ' <span class="over">✗ ' + qt(Math.abs(d)) + (d < 0 ? ' short' : ' over') + '</span>');
+}
+/* A truck on two orders: the two quantities must add up to the dispatch weight (Nitish, 25-11-2026; same rule on the
+   server, checkSplit_). v = the form values, t = the truck now. */
+function splitMatch(v, t) {
+  var cur = function (k) { return k in v ? v[k] : (t ? t[k] : ''); }, L = n(cur('loadWt')), out = null;
+  [['po', 'PO'], ['so', 'SO']].forEach(function (c) {
+    var k = c[0], id1 = cur(k), id2 = cur(k + '2');
+    if (out || !id1 || !id2 || (k === 'so' && t && t.plantPO)) return;
+    var q1 = n(cur(k + 'Qty')), q2v = cur(k + '2Qty'), q2 = q2v === '' || q2v == null ? (t && t[k + '2'] === id2 ? n(t[k + 'Q2']) : r2(L - q1)) : n(q2v);
+    if (!(q1 > 0) || !(q2 > 0)) out = 'Enter the qty on ' + id1 + ' and the qty on ' + id2 + ' (both more than 0). Together they are the dispatch weight (' + qt(L) + ' qtl).';
+    else if (Math.abs(q1 + q2 - L) > 0.005) out = c[1] + ' split: ' + qt(q1) + ' on ' + id1 + ' + ' + qt(q2) + ' on ' + id2 + ' = ' + qt(r2(q1 + q2)) + ' qtl, but the dispatch weight is ' + qt(L) + ' qtl. Change the two quantities so they add up to ' + qt(L) + '.';
+  });
+  return out;
+}
+/* Live total under the split quantities of a form (Edit truck, Dispatch weight). */
+function splitLive(t) {
+  var box = document.createElement('div'); box.className = 'hint'; box.id = 'splitHint'; box.style.margin = '0 18px';
+  $('#mform .fg').insertAdjacentElement('afterend', box);
+  var val = function (k) { var el = document.getElementById('f_' + k); return el ? (el.value.trim() === '' ? '' : el.value) : t[k]; };
+  var show = function () {
+    var L = n(toQtl(val('loadWt')) || 0), h = [];
+    [['po', 'PO'], ['so', 'SO']].forEach(function (c) {
+      var k = c[0], id2 = val(k + '2');
+      if (!id2 || !document.getElementById('f_' + k + 'Qty')) return;
+      h.push(c[1] + ': ' + splitTotal(n(val(k + 'Qty')), n(val(k + '2Qty')), L));
+    });
+    box.innerHTML = h.join('<br>');
+  };
+  ['loadWt', 'po2', 'poQty', 'po2Qty', 'so2', 'soQty', 'so2Qty'].forEach(function (k) { var el = document.getElementById('f_' + k); if (el) { el.addEventListener('input', show); el.addEventListener('change', show); } });
+  show();
+}
+/* The form values of a split truck: both quantities shown (a split saved before 25-11-2026 has no second qty: the rest). */
+function splitVals(t) { return { poQty: t.po2 ? t.poQ1 : t.poQty, po2Qty: t.po2 ? (t.po2Qty === '' || t.po2Qty == null ? t.poQ2 : t.po2Qty) : '', soQty: t.so2 ? t.soQ1 : t.soQty, so2Qty: t.so2 ? (t.so2Qty === '' || t.so2Qty == null ? t.soQ2 : t.so2Qty) : '' }; }
 function applySplit(offers, send) {
   for (var i = 0; i < offers.length; i++) {
     var x = offers[i], ch = document.querySelector('#fsplit input[name="sp' + i + '"]:checked'), val = ch ? ch.value : 'no';
     if (val === 'move') { send[x.k] = x.first; continue; }
     if (val !== 'split') continue;
-    var q = n((document.getElementById('spq' + i) || {}).value), sec = (document.getElementById('sps' + i) || {}).value || x.second;
-    if (!(q > 0) || q > x.L - 0.005) return 'The qty on ' + x.first + ' must be more than 0 and less than ' + qt(x.L) + ' qtl.';
-    send[x.k] = x.first; send[x.k + '2'] = sec; send[x.k + 'Qty'] = r2(q);
+    var q = n((document.getElementById('spq' + i) || {}).value), q2 = n((document.getElementById('spr' + i) || {}).value), sec = (document.getElementById('sps' + i) || {}).value || x.second;
+    if (!(q > 0) || !(q2 > 0)) return 'Enter the qty on ' + x.first + ' and on ' + sec + ' (both more than 0).';
+    if (Math.abs(q + q2 - x.L) > 0.005) return qt(q) + ' + ' + qt(q2) + ' = ' + qt(r2(q + q2)) + ' qtl, but the dispatch weight is ' + qt(x.L) + ' qtl. Change the two quantities so they add up to ' + qt(x.L) + '.';
+    send[x.k] = x.first; send[x.k + '2'] = sec; send[x.k + 'Qty'] = r2(q); send[x.k + '2Qty'] = r2(q2);
   }
   return null;
 }
@@ -2128,15 +2167,16 @@ function actEditTruck(id) {
   // One truck on two orders: the first order keeps this qty, the second takes the rest of the weight (24-11-2026)
   var sameParty = function (list, cur, first, who, party) { return list.filter(function (o) { var x = (who === 'plant' ? PO : SO)[o[0]]; return o[0] !== first && x && (o[0] === cur || normName(x[who]) === normName(party)); }); };
   fields.push({ sec: 'Split between two orders (optional)' },
-    { k: 'po2', label: 'Second PO (takes the rest of the weight)', type: 'select', options: sameParty(poOpts(t.po2, t.firm), t.po2, t.po, 'plant', t.plant), blank: 'No second PO' }, { k: 'poQty', label: 'Qty on the first PO (qtl)', type: 'number' });
-  if (!t.plantPO) fields.push({ k: 'so2', label: 'Second SO (takes the rest)', type: 'select', options: sameParty(soOpts(t.so2, t.firm), t.so2, t.so, 'buyer', t.buyer), blank: 'No second SO' }, { k: 'soQty', label: 'Qty on the first SO (qtl)', type: 'number' });
+    { k: 'po2', label: 'Second PO', type: 'select', options: sameParty(poOpts(t.po2, t.firm), t.po2, t.po, 'plant', t.plant), blank: 'No second PO', full: 1 }, { k: 'poQty', label: 'Qty on the first PO (qtl)', type: 'number' }, { k: 'po2Qty', label: 'Qty on the second PO (qtl)', type: 'number' });
+  if (!t.plantPO) fields.push({ k: 'so2', label: 'Second SO', type: 'select', options: sameParty(soOpts(t.so2, t.firm), t.so2, t.so, 'buyer', t.buyer), blank: 'No second SO', full: 1 }, { k: 'soQty', label: 'Qty on the first SO (qtl)', type: 'number' }, { k: 'so2Qty', label: 'Qty on the second SO (qtl)', type: 'number' });
   if (!P.truckMoney) fields.push({ k: 'frate', label: 'Freight rate per qtl (needed with weight)', type: 'number' });
   if (P.truckMoney) fields = fields.concat([{ sec: 'Freight' }, { k: 'frate', label: 'Freight rate per qtl', type: 'number' }, { k: 'advance', label: 'Freight advance (₹)', type: 'number' }, { k: 'detention', label: 'Detention (₹)', type: 'number', help: 'Only if agreed with the transporter. Suggestion: ' + t.freeDays + ' free days, then ' + inr(t.perDay) + '/day' + (t.detSuggest ? ' = ' + inr(t.detSuggest) : '') + '.' }]);
   if (P.truckMoney && !t.plantPO) fields.push({ k: 'saleRate', label: 'Invoice rate for this vehicle (₹/qtl)', type: 'number', help: 'Only if this invoice has a different rate. Blank = sale order rate' + (SO[t.so] ? ' (' + inr(SO[t.so].rate) + ')' : '') + '.' });
   if (P.editClosed) fields = fields.concat([{ sec: 'Owner corrections only' }, { k: 'received', label: 'Total received from customer (₹)', type: 'number' }, { k: 'deduction', label: 'Total deduction (₹)', type: 'number' }]);
   fields.push({ k: 'note', label: 'Note', type: 'textarea', full: 1 });
-  openForm({ title: 'Edit ' + t.truck, sub: esc(t.id) + ' · ' + t.stage, fn: 'api_saveTruck', warn: truckWarn(id, t), check: weightNeeds, values: t, onlyChanged: true,
+  openForm({ title: 'Edit ' + t.truck, sub: esc(t.id) + ' · ' + t.stage, fn: 'api_saveTruck', warn: truckWarn(id, t), check: function (v) { return weightNeeds(v) || splitMatch(v, t); }, values: Object.assign({}, t, splitVals(t)), onlyChanged: true,
     build: function (v) { v.id = id; return v; }, fields: fields });
+  splitLive(t);
 }
 function quick(id, title, sub, fields, done, values, warn, check) {
   var t = getT(id);
@@ -2149,8 +2189,13 @@ function actAssign(id) {
 }
 function actLoad(id) {
   var t = getT(id);
-  quick(id, 'Dispatch weight', esc(t.truck + ' · ' + t.id), [{ k: 'loadWt', label: 'Weight on the slip', type: 'weight', req: 1, full: 1 }, { k: 'date', label: 'Date out (from the slip)', type: 'date', req: 1 }, { k: 'transporter', label: 'Transporter (can be added later)', list: transporters() }, { k: 'frate', label: 'Freight rate per qtl', type: 'number' }, { k: 'slip', label: 'RST / Weighment Slip No.' }], 'Weight saved', Object.assign({}, t, { date: t.date || D.today, frate: t.frate === '' || t.frate == null ? (D.settings.defaultFreightRate || '') : t.frate }), truckWarn(id, t), weightNeeds);
+  var fl = [{ k: 'loadWt', label: 'Weight on the slip', type: 'weight', req: 1, full: 1 }, { k: 'date', label: 'Date out (from the slip)', type: 'date', req: 1 }, { k: 'transporter', label: 'Transporter (can be added later)', list: transporters() }, { k: 'frate', label: 'Freight rate per qtl', type: 'number' }, { k: 'slip', label: 'RST / Weighment Slip No.' }];
+  // a truck on two orders: the two quantities are changed with the weight (they must add up to it)
+  if (t.po2) fl.push({ sec: 'Split between ' + t.po + ' and ' + t.po2 }, { k: 'poQty', label: 'Qty on ' + t.po + ' (qtl)', type: 'number', req: 1 }, { k: 'po2Qty', label: 'Qty on ' + t.po2 + ' (qtl)', type: 'number', req: 1 });
+  if (t.so2 && !t.plantPO) fl.push({ sec: 'Split between ' + t.so + ' and ' + t.so2 }, { k: 'soQty', label: 'Qty on ' + t.so + ' (qtl)', type: 'number', req: 1 }, { k: 'so2Qty', label: 'Qty on ' + t.so2 + ' (qtl)', type: 'number', req: 1 });
+  quick(id, 'Dispatch weight', esc(t.truck + ' · ' + t.id), fl, 'Weight saved', Object.assign({}, t, splitVals(t), { date: t.date || D.today, frate: t.frate === '' || t.frate == null ? (D.settings.defaultFreightRate || '') : t.frate }), truckWarn(id, t), function (v) { return weightNeeds(v) || splitMatch(v, t); });
   FORM.onlyChanged = false; // the suggested freight rate and date are sent as shown (before, keeping the suggested 85 was refused)
+  if (t.po2 || t.so2) splitLive(t);
 }
 function actUnload(id) {
   var t = getT(id);
