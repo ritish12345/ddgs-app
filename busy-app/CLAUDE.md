@@ -15,7 +15,9 @@ Read this file fully before doing any work in this folder.
 - **clasp searches parent folders**: without `busy-app/.clasp.json`, clasp run here would use the DDGS app's `.clasp.json`
   one folder up (it then pushes `..\Code.js`). Never delete `busy-app/.clasp.json`; run `clasp show-file-status` first:
   it must list `Code.js`, not `..\Code.js`.
-- Folder: `ddgs-app/busy-app` (its own git repo, branch `main` / work branches). The DDGS app's `.clasp.json` must
+- Folder: `ddgs-app/busy-app`, part of the **ddgs-app git repo** since 26-11-2026 (its first 6 commits came in with a merge;
+  GitHub `ritish12345/ddgs-app`). Branch from `ddgs-app` as usual; commit only `busy-app/` files for Busy app changes. Run
+  `clasp` only inside `busy-app/` for this app (and only in `ddgs-app/` root for the DDGS app). The DDGS app's `.clasp.json` must
   **never** come into this folder: `clasp push` / `clasp deploy` from here must only reach the Busy app's own script.
   Check `.clasp.json` here before any clasp command (its scriptId is NOT the DDGS one). The DDGS sheet/deployment ids in
   section 2 are the DDGS app's: never deploy to them from here.
