@@ -3,7 +3,7 @@
   "private": true,
   "description": "Local tests for the DDGS app. Never pushed to Apps Script (see .claspignore).",
   "scripts": {
-    "test": "node compare-old-new.js && node safety-tests.js && node speed-server-tests.js && node screen-tests.js && node round2-tests.js && node receivables-tests.js && node hidden-firm-tests.js && node round3-tests.js && node round4-tests.js && node round5-tests.js && node round6-tests.js && node round7-tests.js && node round8-tests.js && node round9-tests.js && node round10-tests.js && node parity-test.js"
+    "test": "node compare-old-new.js && node safety-tests.js && node speed-server-tests.js && node screen-tests.js && node round2-tests.js && node receivables-tests.js && node hidden-firm-tests.js && node round3-tests.js && node round4-tests.js && node round5-tests.js && node round6-tests.js && node round7-tests.js && node round8-tests.js && node round9-tests.js && node round10-tests.js && node round11-tests.js && node parity-test.js"
   },
   "devDependencies": {
     "jsdom": "26.1.0",

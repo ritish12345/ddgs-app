@@ -958,7 +958,7 @@ function nextStep(t) {
   return null;
 }
 /* ---------- routing ---------- */
-var DETAIL = ['po', 'so', 'buyer', 'plant', 'transporter', 'truck', 'users', 'notes'];
+var DETAIL = ['po', 'so', 'buyer', 'plant', 'transporter', 'truck', 'users', 'notes', 'oreport'];
 function mainTabs() {
   var working = live().filter(function (t) { return t.st !== 6; }).length; // closed trucks are on the Closed & cancelled page
   var tabs = [['home', 'Overview'], ['pos', 'Purchase Orders', D.po.filter(inFirm).filter(isOpen).length], ['sos', 'Sale Orders', D.so.filter(inFirm).filter(isOpen).length], ['dispatch', 'Dispatch Register', working]];
@@ -966,7 +966,7 @@ function mainTabs() {
     ['receivables', 'Receivables', accList().filter(function (a) { return a.outstanding > 0.5; }).length],
     ['freight', 'Freight & Transport', live().filter(function (t) { return t.L && !t.fBuyer; }).length],
     ['advances', 'Advances', Object.keys(TADV).filter(function (k) { return fIn(TADV[k].firm) && TADV[k].left > 0.5; }).length],
-    ['disputes', 'Disputes']);
+    ['disputes', 'Disputes'], ['reports', 'Reports']);
   tabs.push(['closed', 'Closed & cancelled']);
   if (P.review) tabs.push(['activity', 'Activity']);
   tabs.push(['more', 'More']);
@@ -981,9 +981,9 @@ function back() { ROUTE = HIST.pop() || { v: 'home' }; render(); window.scrollTo
 
 function render() {
   if (!D) return;
-  if (!P.money && (ROUTE.v === 'settle' || ROUTE.v === 'freight' || ROUTE.v === 'advances' || ROUTE.v === 'disputes')) ROUTE = { v: 'home' };
+  if (!P.money && (ROUTE.v === 'settle' || ROUTE.v === 'freight' || ROUTE.v === 'advances' || ROUTE.v === 'disputes' || ROUTE.v === 'reports' || ROUTE.v === 'oreport')) ROUTE = { v: 'home' };
   if (!P.review && ROUTE.v === 'activity') ROUTE = { v: 'home' };
-  var tab = { po: 'pos', so: 'sos', buyer: 'sos', plant: 'pos', transporter: P.money ? 'freight' : 'dispatch', truck: 'dispatch', users: 'more' }[ROUTE.v] || ROUTE.v;
+  var tab = { po: 'pos', so: 'sos', buyer: 'sos', plant: 'pos', transporter: P.money ? 'freight' : 'dispatch', truck: 'dispatch', users: 'more', oreport: 'reports' }[ROUTE.v] || ROUTE.v;
   $('#nav').innerHTML = mainTabs().map(function (v) { return '<button type="button" class="' + (tab === v[0] ? 'on' : '') + '" data-tab="' + v[0] + '">' + v[1] + (v[2] != null ? ' <span class="cnt">' + v[2] + '</span>' : '') + '</button>'; }).join('');
   // Phones: the tab row swipes sideways. Move it only as much as needed to show the chosen tab
   // (it used to jump the chosen tab to the far left, which pushed Overview out of view).
@@ -995,7 +995,7 @@ function render() {
     else if (r.left < left) nv.scrollLeft -= left - r.left + 12;
   }
   $('#fab').hidden = !(P.trucks && ROUTE.v === 'dispatch');
-  var f = { home: vHome, pos: function () { return orderTable('po'); }, sos: function () { return orderTable('so'); }, dispatch: vDispatch, settle: vSettle, receivables: vReceivables, freight: vFreight, advances: vAdvances, disputes: vDisputes, closed: vClosed,
+  var f = { home: vHome, pos: function () { return orderTable('po'); }, sos: function () { return orderTable('so'); }, dispatch: vDispatch, settle: vSettle, receivables: vReceivables, freight: vFreight, advances: vAdvances, disputes: vDisputes, reports: vReports, oreport: vOrderReport, closed: vClosed,
     more: vMore, activity: vActivity, users: P.users ? vUsers : vMore, notes: vNotes, po: function () { return vOrder('po', ROUTE.id); }, so: function () { return vOrder('so', ROUTE.id); },
     buyer: function () { return vParty('buyer', ROUTE.id); }, plant: function () { return vParty('plant', ROUTE.id); }, transporter: function () { return vParty('transporter', ROUTE.id); }, truck: function () { return vTruck(ROUTE.id); } }[ROUTE.v] || vHome;
   if (FIRM !== 'all' && visFirms().indexOf(FIRM) < 0) FIRM = 'all'; // the remembered firm is no longer shown
@@ -1252,7 +1252,7 @@ function vOrder(kind, id) {
   var o = (kind === 'po' ? D.po : D.so).filter(function (x) { return x.id === id; })[0];
   if (!o) return pageHead('Not found') + '<div class="panel empty">' + esc(id) + ' was not found.</div>';
   var s = orderStats(kind, o), tr = s.tr.slice().sort(sortT), party = kind === 'po' ? o.plant : o.buyer;
-  var extra = (P.exportX ? '<button type="button" class="btn sm" data-act="exportPage" data-kind="' + kind + '" data-id="' + esc(id) + '">Excel</button>' : '') + (P.orders ? '<button type="button" class="btn sm" data-act="' + (kind === 'po' ? 'editPO' : 'editSO') + '" data-id="' + esc(id) + '">Edit</button>' : '');
+  var extra = (P.money ? '<button type="button" class="btn sm" data-go="oreport" data-id="' + esc(kind + '|' + id) + '">Report</button>' : '') + (P.exportX ? '<button type="button" class="btn sm" data-act="exportPage" data-kind="' + kind + '" data-id="' + esc(id) + '">Excel</button>' : '') + (P.orders ? '<button type="button" class="btn sm" data-act="' + (kind === 'po' ? 'editPO' : 'editSO') + '" data-id="' + esc(id) + '">Edit</button>' : '');
   var goes = (kind === 'po' ? (o.poType === 'plant' ? ' · goes to own plant (' + esc(plantFirm()) + ')' : o.linkSO && SO[o.linkSO] ? ' · sells to ' + lnk('so', o.linkSO) + ' ' + lnk('buyer', SO[o.linkSO].buyer) : '') : (isFirm(o.buyer) ? ' · <span class="tag own">group company</span>' : ''));
   var h = pageHead(esc(id) + ' ' + firmTag(firmOf(o)), (multiFirm() ? esc(firmOf(o)) + ' · ' : '') + (kind === 'po' ? 'Supplier ' : 'Customer ') + lnk(kind === 'po' ? 'plant' : 'buyer', party) + ' · ' + dmy(o.date) + (P.money ? ' · ' + inr(o.rate) + (kind === 'so' ? ' ' + terms(o) : ' + GST') : '') + goes + (o.status === 'Cancelled' ? ' · <span class="over">Cancelled</span>' : '') + (o.status === 'Settled' ? ' · <span class="tag ok">Short-closed</span>' : '') + completeTag(kind, o, s), extra, newTab(kind, id));
   h += '<div class="kpis">' + kpi('Ordered', qt(o.qty) + ' qtl') + kpi(kind === 'po' ? 'Loaded' : 'Dispatched', qt(s.done) + ' qtl', trk(s.tr.length)) + kpi('Balance', qt(s.bal) + ' qtl', '', s.bal < 0 ? 'bad' : '') +
@@ -1612,6 +1612,92 @@ function vDisputes() {
       c('Advance', adv ? advCell(t) : '—') +
       c('Net freight', '<b>' + inr(t.netPay) + '</b>' + (t.det ? sm('incl. ' + inr(t.det) + ' detention') : '') + sm(t.freightPaid ? '<span class="ok">✓ paid ' + dmy(t.freightPaidDate) + '</span>' : 'to pay')) + '</div>';
   }).join('') + '</div>' + more(list);
+  return h;
+}
+/* ---------- Reports (Nitish, 25-11-2026) ----------
+   Purchase-order-wise: where each PO's trucks went (per sale order: rate, trucks, loaded, unloaded, profit), then the
+   trucks of each sale order; sale-order-wise the mirror. The server works the report out (api_reports /
+   api_orderReport), so the screen, the PDF and the Excel always show the same numbers. Profit only for the Owner. */
+var REPC = {}; // base → { key, data, err }: the last answer; a newer data version loads again in the background
+function repGet(base, key, fn, args) {
+  var c = REPC[base];
+  if (!c || c.key !== key) {
+    if (!c || c.want !== key) {
+      REPC[base] = c = { key: c ? c.key : '', data: c ? c.data : null, err: '', want: key };
+      call.apply(null, [fn].concat(args)).then(function (r) { var x = REPC[base]; if (!x || x.want !== key) return; x.key = key; x.data = r; x.err = ''; if (ROUTE.v === 'reports' || ROUTE.v === 'oreport') render(); })
+        .catch(function (e) { var x = REPC[base]; if (!x || x.want !== key) return; x.key = key; x.err = e.message || String(e); if (ROUTE.v === 'reports' || ROUTE.v === 'oreport') render(); });
+    }
+  }
+  return REPC[base];
+}
+function repFile(spec, format) {
+  if (BUSY) return;
+  var p = String(spec).split('|'), kind = p[0], id = p.slice(1).join('|');
+  BUSY = true; toast('Making the ' + (format === 'xlsx' ? 'Excel' : 'PDF') + '… this takes a few seconds');
+  call('api_reportFile', kind, id, id ? '' : (FIRM !== 'all' ? FIRM : ''), format).then(function (r) {
+    BUSY = false; $('#toast').hidden = true;
+    showFile(r, format === 'xlsx' ? 'Excel is ready' : 'PDF is ready', format === 'xlsx' ? 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' : 'application/pdf');
+  }).catch(function (e) { BUSY = false; toast(e.message || 'Could not make the file'); });
+}
+function repBtns(spec) {
+  return '<button type="button" class="btn sm" data-act="repPdf" data-id="' + esc(spec) + '">PDF</button><button type="button" class="btn sm" data-act="repXlsx" data-id="' + esc(spec) + '">Excel</button>';
+}
+function repRate(o) { return o.rate ? rs2(o.rate) + '<small>' + esc(o.terms) + '</small>' : '—'; }
+function vReports() {
+  var kind = SUBF.reports === 'so' ? 'so' : 'po', firm = FIRM !== 'all' ? FIRM : '', isPO = kind === 'po';
+  var h = '<div class="ph" style="margin-bottom:6px"><h1>Reports</h1><div class="sub">' + (isPO ? 'Every purchase order: rate, quantity, loaded, unloaded, trucks' : 'Every sale order: rate, quantity, dispatched, unloaded, trucks') + (P.profit ? ' and the profit' : '') + '. Tap an order to see where its trucks ' + (isPO ? 'went' : 'came from') + '.</div></div>';
+  h += '<div class="bar"><div class="seg"><button type="button" class="' + (isPO ? 'on' : '') + '" data-act="repKind" data-id="po">Purchase orders</button><button type="button" class="' + (isPO ? '' : 'on') + '" data-act="repKind" data-id="so">Sale orders</button></div>' +
+    searchBox() + '<span class="sp"></span>' + repBtns(kind + '|') + '<button type="button" class="btn sm" data-act="report">Dispatch report (PDF)</button></div>';
+  var c = repGet('L', kind + '|' + firm + '|' + D.v, 'api_reports', [kind, firm]);
+  if (c.err && !c.data) return h + '<div class="panel empty">' + esc(c.err) + '</div>';
+  if (!c.data || c.data.kind !== kind || c.data.firm !== firm) return h + '<div class="panel empty">Loading…</div>';
+  var d = c.data, M = d.profit, q = QS ? QS.replace(/\s+/g, '') : '';
+  var rows = d.rows.filter(function (r) { return !q || [r.id, r.party, r.firm, r.status].join('|').toLowerCase().replace(/\s+/g, '').indexOf(q) >= 0; });
+  LASTIDS = rows.map(function (r) { return r.id; });
+  var sumK = function (k) { return r2(sum(rows, function (r) { return n(r[k]); })); };
+  h += '<div class="kpis" style="margin-bottom:14px">' + kpi(isPO ? 'Purchase orders' : 'Sale orders', rows.length, c.key !== c.want ? 'updating…' : '') + kpi(isPO ? 'Loaded' : 'Dispatched', qt(sumK('L')) + ' qtl', trk(sumK('trucks'))) +
+    kpi('Unloaded', qt(sumK('U')) + ' qtl', sumK('road') ? 'on the road ' + qt(sumK('road')) : '') + (M ? kpi('Profit', inr(sumK('profit')), 'before GST, unloaded trucks', 'good') : '') + '</div>';
+  if (!rows.length) return h + '<div class="panel empty">No orders here.</div>';
+  var cols = '44px 1fr 1.6fr 1fr .9fr .9fr .9fr 70px' + (M ? ' 1fr' : '');
+  h += '<div class="tbl" style="--cols:' + cols + '"><div class="tr th"><div>S.No.</div><div>' + (isPO ? 'PO' : 'SO') + '</div><div>' + (isPO ? 'Supplier' : 'Customer') + '</div><div class="r">Rate</div><div class="r">Quantity</div><div class="r">' + (isPO ? 'Loaded' : 'Dispatched') + '</div><div class="r">Unloaded</div><div class="r">Trucks</div>' + (M ? '<div class="r">Profit</div>' : '') + '</div>';
+  h += rows.slice(0, LIMIT).map(function (r, i) {
+    var cell = function (l, v) { return '<div class="td r num" data-l="' + l + '">' + v + '</div>'; };
+    return '<div class="tr"><div class="td sn" data-l="S.No.">' + (i + 1) + '</div><div class="td">' + lnk('oreport', kind + '|' + r.id, r.id) + ' ' + firmTag(r.firm) + (r.status ? '<small>' + esc(r.status) + '</small>' : '') + '</div>' +
+      '<div class="td wide" data-l="' + (isPO ? 'Supplier' : 'Customer') + '">' + esc(r.party) + '<small>' + dmy(r.date) + '</small></div>' + cell('Rate', repRate(r)) + cell('Quantity', qt(r.qty)) +
+      cell(isPO ? 'Loaded' : 'Dispatched', qt(r.L) + '<small>bal ' + qt(r.bal) + '</small>') + cell('Unloaded', qt(r.U) + (r.road ? '<small>road ' + qt(r.road) + '</small>' : '')) + cell('Trucks', r.trucks) + (M ? cell('Profit', '<b>' + inr(r.profit) + '</b>') : '') + '</div>';
+  }).join('') + '</div>' + more(rows);
+  return h;
+}
+function vOrderReport() {
+  var spec = String(ROUTE.id || ''), p = spec.split('|'), kind = p[0] === 'so' ? 'so' : 'po', id = p.slice(1).join('|'), isPO = kind === 'po';
+  var c = repGet('O', spec + '|' + D.v, 'api_orderReport', [kind, id]);
+  var head = pageHead(esc(id) + ' report', (isPO ? 'Where the trucks of this purchase order went' : 'Where the trucks of this sale order came from'), repBtns(spec) + '<button type="button" class="btn sm" data-go="' + kind + '" data-id="' + esc(id) + '">Open ' + esc(id) + '</button>');
+  if (c.err && !c.data) return head + '<div class="panel empty">' + esc(c.err) + '</div>';
+  if (!c.data || c.data.order.id !== id || c.data.order.kind !== kind) return head + '<div class="panel empty">Loading…</div>';
+  var d = c.data, o = d.order, M = d.profit;
+  var h = head + '<div class="sub" style="margin:-4px 0 10px">' + esc(o.party) + ' · ' + dmy(o.date) + ' · ' + rs2(o.rate) + ' ' + esc(o.terms) + (multiFirm() ? ' · ' + esc(shortFirm(o.firm)) : '') + (o.status ? ' · ' + esc(o.status) : '') + '</div>';
+  h += '<div class="kpis" style="margin-bottom:14px">' + kpi('Quantity', qt(o.qty) + ' qtl', 'balance ' + qt(o.bal)) + kpi(isPO ? 'Loaded' : 'Dispatched', qt(o.L) + ' qtl', trk(o.trucks)) +
+    kpi('Unloaded', qt(o.U) + ' qtl', o.road ? 'on the road ' + qt(o.road) : '') + (M ? kpi('Profit', inr(o.profit), 'before GST, unloaded trucks', 'good') : '') + '</div>';
+  var cell = function (l, v) { return '<div class="td r num" data-l="' + l + '">' + v + '</div>'; };
+  var gc = '44px 1.6fr 1.1fr 1fr 70px .9fr .9fr' + (M ? ' 1fr' : '');
+  h += '<h2>' + (isPO ? 'Where the trucks went' : 'Where the trucks came from') + '</h2>';
+  if (!d.groups.length) return h + '<div class="panel empty">No loaded trucks yet.</div>';
+  h += '<div class="tbl" style="--cols:' + gc + '"><div class="tr th"><div>S.No.</div><div>' + (isPO ? 'Customer' : 'Supplier') + '</div><div>' + (isPO ? 'SO' : 'PO') + '</div><div class="r">Rate</div><div class="r">Trucks</div><div class="r">Loaded</div><div class="r">Unloaded</div>' + (M ? '<div class="r">Profit</div>' : '') + '</div>' +
+    d.groups.map(function (g, i) {
+      return '<div class="tr"><div class="td sn" data-l="S.No.">' + (i + 1) + '</div><div class="td wide" data-l="' + (isPO ? 'Customer' : 'Supplier') + '"><b>' + esc(g.party) + '</b></div><div class="td" data-l="' + (isPO ? 'SO' : 'PO') + '">' + (g.id ? lnk('oreport', g.kind + '|' + g.id, g.id) + '<small>' + dmy(g.date) + '</small>' : '—') + '</div>' +
+        cell('Rate', repRate(g)) + cell('Trucks', g.trucks) + cell('Loaded', qt(g.L)) + cell('Unloaded', qt(g.U)) + (M ? cell('Profit', '<b>' + inr(g.profit) + '</b>') : '') + '</div>';
+    }).join('') +
+    '<div class="tr tfoot"><div class="td"></div><div class="td wide">Total</div><div class="td"></div><div class="td"></div>' + cell('Trucks', o.trucks) + cell('Loaded', qt(o.L)) + cell('Unloaded', qt(o.U)) + (M ? cell('Profit', inr(o.profit)) : '') + '</div></div>';
+  var tc = '44px 1fr 1fr 1.2fr 1fr 1fr' + (M ? ' 1fr' : '');
+  d.groups.forEach(function (g) {
+    h += '<h2>' + (g.id ? esc(g.id) + ' · ' + esc(g.party) : esc(g.party)) + (g.rate ? ' · ' + rs2(g.rate) : '') + ' · ' + trk(g.trucks) + '</h2>' +
+      '<div class="tbl" style="--cols:' + tc + '"><div class="tr th"><div>S.No.</div><div>Dispatch</div><div>Date out</div><div>Vehicle</div><div class="r">Loaded</div><div class="r">Unloaded</div>' + (M ? '<div class="r">Profit</div>' : '') + '</div>' +
+      g.rows.map(function (r, i) {
+        return '<div class="tr"><div class="td sn" data-l="S.No.">' + (i + 1) + '</div><div class="td">' + lnk('truck', r.id) + '</div><div class="td" data-l="Date out">' + dmy(r.date) + '</div><div class="td" data-l="Vehicle"><b>' + esc(r.truck) + '</b></div>' +
+          cell('Loaded', qt(r.L) + (r.of ? '<small>of ' + qt(r.of) + ' (2 orders)</small>' : '')) + cell('Unloaded', r.road ? '<span class="mu">on the road</span>' : qt(r.U) + '<small>' + dmy(r.unloadDate) + '</small>') + (M ? cell('Profit', r.road ? '—' : inr(r.profit)) : '') + '</div>';
+      }).join('') +
+      '<div class="tr tfoot"><div class="td"></div><div class="td">Total</div><div class="td"></div><div class="td"></div>' + cell('Loaded', qt(g.L)) + cell('Unloaded', qt(g.U)) + (M ? cell('Profit', inr(g.profit)) : '') + '</div></div>';
+  });
   return h;
 }
 function vFreight() {
@@ -2551,6 +2637,8 @@ function runAct(a, id, kind) {
     openBank: openBank, bankAdd: function () { actBank(kind, id); }, verifyAll: verifyAllShown, revRefresh: function () { REVKEY = ''; REVOK = ''; render(); },
     exportFull: function () { doExport('full'); }, exportPage: function () { doExport(kind, id); },
     report: actReport,
+    repKind: function () { SUBF.reports = id === 'so' ? 'so' : 'po'; QS = ''; LIMIT = 60; render(); },
+    repPdf: function () { repFile(id, 'pdf'); }, repXlsx: function () { repFile(id, 'xlsx'); },
     exportDisputes: function () { if (!LASTIDS.length) { toast('No trucks in this list.'); return; } doExport('shortage', DISP_TR, LASTIDS.slice()); },
     exportList: function () { if (!LASTIDS.length) { toast('No trucks in this list.'); return; } doExport('trucks', '', LASTIDS.slice()); }
   }[a] || function () {})();
@@ -2572,7 +2660,7 @@ window.addEventListener('beforeunload', function (e) { if (Q.length) { e.prevent
 (function boot() {
   var init = window.INIT || {};
   if (init.view && ['po', 'so', 'buyer', 'plant', 'transporter', 'truck'].indexOf(init.view) >= 0) { ROUTE = { v: init.view, id: init.id }; HIST = [{ v: 'home' }]; }
-  else if (init.view && ['pos', 'sos', 'dispatch', 'settle', 'receivables', 'freight', 'advances', 'disputes', 'closed'].indexOf(init.view) >= 0) ROUTE = { v: init.view };
+  else if (init.view && ['pos', 'sos', 'dispatch', 'settle', 'receivables', 'freight', 'advances', 'disputes', 'reports', 'closed'].indexOf(init.view) >= 0) ROUTE = { v: init.view };
   TOKEN = getTok();
   try { FIRM = localStorage.getItem('ddgs_firm') || 'all'; } catch (x) {} // the firm window chosen last time on this phone
   loadQ(); // saves that were still waiting when the app was last closed
