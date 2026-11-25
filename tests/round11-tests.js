@@ -79,7 +79,7 @@ const html = r => Buffer.from(r.b64, 'base64').toString('utf8');
 
   console.log('PDF and Excel');
   const pdf = html(s.run('api_reportFile', own, 'po', OLD, '', 'pdf'));
-  ok(/<h2>Where the trucks went<\/h2>/.test(pdf) && (pdf.match(/class="pb"/g) || []).length === 3 && !/Profit/i.test(pdf), 'order PDF: summary first, then each sale order on a new page (3); no profit');
+  ok(/<h2>Where the trucks went<\/h2>/.test(pdf) && (pdf.match(/<h2>/g) || []).length === 4 && !/page-break-before|class="pb"/.test(pdf) && !/Profit/i.test(pdf), 'order PDF: summary, then the 3 sale orders one after another (no forced new pages, no wasted paper); no profit');
   ok(/GODREJ AGROVET KHANA · Rs 2,821.60 GST incl., freight incl. · 2 trucks/.test(pdf) && (pdf.match(/<td class="r">Rs 2,821.60<\/td>/g) || []).length === 2 && /Sale amount/.test(pdf), 'section "' + SOX + ' · GODREJ AGROVET KHANA · Rs 2,821.60" and the rate on each truck line below it');
   const lpdf = html(s.run('api_reportFile', own, 'so', '', '', 'pdf'));
   ok(/Sale orders report · All firms/.test(lpdf) && lpdf.indexOf(SOY) >= 0 && /Sale amount/.test(lpdf), 'list PDF (sale orders) with the sale amount');

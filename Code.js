@@ -2054,12 +2054,12 @@ function reportHtml_(A, from, to, f, money, who) {
    roles only. No profit: amounts only (Nitish works the profit out himself). Amounts incl. GST, as on the truck page. */
 function pdfHead_() {
   return '<!DOCTYPE html><html><head><meta charset="utf-8"><style>' +
-    '@page{size:A4;margin:12mm}body{font-family:Arial,Helvetica,sans-serif;font-size:8pt;color:#14201e}.nw,td.r{white-space:nowrap}' +
-    'h1{font-size:16pt;color:#0f6b5c;margin:0 0 2px}h2{font-size:11pt;color:#0f6b5c;margin:16px 0 5px;padding-bottom:2px;border-bottom:1.5px solid #0f6b5c}' +
+    '@page{size:A4;margin:10mm}body{font-family:Arial,Helvetica,sans-serif;font-size:8pt;color:#14201e}.nw,td.r{white-space:nowrap}' +
+    'h1{font-size:16pt;color:#0f6b5c;margin:0 0 2px}h2{font-size:11pt;color:#0f6b5c;margin:12px 0 4px;padding-bottom:2px;border-bottom:1.5px solid #0f6b5c}' +
     'table{border-collapse:collapse;width:100%;font-size:8pt}th{background:#0f6b5c;color:#fff;text-align:left;padding:4px 5px;font-size:7.5pt;font-weight:bold}' +
     'td{border-bottom:1px solid #dfe6e3;padding:3px 5px;vertical-align:top}.r{text-align:right}tr.tot td{font-weight:bold;background:#eef4f2;border-top:1px solid #14201e}' +
     '.mu{color:#5d6b68;font-size:7pt}.kp td{border:1px solid #cfdad6;padding:6px 8px;width:20%;vertical-align:top}.kp b{font-size:13pt}.top{color:#5d6b68;margin-bottom:10px}' +
-    '.pb{page-break-before:always}' +
+    'h2{page-break-after:avoid}tr{page-break-inside:avoid}' + // no forced new pages: sections follow on (no wasted paper); a heading stays with its table
     '</style></head><body>';
 }
 /* The pieces of one truck: (PO, SO) pairs with their loaded and unloaded qty, the rates, and the purchase and sale amount
@@ -2211,7 +2211,7 @@ function orderReportHtml_(d, who) {
   }), ['', 'Total', '', '', o.trucks, q(o.L), q(o.U), rs(isPO ? o.sale : o.pur)]);
   var tc = [['#'], ['Dispatch No.'], ['Date out'], ['Vehicle'], ['Loaded qtl', 1], ['Unloaded qtl', 1], ['Rate', 1], [amtH, 1]];
   d.groups.forEach(function (g) {
-    h += '<div class="pb"></div><h2>' + e(g.id || g.party) + (g.id ? ' · ' + e(g.party) : '') + (g.rate ? ' · ' + reportRs_(g.rate) + ' ' + e(g.terms) : '') + ' · ' + mk(g.trucks) + '</h2>' + reportTable_(tc, g.rows.map(function (r, i) {
+    h += '<h2>' + e(g.id || g.party) + (g.id ? ' · ' + e(g.party) : '') + (g.rate ? ' · ' + reportRs_(g.rate) + ' ' + e(g.terms) : '') + ' · ' + mk(g.trucks) + '</h2>' + reportTable_(tc, g.rows.map(function (r, i) {
       return [i + 1, e(r.id), '<span class="nw">' + dmy_(r.date) + '</span>', '<b class="nw">' + e(r.truck) + '</b>', q(r.L) + (r.of ? '<br><span class="mu">of ' + q(r.of) + ' (2 orders)</span>' : ''),
         r.road ? '<span class="mu">on the road</span>' : q(r.U) + '<br><span class="mu">' + dmy_(r.unloadDate) + '</span>', r.rate ? reportRs_(r.rate) : '—',
         r.amt ? rs(r.amt) + (isPO && r.road ? '<br><span class="mu">on loaded wt</span>' : '') : '—'];
