@@ -1,0 +1,3203 @@
+/**
+ * DDGS Trade Control - Google Apps Script web app
+ * ------------------------------------------------
+ * Files: Code.gs (this file, the server) and Index.html (the screen). Synced with clasp.
+ *
+ * On first run it creates its own tabs (APP_PO, APP_SO, APP_TRUCKS,
+ * APP_LOG, APP_SETTINGS) and copies your data in from MASTER PO,
+ * SALE ORDER, DISPATCH, SALE and Freight, matching rows by Dispatch ID.
+ * Your old tabs are only read, never changed.
+ *
+ * Version 6.4: vocabulary, compulsory fields (transporter and freight rate once the weight is
+ * entered, UTR for every payment), "Vehicle Placed On" date, activity review with verified ticks,
+ * bank details for paying, slip and payment photos in Drive, flow charts on PO and buyer pages.
+ * Version 6.1: orders can be marked Settled; a driver's advance is adjusted across trips of the same truck.
+ * Version 6: same-day duplicate block, several trucks paid in one go with UTR,
+ * 'Returned, not loaded', plant bill quantity check, 'Order taken in' on POs.
+ * Version 5: two firms (Raghav Trading and Company, Sriram Solvex), own-plant POs
+ * that only receive trucks, POs that sell to a fixed sale order, per-truck sale
+ * rate, table screens with links. Plus everything from version 4: logins with
+ * roles, detention, closed-truck lock, payments log, Excel export, daily 9 pm
+ * email report and weekly backup.
+ * Deploy as "Execute as: Me" so staff never need access to the sheet itself.
+ */
+
+var T = { PO: 'APP_PO', SO: 'APP_SO', TR: 'APP_TRUCKS', LOG: 'APP_LOG', SET: 'APP_SETTINGS', US: 'APP_USERS', PAY: 'APP_PAYMENTS', NOTE: 'APP_NOTES', BANK: 'APP_BANK', ADV: 'APP_ADVANCES' };
+var APP_DRIVE_ = 'RAGHAV BUSY APP'; // page title and the Drive folders (… Exports, … Slips, … Backups): kept apart from the DDGS app's
+
+// What each role may do. Change here if needed.
+var ROLES = {
+  Owner:    { money: true,  trucks: true,  truckMoney: true,  orders: true,  users: true,  cancelTruck: true,  profit: true,  exportX: true,  editClosed: true },
+  Accounts: { money: true,  trucks: true,  truckMoney: true,  orders: true,  users: false, cancelTruck: true,  profit: false, exportX: true,  editClosed: false },
+  Dispatch: { money: false, trucks: true,  truckMoney: false, orders: false, users: false, cancelTruck: false, profit: false, exportX: false, editClosed: false },
+  Viewer:   { money: true,  trucks: false, truckMoney: false, orders: false, users: false, cancelTruck: false, profit: false, exportX: false, editClosed: false }
+};
+Object.keys(ROLES).forEach(function (r) { ROLES[r].review = r === 'Owner'; ROLES[r].bank = r === 'Owner' || r === 'Accounts'; ROLES[r].busy = r === 'Owner' || r === 'Accounts'; }); // busy: upload Busy files, Busy pages
+var TRUCK_MONEY = ['plantPaid', 'plantPaidDate', 'frate', 'advance', 'freightPaid', 'freightPaidDate', 'received', 'receivedDate', 'deduction', 'deductionNote', 'detention', 'saleRate', 'plantUTR', 'freightUTR', 'zohoBill', 'zohoInvoice', 'zohoFreight', 'tAdv'];
+var ORDER_MONEY = ['rate', 'gst', 'gstMode', 'freightMode', 'creditDays', 'bAmt'];
+// Amounts hidden from roles without money access (paid / not paid status stays visible).
+var TRUCK_HIDE = ['frate', 'advance', 'received', 'receivedDate', 'deduction', 'deductionNote', 'detention', 'saleRate', 'plantUTR', 'freightUTR', 'zohoBill', 'zohoInvoice', 'zohoFreight', 'tAdv', 'bPAmt', 'bSAmt'];
+// Changed only through their own actions (Cancel, Returned, Restore, photo upload), which check the role. A normal truck save ignores them.
+// The Busy fields (Source, Busy keys, bill numbers and amounts from Busy) are set only by the Busy upload.
+var TRUCK_LOCKED = ['status', 'returnedDate', 'slipPhoto', 'plantPayPhoto', 'freightPayPhoto', 'tAdv', 'src', 'bPKey', 'bSKey', 'sBillNo', 'sBillQty', 'bPAmt', 'bSAmt', 'bPStat', 'bSStat', 'bMatch']; // tAdv: set only when freight is paid
+var ORDER_LOCKED = ['src', 'bkey', 'bBills', 'bAmt', 'bLast']; // set only by the Busy upload
+var ME = null;
+
+// [key, header, type]  type: text | date | num | bool
+var SCHEMA = {
+  APP_PO: [
+    ['id', 'PO ID', 'text'], ['date', 'PO Date', 'date'], ['plant', 'Supplier', 'text'],
+    ['commodity', 'Commodity', 'text'], ['qty', 'Quantity (qtl)', 'num'], ['rate', 'Rate ex-GST', 'num'],
+    ['gst', 'GST', 'num'], ['status', 'Status', 'text'], ['note', 'Note', 'text'],
+    ['by', 'Updated By', 'text'], ['at', 'Updated At', 'text'],
+    ['firm', 'Firm', 'text'], ['poType', 'PO Type', 'text'], ['linkSO', 'Sells To SO', 'text'], ['takenIn', 'Booked in the name of', 'text'],
+    // Busy (RAGHAV BUSY APP): orders made from Busy bills
+    ['src', 'Source', 'text'], ['bkey', 'Busy Key', 'text'], ['gstin', 'GSTIN', 'text'], ['bBills', 'Busy Bills', 'num'], ['bAmt', 'Busy Amount incl GST', 'num'], ['bLast', 'Last Bill Date', 'date']
+  ],
+  APP_SO: [
+    ['id', 'SO ID', 'text'], ['date', 'SO Date', 'date'], ['buyer', 'Customer', 'text'],
+    ['commodity', 'Commodity', 'text'], ['qty', 'Quantity (qtl)', 'num'], ['rate', 'Rate ex-GST', 'num'],
+    ['gst', 'GST', 'num'], ['status', 'Status', 'text'], ['note', 'Note', 'text'],
+    ['by', 'Updated By', 'text'], ['at', 'Updated At', 'text'],
+    ['gstMode', 'GST In Rate', 'text'], ['freightMode', 'Freight Terms', 'text'],
+    ['creditDays', 'Credit Days', 'num'], ['firm', 'Firm', 'text'],
+    // Busy (RAGHAV BUSY APP): orders made from Busy bills
+    ['src', 'Source', 'text'], ['bkey', 'Busy Key', 'text'], ['gstin', 'GSTIN', 'text'], ['bBills', 'Busy Bills', 'num'], ['bAmt', 'Busy Amount incl GST', 'num'], ['bLast', 'Last Bill Date', 'date']
+  ],
+  APP_TRUCKS: [
+    ['id', 'Dispatch No.', 'text'], ['date', 'Dispatch Date', 'date'], ['po', 'PO ID', 'text'],
+    ['so', 'SO ID', 'text'], ['truck', 'Vehicle No', 'text'], ['transporter', 'Transporter', 'text'],
+    ['driver', 'Driver', 'text'], ['slip', 'RST / Weighment Slip No', 'text'], ['loadWt', 'Dispatch Wt (qtl)', 'num'],
+    ['plantPaid', 'Supplier Paid', 'bool'], ['plantPaidDate', 'Supplier Paid Date', 'date'],
+    ['unloadDate', 'Unload Date', 'date'], ['unloadWt', 'Received Wt (qtl)', 'num'],
+    ['frate', 'Freight Rate', 'num'], ['advance', 'Freight Advance', 'num'],
+    ['freightPaid', 'Freight Paid', 'bool'], ['freightPaidDate', 'Freight Paid Date', 'date'],
+    ['received', 'Received From Buyer', 'num'], ['receivedDate', 'Received Date', 'date'],
+    ['status', 'Status', 'text'], ['note', 'Note', 'text'], ['by', 'Updated By', 'text'],
+    ['at', 'Updated At', 'text'], ['zohoBill', 'Zoho Bill ID', 'text'],
+    ['zohoInvoice', 'Zoho Invoice ID', 'text'], ['zohoFreight', 'Zoho Freight Bill ID', 'text'],
+    ['deduction', 'Deduction (TDS/claim)', 'num'], ['deductionNote', 'Deduction Note', 'text'],
+    ['detention', 'Detention (Rs)', 'num'], ['saleRate', 'Invoice Rate (this vehicle)', 'num'],
+    ['plantUTR', 'Supplier Payment UTR', 'text'], ['freightUTR', 'Freight Payment UTR', 'text'], ['billNo', 'Supplier Invoice No', 'text'], ['billQty', 'Supplier Invoice Qty', 'num'], ['returnedDate', 'Returned Date', 'text'],
+    ['placedOn', 'Vehicle Placed On', 'date'], ['slipPhoto', 'Slip Photo Link', 'text'], ['plantPayPhoto', 'Supplier Payment Screenshot', 'text'], ['freightPayPhoto', 'Freight Payment Screenshot', 'text'],
+    ['tAdv', 'Transporter Advance Used', 'num'], // what this truck took from its transporter's advance, saved when its freight is paid
+    // One truck on two orders (Nitish, 24-11-2026): poQty qtl on po, the rest of the weight on po2 (the same for so / so2).
+    ['po2', 'Second PO ID', 'text'], ['poQty', 'Qty On First PO', 'num'], ['so2', 'Second SO ID', 'text'], ['soQty', 'Qty On First SO', 'num'],
+    // both quantities are typed (25-11-2026): first + second = the dispatch weight, or the save is refused
+    ['po2Qty', 'Qty On Second PO', 'num'], ['so2Qty', 'Qty On Second SO', 'num'],
+    // Busy (RAGHAV BUSY APP): trucks made from a purchase bill and / or a sale bill
+    ['src', 'Source', 'text'], ['bPKey', 'Busy Purchase Key', 'text'], ['bSKey', 'Busy Sale Key', 'text'], ['sBillNo', 'Sale Bill No', 'text'], ['sBillQty', 'Sale Bill Qty', 'num'],
+    ['bPAmt', 'Busy Purchase Amount', 'num'], ['bSAmt', 'Busy Sale Amount', 'num'], ['bPStat', 'Supplier Status (Busy)', 'text'], ['bSStat', 'Customer Status (Busy)', 'text'], ['bMatch', 'Match', 'text']
+  ],
+  APP_LOG: [['time', 'Time', 'text'], ['user', 'User', 'text'], ['action', 'Action', 'text'],
+            ['record', 'Record', 'text'], ['details', 'Details', 'text'],
+            ['verified', 'Verified', 'bool'], ['verifiedBy', 'Verified By', 'text'], ['verifiedAt', 'Verified At', 'text']],
+  APP_SETTINGS: [['key', 'Key', 'text'], ['value', 'Value', 'text'], ['meaning', 'Meaning', 'text']],
+  APP_USERS: [['id', 'Username', 'text'], ['name', 'Name', 'text'], ['role', 'Role', 'text'],
+              ['salt', 'Salt', 'text'], ['hash', 'Password Hash', 'text'], ['active', 'Active', 'bool'],
+              ['by', 'Updated By', 'text'], ['at', 'Updated At', 'text']],
+  APP_PAYMENTS: [['id', 'Payment ID', 'text'], ['date', 'Date', 'date'], ['truck', 'Dispatch No.', 'text'], ['so', 'SO ID', 'text'],
+                 ['buyer', 'Customer', 'text'], ['amount', 'Amount Received', 'num'], ['deduction', 'Deduction', 'num'],
+                 ['note', 'Note', 'text'], ['by', 'Entered By', 'text'], ['at', 'Entered At', 'text'],
+                 ['firm', 'Firm', 'text'], // which firm got the money (blank on old lines = the first firm, Raghav)
+                 ['src', 'Source', 'text'], ['bkey', 'Busy Key', 'text']], // lines made from Busy receipts / notes / returns
+  APP_NOTES: [['id', 'Note ID', 'text'], ['date', 'Date', 'date'], ['area', 'Screen', 'text'], ['text', 'Note', 'text'],
+              ['status', 'Status', 'text'], ['by', 'Written By', 'text'], ['at', 'Written At', 'text']],
+  APP_BANK: [['id', 'Key', 'text'], ['kind', 'Type', 'text'], ['name', 'Party', 'text'], ['accName', 'Account Name', 'text'],
+             ['accNo', 'Account Number', 'text'], ['ifsc', 'IFSC', 'text'], ['by', 'Updated By', 'text'], ['at', 'Updated At', 'text']],
+  // Advances given to a transporter that are not tied to a truck (e.g. before loading). A wrong one is reversed by a minus line.
+  APP_ADVANCES: [['id', 'Advance No.', 'text'], ['date', 'Date', 'date'], ['transporter', 'Transporter', 'text'], ['vehicle', 'Vehicle No', 'text'], ['driver', 'Driver', 'text'],
+                 ['amount', 'Amount', 'num'], ['ref', 'UTR / Ref', 'text'], ['note', 'Note', 'text'], ['by', 'Entered By', 'text'], ['at', 'Entered At', 'text'],
+                 ['firm', 'Firm', 'text'],
+                 ['src', 'Source', 'text'], ['bkey', 'Busy Key', 'text']] // lines made from Busy freight journals / payments
+};
+
+var SETTINGS_DEFAULT = [
+  ['company', 'RAGHAV BUSY APP', 'Name shown at the top of the app'],
+  ['stuckDays', 3, 'A truck is marked stuck after this many days before unloading'],
+  ['shortageAllowancePct', 0.002, 'Shortage allowed before deduction, as a fraction of loaded weight (0.002 = 0.2%)'],
+  ['defaultGst', 0.05, 'GST for new orders (0.05 = 5%)'],
+  ['defaultFreightRate', 85, 'Freight rate per qtl suggested for new trucks'],
+  ['defaultCreditDays', 7, 'Days a buyer has to pay after unloading, for new sale orders'],
+  ['freeDays', 3, 'Days from loading to unloading before detention starts'],
+  ['detentionPerDay', 500, 'Detention paid to the transporter per extra day (Rs)'],
+  ['reportEmail', '', 'Daily 9 pm report goes here. Blank = the sheet owner\u2019s Gmail'],
+  ['firms', 'RAGHAV TRADING AND COMPANY, DEVAN TRADING AND COMPANY, SARASWATI SOLVEX, JAI MAHAVIR TRADING AND COMPANY, SHREE RAM SOLVEX', 'Your firms, separated by commas: each has its own window (buttons at the top). Orders with no firm count under the first one'],
+  ['plantFirm', 'SHREE RAM SOLVEX', 'Your firm that owns the solvent plant: its POs only receive trucks, no sales'],
+  ['tradingFirms', 'RAGHAV TRADING AND COMPANY, DEVAN TRADING AND COMPANY, SARASWATI SOLVEX, JAI MAHAVIR TRADING AND COMPANY', 'Firms an order can be taken in (shown on the PO as Booked in the name of)'],
+  ['bankUrl', '', 'Internet banking login. The Open bank button on payment popups goes here'],
+  ['slipCheckFrom', '', 'Trucks dispatched on or after this date need a weighment slip photo. Blank = all trucks'],
+  ['qtyTolerancePct', 0.01, 'Order quantity tolerance (0.01 = 1%). A PO/SO is complete from 99% of its quantity; going above 101% needs the Owner'],
+  ['hiddenFirms', 'SHREE RAM SOLVEX', 'Firms whose own POs/SOs and trucks are kept out of this app (their rows stay in the sheet). Clear to show them again'],
+  // RAGHAV BUSY APP (25-11-2026): the app is filled from Busy exports (Busy page)
+  ['dailyReport', 'no', 'Daily 9 pm email report with the full Excel: yes / no (no: the DDGS app already sends one)'],
+  ['weeklyBackup', 'no', 'Sunday night copy of this sheet in Drive: yes / no'],
+  ['busyCompany', 'RAGHAV TRADING AND CO.', 'Busy company name exactly as in the first line of its exports. Files from another company are refused'],
+  ['busyFirm', 'RAGHAV TRADING AND COMPANY', 'The firm (one of firms) whose books the Busy files are'],
+  ['busyGapDays', 15, 'Busy bills of the same party, item and rate make one order; a gap of more than this many days starts a new order'],
+  ['busyPairQty', 0.05, 'A purchase bill and a sale bill are the same truck when their weights differ by at most this (qtl)'],
+  ['busyPairBefore', 3, 'Same truck: the sale bill may be at most this many days before the purchase bill'],
+  ['busyPairAfter', 4, 'Same truck: the sale bill may be at most this many days after the purchase bill'],
+  ['busyWetCakeItems', 'WET CAKE', 'Busy items kept apart on the Wet cake page (not in orders, trucks or money)'],
+  ['busyWetCakeAccounts', 'HARYANA TRANSPORT, FREIGHT PAYABLE, GOOGLE PAY/PAYTM', 'Busy accounts that are wet cake only (its transporters, cash sales by Paytm)']
+];
+
+/* ---------------- firms ---------------- */
+function firms_(S) {
+  var list = String((S || readSettings_()).firms || '').split(',').map(function (f) { return normName_(f); }).filter(String);
+  return list.length ? list : [''];
+}
+function isOff_(t) { return t.status === 'Cancelled' || t.status === 'Returned'; }
+function sameDayTruck_(obj) {
+  var cur = obj.id ? rows_(T.TR).filter(function (r) { return r.id === obj.id; })[0] : null;
+  var no = normTruck_('truck' in obj ? obj.truck : cur && cur.truck), date = 'date' in obj ? obj.date : cur && cur.date;
+  if (!no || !date || (cur && !('truck' in obj) && !('date' in obj))) return null;
+  var key = String(no).replace(/[^A-Z0-9]/g, ''), H = hiddenSets_();
+  return rows_(T.TR).filter(function (t) { return t.id !== obj.id && !isOff_(t) && !hidTruck_(t, H) && String(t.truck).replace(/[^A-Z0-9]/g, '') === key && String(t.date) === String(date); })[0] || null;
+}
+function firmOf_(o, S) { return o && o.firm ? normName_(o.firm) : firms_(S)[0]; }
+function isFirm_(name, S) { return !!name && firms_(S).indexOf(normName_(name)) >= 0; }
+
+/* ---------------- firms kept out of this app (setting hiddenFirms) ----------------
+   Nov 2026: Shree Ram Solvex's own business (its POs/SOs and the trucks on them) will get its own Apps Script.
+   Those rows stay in the sheet untouched; this app neither shows, counts nor changes them.
+   Raghav's sales TO Shree Ram are Raghav's business and stay (Shree Ram remains a group-company customer). */
+function hiddenFirms_(S) { return String((S || readSettings_()).hiddenFirms || '').split(',').map(function (f) { return normName_(f); }).filter(String); }
+/* The hidden firms and the ids of their POs and SOs (tabs are read once per call, so this is cheap). */
+function hiddenSets_(S) {
+  S = S || readSettings_();
+  var H = { firms: hiddenFirms_(S), po: {}, so: {} };
+  if (!H.firms.length) return H;
+  rows_(T.PO).forEach(function (o) { if (H.firms.indexOf(firmOf_(o, S)) >= 0) H.po[o.id] = 1; });
+  rows_(T.SO).forEach(function (o) { if (H.firms.indexOf(firmOf_(o, S)) >= 0) H.so[o.id] = 1; });
+  return H;
+}
+function hidTruck_(t, H) { return !!t && (!!H.po[t.po] || !!H.so[t.so] || !!H.po[t.po2] || !!H.so[t.so2]); }
+/* How much of a truck is on order id (k = 'po' or 'so'; w = its weight in qtl, dispatch or received). A truck split
+   between two orders (Nitish, 24-11-2026) has its first order's part (poQty / soQty, at most w) on po / so and the
+   rest on po2 / so2. The same on the screen (partOn in Index.html). */
+function partOn_(t, k, id, w) {
+  if (!t || !id) return 0;
+  var two = t[k + '2'];
+  if (!two) return t[k] === id ? w : 0;
+  var first = Math.min(w, num_(t[k + 'Qty']) || 0);
+  return Math.round((t[k] === id ? first : two === id ? w - first : 0) * 100) / 100;
+}
+/* "PO-01-BCL", or for a split truck "PO-01-BCL 141.60 + PO-07-BCL 225.80" (a derived truck). */
+function ordIds_(t, k) { return !t[k + '2'] ? (t[k] || '') : t[k] + ' ' + qtl_(t[k + 'Q1']) + ' + ' + t[k + '2'] + ' ' + qtl_(t[k + 'Q2']); }
+function hiddenErr_(what, H) { return new Error(what + ' belongs to ' + H.firms.join(', ') + ', which is kept out of this app.'); }
+/* POs, SOs and trucks without the hidden ones. */
+function visibleRows_(S) {
+  var H = hiddenSets_(S);
+  return {
+    po: rows_(T.PO).filter(function (o) { return !H.po[o.id]; }),
+    so: rows_(T.SO).filter(function (o) { return !H.so[o.id]; }),
+    trucks: rows_(T.TR).filter(function (t) { return !hidTruck_(t, H); })
+  };
+}
+/* Refuses any change to a hidden truck / order. */
+function guardTruck_(id) {
+  var H = hiddenSets_(), t = rows_(T.TR).filter(function (r) { return r.id === id; })[0];
+  if (hidTruck_(t, H)) throw hiddenErr_(id, H);
+}
+function guardOrder_(table, id) {
+  var H = hiddenSets_();
+  if ((table === 'po' && H.po[id]) || (table === 'so' && H.so[id])) throw hiddenErr_(id, H);
+}
+
+/* ---------------- web app entry ---------------- */
+
+function doGet(e) {
+  var html = HtmlService.createHtmlOutputFromFile('Index').getContent();
+  var url = '';
+  try { url = ScriptApp.getService().getUrl(); } catch (x) {}
+  var safe = function (o) { return JSON.stringify(o).replace(/</g, '\\u003c'); };
+  html = html.replace('<head>', '<head><script>var APP_URL=' + safe(url) + ';var INIT=' + safe((e && e.parameter) || {}) + ';</script>');
+  return HtmlService.createHtmlOutput(html)
+    .setTitle(APP_DRIVE_)
+    .addMetaTag('viewport', 'width=device-width, initial-scale=1');
+}
+
+/** Run once from the editor to create the tabs and import data. Safe to run again: it does nothing if the tabs exist. */
+function setup() {
+  editorOnly_();
+  PropertiesService.getScriptProperties().deleteProperty('schema_v'); // running setup always re-checks the tabs
+  CacheService.getScriptCache().removeAll(['schema_ok', 'trig_ok', 'tz']);
+  var r = ensureSetup_();
+  var auto = '';
+  try {
+    PropertiesService.getScriptProperties().deleteProperty('triggers_v4'); ensureTriggers_();
+    var S0 = readSettings_();
+    auto = ' | Daily 9 pm report ' + (busyOn_(S0.dailyReport) ? 'on' : 'off') + ', Sunday backup ' + (busyOn_(S0.weeklyBackup) ? 'on' : 'off') + ' (settings dailyReport / weeklyBackup).';
+  }
+  catch (e) { auto = ' | Could not switch on the daily report: ' + e.message; }
+  Logger.log(JSON.stringify(r || 'Already set up') + auto + (users_().length ? '' : ' | Now open the app link to create your owner login.'));
+}
+
+/** Run from the editor to get today's report by email right now (to check it works). */
+function testDailyReport() {
+  editorOnly_();
+  ensureSetup_();
+  sendDailyReport_();
+  Logger.log('Report sent to ' + (readSettings_().reportEmail || Session.getEffectiveUser().getEmail()));
+}
+
+/* Every function without "_" at the end can be called from a browser through the app link.
+   These two checks keep the editor-only and timer-only functions from being started that way. */
+function editorOnly_() {
+  if (!isOwnerGoogle_()) throw new Error('Run this from the Apps Script editor with the owner account.');
+}
+function fromTrigger_(e) {
+  if (!e || !e.triggerUid) return false;
+  try {
+    return ScriptApp.getProjectTriggers().some(function (t) { return String(t.getUniqueId()) === String(e.triggerUid); });
+  } catch (x) { return false; }
+}
+
+/* ---------------- API called by the page ---------------- */
+
+/** Before login: is the app set up, and is there an owner yet? */
+function api_authState() {
+  var report = ensureSetup_();
+  var set = readSettings_();
+  return { needsOwner: users_().length === 0, isOwnerGoogle: isOwnerGoogle_(), company: set.company || '', importReport: report };
+}
+
+/** First account. Allowed only when no users exist and the person opening the app is the sheet owner's Google account. */
+function api_createOwner(username, name, password) {
+  return lockRun_(function () {
+    if (users_().length) throw new Error('An owner already exists. Please log in.');
+    if (!isOwnerGoogle_()) throw new Error('Only the Google account that owns this sheet can create the first login.');
+    createUser_({ id: username, name: name, role: 'Owner', password: password, active: true }, true);
+    return startSession_(cleanUser_(username));
+  });
+}
+
+function api_login(username, password) {
+  var u = cleanUser_(username), cache = CacheService.getScriptCache(), key = 'fail_' + u;
+  var fails = Number(cache.get(key) || 0);
+  if (fails >= 5) throw new Error('Too many wrong passwords. Try again in 10 minutes.');
+  var rec = users_().filter(function (x) { return x.id === u && x.active; })[0];
+  if (!rec || hash_(rec.salt, String(password || '')) !== rec.hash) {
+    cache.put(key, String(fails + 1), 600);
+    throw new Error('Wrong username or password.');
+  }
+  cache.remove(key);
+  return startSession_(u);
+}
+
+function api_logout(token) {
+  token = tok_(token);
+  if (token) { PropertiesService.getScriptProperties().deleteProperty('s_' + token); CacheService.getScriptCache().remove('sess_' + token); }
+  return true;
+}
+
+function api_changePassword(token, oldPw, newPw) {
+  auth_(token);
+  return lockRun_(function () {
+    var rec = users_().filter(function (x) { return x.id === ME.id; })[0];
+    if (hash_(rec.salt, String(oldPw || '')) !== rec.hash) throw new Error('Current password is wrong.');
+    createUser_({ id: ME.id, password: newPw }, false);
+    return true;
+  });
+}
+
+function api_saveUser(token, obj) {
+  auth_(token); need_('users');
+  return withLock_(function () {
+    obj = obj || {};
+    var id = cleanUser_(obj.id);
+    var exists = users_().some(function (x) { return x.id === id; });
+    if (obj._new && exists) throw new Error('Username ' + id + ' is already taken. Choose another.');
+    if (!obj._new && !exists) throw new Error('User ' + id + ' was not found.');
+    if (id === ME.id && (obj.active === false || (obj.role && obj.role !== 'Owner'))) throw new Error('You cannot remove your own Owner access.');
+    createUser_(obj, !!obj._new);
+  });
+}
+
+function api_getData(token) {
+  auth_(token);
+  ensureSetup_();
+  if (ME.role === 'Owner') ensureTriggers_();
+  return readAll_();
+}
+
+/** Background refresh from an open screen. v = the data version the screen has.
+    Nothing changed since then: a tiny "same" answer and no tab is read. Otherwise (or full = true) all data, like api_getData. */
+function api_sync(token, v, full) {
+  auth_(token);
+  ensureSetup_();
+  if (ME.role === 'Owner') ensureTriggers_();
+  var cur = dataVersion_();
+  if (!full && !REQ_.upgraded && v && String(v) === cur) return { same: true, v: cur, today: today_(), syncedAt: nowStr_() };
+  return readAll_();
+}
+
+function api_saveTruck(token, obj) {
+  auth_(token); need_('trucks');
+  obj = obj || {};
+  TRUCK_LOCKED.forEach(function (k) { delete obj[k]; });
+  if (!ME.can.truckMoney) {
+    // Dispatch may enter the freight rate together with the weight (it is required then). Other money fields stay hidden.
+    var keepRate = num_(obj.loadWt) > 0;
+    TRUCK_MONEY.forEach(function (k) { if (!(keepRate && k === 'frate')) delete obj[k]; });
+  }
+  var force = obj._force === true && ME.role === 'Owner';
+  var rid = cleanRid_(obj._rid);
+  delete obj._force; delete obj._rid;
+  return withLock_(function () {
+    // Trucks and orders of a firm kept out of this app (hiddenFirms) cannot be changed or used here.
+    var H = hiddenSets_(), was = obj.id ? rows_(T.TR).filter(function (r) { return r.id === obj.id; })[0] : null;
+    if (hidTruck_(was, H)) throw hiddenErr_(obj.id, H);
+    if (obj.po && H.po[obj.po]) throw hiddenErr_(obj.po, H);
+    if (obj.so && H.so[obj.so]) throw hiddenErr_(obj.so, H);
+    if (obj.po2 && H.po[obj.po2]) throw hiddenErr_(obj.po2, H);
+    if (obj.so2 && H.so[obj.so2]) throw hiddenErr_(obj.so2, H);
+    [['po', T.PO], ['so', T.SO]].forEach(function (k) {
+      if (!(k[0] in obj) || !obj[k[0]]) return;
+      var cur = obj.id ? rows_(T.TR).filter(function (r) { return r.id === obj.id; })[0] : null;
+      if (cur && cur[k[0]] === obj[k[0]]) return;
+      var o = rows_(k[1]).filter(function (r) { return r.id === obj[k[0]]; })[0];
+      if (o && o.status === 'Settled') throw new Error(o.id + ' is marked Short-closed. Undo short-close on it first to add more trucks.');
+    });
+    if (!obj.id) checkNewTruck_(obj);
+    var dup = sameDayTruck_(obj);
+    if (dup && !force) throw new Error('Vehicle ' + dup.truck + ' is already entered on ' + dmy_(dup.date) + ' as ' + dup.id + '. A vehicle cannot be entered twice on the same day.' + (ME.role === 'Owner' ? '' : ' Ask the Owner if this is a real second trip.'));
+    linkTruckOrders_(obj);
+    checkSplit_(obj);
+    checkQty_(obj, force);
+    if (obj.id) checkTruckRules_(obj);
+    if (obj.id && obj.freightPaid === true && !(was && was.freightPaid)) obj.tAdv = advForPay_(obj);
+    if (obj.id && obj.freightPaid === false) obj.tAdv = '';
+    return saveRecord_(T.TR, obj);
+  }, rid);
+}
+
+/** Closed trucks and old payments can only be changed by the Owner. */
+/** Plant POs (own solvent plant) never have a sale order; a trading PO linked to a sale order fills it in automatically. */
+function linkTruckOrders_(obj) {
+  var cur = obj.id ? rows_(T.TR).filter(function (r) { return r.id === obj.id; })[0] : null;
+  var poId = 'po' in obj ? obj.po : cur && cur.po;
+  var po = rows_(T.PO).filter(function (r) { return r.id === poId; })[0];
+  if (!po) return;
+  var so = 'so' in obj ? obj.so : cur ? cur.so : '';
+  if (po.poType === 'plant') {
+    if (so && 'so' in obj && obj.so) throw new Error(po.id + ' is for your own plant (' + firmOf_(po) + '). It has no customer or sale order.');
+    if (so) obj.so = '';
+  } else if (!so && po.linkSO) {
+    var link = rows_(T.SO).filter(function (r) { return r.id === po.linkSO && r.status !== 'Cancelled' && r.status !== 'Settled'; })[0];
+    if (link) obj.so = link.id;
+  }
+  // Each firm keeps its own books: a truck's sale order is in the same firm as its PO (24-11-2026).
+  // (Selling to another of your firms is a sale order whose customer is that firm.)
+  var soNow = 'so' in obj ? obj.so : so;
+  if (soNow && ('so' in obj || 'po' in obj)) {
+    var sx = rows_(T.SO).filter(function (r) { return r.id === soNow; })[0];
+    if (sx && firmOf_(sx) !== firmOf_(po)) throw new Error(soNow + ' is in ' + firmOf_(sx) + ' but ' + po.id + ' is in ' + firmOf_(po) + '. A truck\'s sale order must be in the same firm as its PO.');
+  }
+}
+/* One truck on two orders (Nitish, 24-11-2026): the first order (po / so) takes poQty / soQty qtl, the second
+   (po2 / so2) the rest of the weight. The second order has the same supplier / customer and firm as the first (and
+   the same PO type / freight terms), and must be open when it is chosen. A blank second order removes the split. */
+function checkSplit_(obj) {
+  if (!['po', 'so', 'po2', 'so2', 'poQty', 'soQty', 'po2Qty', 'so2Qty', 'loadWt'].some(function (k) { return k in obj; })) return;
+  var cur = obj.id ? rows_(T.TR).filter(function (r) { return r.id === obj.id; })[0] : null;
+  var get = function (k) { return (k in obj) ? obj[k] : cur ? cur[k] : ''; };
+  var L = num_(get('loadWt')) || 0, po = rows_(T.PO).filter(function (r) { return r.id === get('po'); })[0];
+  var wChanged = !!cur && ('loadWt' in obj) && Math.abs((num_(obj.loadWt) || 0) - (num_(cur.loadWt) || 0)) > 0.005;
+  [['po', T.PO, 'PO', 'supplier', 'plant'], ['so', T.SO, 'SO', 'customer', 'buyer']].forEach(function (c) {
+    var k = c[0], k2 = k + '2', kq = k + 'Qty', kq2 = k + '2Qty', id1 = get(k), id2 = get(k2);
+    if (k === 'so' && po && po.poType === 'plant') id2 = ''; // own-plant trucks have no sale order
+    if (id2 && !id1 && obj[k2]) throw new Error('Choose the first ' + c[2] + ' before a second one.');
+    var has = function (f) { return get(f) !== '' && get(f) != null; };
+    if (!id2 || !id1) { if (get(k2) || has(kq) || has(kq2)) { obj[k2] = ''; obj[kq] = ''; obj[kq2] = ''; } return; }
+    if (id2 === id1) throw new Error('The second ' + c[2] + ' is the same as the first (' + id1 + ').');
+    var list = rows_(c[1]), o1 = list.filter(function (r) { return r.id === id1; })[0], o2 = list.filter(function (r) { return r.id === id2; })[0];
+    if (!o2) throw new Error(id2 + ' was not found.');
+    if (!o1) return;
+    if ((k2 in obj) && (!cur || cur[k2] !== id2) && (o2.status === 'Cancelled' || o2.status === 'Settled')) throw new Error(id2 + ' is ' + (o2.status === 'Settled' ? 'short-closed' : 'cancelled') + '. Choose an open ' + c[2] + ' for the rest of the truck.');
+    if (normName_(o1[c[4]]) !== normName_(o2[c[4]])) throw new Error(id2 + ' is for ' + o2[c[4]] + ' but ' + id1 + ' is for ' + o1[c[4]] + '. A truck can be split only between orders of the same ' + c[3] + '.');
+    if (firmOf_(o1) !== firmOf_(o2)) throw new Error(id2 + ' is in ' + firmOf_(o2) + ' but ' + id1 + ' is in ' + firmOf_(o1) + '. Both orders must be in the same firm.');
+    if (k === 'po' && (o1.poType === 'plant') !== (o2.poType === 'plant')) throw new Error(id1 + ' and ' + id2 + ' must both be trading POs or both own-plant POs.');
+    if (k === 'so' && String(o1.freightMode || '') !== String(o2.freightMode || '')) throw new Error(id1 + ' and ' + id2 + ' have different freight terms. A truck can be split only between sale orders with the same freight terms.');
+    var q = num_(get(kq));
+    if (!(L > 0)) throw new Error('Enter the dispatch weight before splitting the truck between two orders.');
+    // Both quantities are typed and must add up to the dispatch weight (Nitish, 25-11-2026). The second qty: as typed;
+    // else as saved; else (a split saved before, or only the first qty sent) the rest of the weight, but never after the
+    // weight changed: then the two quantities must be changed in the same save.
+    var q2 = (kq2 in obj) && obj[kq2] !== '' && obj[kq2] != null ? num_(obj[kq2]) :
+      cur && cur[k2] === id2 && cur[kq2] !== '' && cur[kq2] != null ? num_(cur[kq2]) :
+      cur && cur[k2] && wChanged ? (num_(cur.loadWt) || 0) - (num_(cur[kq]) || 0) : L - q;
+    if (!(q > 0) || !(q2 > 0)) throw new Error('Enter the qty on ' + id1 + ' and the qty on ' + id2 + ' (both more than 0). Together they are the dispatch weight (' + qtl_(L) + ' qtl).');
+    if (Math.abs(q + q2 - L) > 0.005) throw new Error(c[2] + ' split: ' + qtl_(q) + ' on ' + id1 + ' + ' + qtl_(q2) + ' on ' + id2 + ' = ' + qtl_(q + q2) + ' qtl, but the dispatch weight is ' + qtl_(L) + ' qtl. Change the two quantities so they add up to ' + qtl_(L) + '.');
+    obj[kq2] = Math.round(q2 * 100) / 100;
+  });
+}
+var SUPPLIER_SIDE_ = ['plantPaid', 'plantPaidDate', 'plantUTR', 'billNo', 'billQty'];
+function checkTruckRules_(obj) {
+  var t = rows_(T.TR).filter(function (r) { return r.id === obj.id; })[0];
+  if (!t) return;
+  var get = function (k) { return (k in obj) ? obj[k] : t[k]; };
+  var today = Utilities.formatDate(new Date(), tz_(), 'yyyy-MM-dd');
+  if (!ME.can.editClosed) {
+    var po = rows_(T.PO).filter(function (r) { return r.id === t.po; })[0];
+    var so = rows_(T.SO).filter(function (r) { return r.id === t.so; })[0];
+    var d = derive_(t, po, so, readSettings_(), today);
+    // A closed truck may still have its supplier unpaid: staff can pay the supplier and enter the supplier invoice on it.
+    // Paying freight closes a truck: staff can still undo a freight payment made today (that reopens the truck).
+    var undoFr = obj.freightPaid === false && t.freightPaid && t.freightPaidDate === today;
+    if (d.st === 6 && Object.keys(obj).some(function (k) { return k !== 'id' && SUPPLIER_SIDE_.indexOf(k) < 0 && !(undoFr && ['freightPaid', 'freightPaidDate', 'freightUTR'].indexOf(k) >= 0); })) throw new Error(t.id + ' is closed. Only the Owner can change it.');
+    if (obj.plantPaid === false && t.plantPaid && t.plantPaidDate !== today) throw new Error('Only the Owner can undo a supplier payment from an earlier day.');
+    if (obj.freightPaid === false && t.freightPaid && t.freightPaidDate !== today) throw new Error('Only the Owner can undo a freight payment from an earlier day.');
+    if ('received' in obj || 'deduction' in obj) throw new Error('Only the Owner can correct customer payments. Use + Payment to add money received.');
+  }
+  requireWeight_(obj, t);
+  if (get('plantPaid') === true && !(num_(get('loadWt')) > 0)) throw new Error('Enter the dispatch weight before marking the supplier paid.');
+  var tpo = rows_(T.PO).filter(function (r) { return r.id === get('po'); })[0];
+  if (num_(get('unloadWt')) > 0 && !get('so') && !(tpo && tpo.poType === 'plant')) throw new Error('Choose the customer (sale order) before recording unloading.');
+}
+
+/* Once a weight is entered, the freight rate is required (checked on the values after this save).
+   The transporter is optional (Nitish, 23-11-2026): it can be added later. */
+function requireWeight_(obj, cur) {
+  if (!('loadWt' in obj) && !('frate' in obj)) return;
+  var get = function (k) { return (k in obj) ? obj[k] : cur[k]; };
+  if (!(num_(get('loadWt')) > 0)) return;
+  if (!(num_(get('frate')) > 0)) throw new Error('Enter the freight rate per qtl. It is required once the weight is entered.');
+}
+/* Order quantity window (setting qtyTolerancePct, 1%). Example PO-01-BCL of 10,000 qtl: complete from 9,900 qtl,
+   limit 10,100 qtl. Staff cannot take a PO or SO over the limit, or put a new truck on a complete order;
+   the Owner can (the screen warns first, Save again sends force). Same rule on the screen in truckWarn / qtyProblem. */
+function qtyTol_(S) { var x = num_(S.qtyTolerancePct); return x === '' ? 0.01 : x; }
+function checkQty_(obj, force) {
+  if (force) return;
+  var cur = obj.id ? rows_(T.TR).filter(function (r) { return r.id === obj.id; })[0] : null;
+  if (cur && isOff_(cur)) return;
+  var get = function (k) { return (k in obj) ? obj[k] : cur ? cur[k] : ''; };
+  var H = hiddenSets_(), tol = qtyTol_(readSettings_()), L = num_(get('loadWt')) || 0, trucks = rows_(T.TR).filter(function (t) { return !hidTruck_(t, H); });
+  if (L > 1000) return; // looks like kg: the save is refused with the clear "looks like kg" message instead
+  var owner = ME && ME.role === 'Owner';
+  // A truck split between two orders counts only its part on each (partOn_).
+  var me = { po: get('po'), so: get('so'), po2: get('po2'), so2: get('so2'), poQty: get('poQty'), soQty: get('soQty') }, curL = cur ? (num_(cur.loadWt) || 0) : 0;
+  [['po', T.PO, 'loaded'], ['so', T.SO, 'dispatched']].forEach(function (k) {
+    [me[k[0]], me[k[0] + '2']].forEach(function (id) {
+      if (!id) return;
+      var o = rows_(k[1]).filter(function (r) { return r.id === id; })[0], qty = o ? num_(o.qty) : '';
+      if (!o || !(qty > 0) || o.status === 'Cancelled' || o.status === 'Settled') return;
+      var onIt = !!cur && (cur[k[0]] === id || cur[k[0] + '2'] === id); // this truck was already on this order before the save
+      var others = 0;
+      trucks.forEach(function (t) { if (t.id !== obj.id && !isOff_(t)) others += partOn_(t, k[0], id, num_(t.loadWt) || 0); });
+      others = Math.round(others * 100) / 100;
+      var mine = partOn_(me, k[0], id, L), before = onIt ? partOn_(cur, k[0], id, curL) : 0, limit = qty * (1 + tol), full = qty * (1 - tol);
+      if (mine > before && others + mine > limit + 0.005) {
+        throw new Error(id + ' would go over its limit of ' + qtl_(limit) + ' qtl (' + qtl_(qty) + ' + ' + Math.round(tol * 10000) / 100 + '%) by ' + qtl_(others + mine - limit) + ' qtl.' +
+          (owner ? ' Open it again and tap Save twice to accept.' : ' Ask the Owner.'));
+      }
+      if (!onIt && others >= full - 0.005) {
+        throw new Error(id + ' is complete (' + qtl_(others) + ' of ' + qtl_(qty) + ' qtl ' + k[2] + ').' +
+          (owner ? ' Short-close it, or open this again and tap Save twice to add the truck anyway.' : ' Ask the Owner.'));
+      }
+    });
+  });
+}
+function qtl_(x) {
+  var p = (Math.round(x * 100) / 100).toFixed(2).split('.'), i = p[0], last = i.slice(-3), rest = i.slice(0, -3);
+  return (rest ? rest.replace(/\B(?=(\d{2})+(?!\d))/g, ',') + ',' : '') + last + '.' + p[1];
+}
+
+/* The bank UTR is optional for supplier and freight payments (Nitish, Nov 2026). It is saved when it is entered. */
+function checkNewTruck_(obj) {
+  var today = Utilities.formatDate(new Date(), tz_(), 'yyyy-MM-dd');
+  if (!obj.placedOn) obj.placedOn = today;
+  if (!obj.date) {
+    if (num_(obj.loadWt) > 0) throw new Error('Enter the date the truck left the plant, from the slip.');
+    obj.date = obj.placedOn;
+  }
+  requireWeight_(obj, {});
+  if (obj.plantPaid === true && !(num_(obj.loadWt) > 0)) throw new Error('Enter the dispatch weight before marking the supplier paid.');
+}
+
+/** Adds a buyer payment (and any TDS/claim deduction) on the server, so two people entering at once never lose an amount. */
+function api_addPayment(token, id, amount, date, deduction, note, rid) {
+  auth_(token); need_('truckMoney');
+  return withLock_(function () {
+    var t = rows_(T.TR).filter(function (r) { return r.id === id; })[0];
+    if (!t) throw new Error('Truck ' + id + ' was not found.');
+    guardTruck_(id);
+    var a = num_(amount) || 0, d = num_(deduction) || 0;
+    if (a < 0 || d < 0) throw new Error('Amounts must be 0 or more.');
+    if (!a && !d) throw new Error('Enter an amount received or a deduction.');
+    var upd = { id: id, received: Math.round(((num_(t.received) || 0) + a) * 100) / 100 };
+    if (a) upd.receivedDate = date || Utilities.formatDate(new Date(), tz_(), 'yyyy-MM-dd');
+    if (d) {
+      upd.deduction = Math.round(((num_(t.deduction) || 0) + d) * 100) / 100;
+      upd.deductionNote = (t.deductionNote ? t.deductionNote + ' | ' : '') + (note || 'Deduction') + ' ' + d;
+    }
+    saveRecord_(T.TR, upd);
+    var so = rows_(T.SO).filter(function (r) { return r.id === t.so; })[0];
+    var pay = sheet_(T.PAY) || makeTab_(T.PAY);
+    ensureRows_(pay, pay.getLastRow() + 1);
+    pay.getRange(pay.getLastRow() + 1, 1, 1, SCHEMA[T.PAY].length).setValues([rowFor_(T.PAY, {
+      id: nextId_(T.PAY, rows_(T.PAY), {}), date: upd.receivedDate || Utilities.formatDate(new Date(), tz_(), 'yyyy-MM-dd'),
+      truck: id, so: t.so, buyer: so ? so.buyer : '', amount: a || '', deduction: d || '', note: d ? (note || 'Deduction') : '', firm: firmOf_(so)
+    })]);
+    dropTab_(T.PAY); markChanged_(T.PAY);
+  }, cleanRid_(rid));
+}
+
+/** Money received from a customer (factory). Customer money is kept per customer, not per truck (Nov 2026).
+    One line in APP_PAYMENTS: Dispatch No. blank, Customer filled, deduction reason and bank reference in the Note. */
+function api_addCustomerPayment(token, buyer, amount, date, deduction, reason, ref, note, rid, firm) {
+  auth_(token); need_('truckMoney');
+  buyer = normName_(buyer);
+  var a = num_(amount) || 0, d = num_(deduction) || 0;
+  reason = String(reason || '').trim(); ref = String(ref || '').trim().toUpperCase(); note = String(note || '').trim();
+  if (!buyer) throw new Error('Choose the customer.');
+  if (a < 0 || d < 0) throw new Error('Amounts must be 0 or more.');
+  if (!a && !d) throw new Error('Enter the amount received, or a deduction.');
+  if (d && !reason) throw new Error('Choose the reason for the deduction.');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(date || ''))) throw new Error('Enter the date.');
+  return withLock_(function () {
+    // Customer money is kept per firm and customer (24-11-2026). A screen opened before this sends no firm: the first firm.
+    var S = readSettings_();
+    firm = firm ? normName_(firm) : firms_(S)[0];
+    if (!isFirm_(firm, S) || hiddenFirms_(S).indexOf(firm) >= 0) throw new Error('Choose the firm that received the money.');
+    if (!rows_(T.SO).some(function (o) { return normName_(o.buyer) === buyer && firmOf_(o, S) === firm; })) throw new Error('There is no sale order for ' + buyer + ' in ' + firm + '.');
+    var parts = [];
+    if (d) parts.push(reason);
+    if (ref) parts.push('Ref ' + ref);
+    if (note) parts.push(note);
+    var id = appendPay_({ date: date, truck: '', so: '', buyer: buyer, amount: a || '', deduction: d || '', note: parts.join(' · '), firm: firm });
+    log_('Customer payment', buyer, id + ' (' + firm + '): received ' + a + (d ? ', ' + reason + ' ' + d : '') + (ref ? ', ref ' + ref : ''));
+  }, cleanRid_(rid));
+}
+function appendPay_(o) {
+  var sh = sheet_(T.PAY) || makeTab_(T.PAY);
+  o.id = nextId_(T.PAY, rows_(T.PAY), {});
+  ensureRows_(sh, sh.getLastRow() + 1);
+  sh.getRange(sh.getLastRow() + 1, 1, 1, SCHEMA[T.PAY].length).setValues([rowFor_(T.PAY, o)]);
+  dropTab_(T.PAY); markChanged_(T.PAY);
+  return o.id;
+}
+/** A wrong payment is never deleted: a reversal line with the same amounts in minus is added (dated today).
+    Accounts can reverse only what was entered today; the Owner any payment. */
+function api_reversePayment(token, payId, reason) {
+  auth_(token); need_('truckMoney');
+  reason = String(reason || '').trim();
+  if (!reason) throw new Error('Write why this payment is reversed.');
+  return withLock_(function () {
+    var all = rows_(T.PAY), p = all.filter(function (r) { return r.id === payId; })[0];
+    if (!p) throw new Error('Payment ' + payId + ' was not found.');
+    if (p.src === 'Busy') throw new Error(payId + ' comes from Busy. Correct it in Busy and upload the file again: the app then reverses it by itself.');
+    if (/^Reversal of /.test(String(p.note)) || (num_(p.amount) || 0) < 0 || (num_(p.deduction) || 0) < 0) throw new Error(payId + ' is itself a reversal.');
+    if (all.some(function (r) { return String(r.note).indexOf('Reversal of ' + payId + ':') === 0; })) throw new Error(payId + ' is already reversed.');
+    if (ME.role !== 'Owner' && String(p.at).slice(0, 10) !== today_()) throw new Error('Only the Owner can reverse a payment entered on an earlier day.');
+    var a = num_(p.amount) || 0, d = num_(p.deduction) || 0;
+    var id = appendPay_({ date: today_(), truck: p.truck, so: p.so, buyer: p.buyer, amount: a ? -a : '', deduction: d ? -d : '', note: 'Reversal of ' + payId + ': ' + reason, firm: p.firm });
+    log_('Payment reversed', payId, id + ': ' + reason);
+  });
+}
+
+/** An advance to a transporter that is not tied to a truck (e.g. given before loading). It is used automatically
+    on that transporter's freight (transAdv_). Owner and Accounts. */
+function api_addAdvance(token, o, rid) {
+  auth_(token); need_('truckMoney');
+  o = o || {};
+  var tr = normName_(o.transporter), a = num_(o.amount), S = readSettings_(), firm = o.firm ? normName_(o.firm) : firms_(S)[0];
+  if (!tr) throw new Error('Enter the transporter.');
+  if (!isFirm_(firm, S) || hiddenFirms_(S).indexOf(firm) >= 0) throw new Error('Choose the firm that gave the advance.');
+  if (!(a > 0)) throw new Error('Enter the amount of the advance.');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(o.date || ''))) throw new Error('Enter the date.');
+  return withLock_(function () {
+    var id = appendAdv_({ date: o.date, transporter: tr, vehicle: normTruck_(o.vehicle), driver: String(o.driver || '').trim(), amount: a,
+      ref: String(o.ref || '').trim().toUpperCase(), note: String(o.note || '').trim(), firm: firm });
+    log_('Transporter advance', tr, id + ' (' + firm + '): ' + a + (o.vehicle ? ', vehicle ' + normTruck_(o.vehicle) : '') + (o.ref ? ', ref ' + String(o.ref).toUpperCase() : ''));
+  }, cleanRid_(rid));
+}
+function appendAdv_(o) {
+  var sh = sheet_(T.ADV) || makeTab_(T.ADV);
+  o.id = nextId_(T.ADV, rows_(T.ADV), {});
+  ensureRows_(sh, sh.getLastRow() + 1);
+  sh.getRange(sh.getLastRow() + 1, 1, 1, SCHEMA[T.ADV].length).setValues([rowFor_(T.ADV, o)]);
+  dropTab_(T.ADV); markChanged_(T.ADV);
+  return o.id;
+}
+/** A wrong advance is never deleted: a minus line is added (dated today). Accounts only for today's entries; the Owner any. */
+function api_reverseAdvance(token, advId, reason) {
+  auth_(token); need_('truckMoney');
+  reason = String(reason || '').trim();
+  if (!reason) throw new Error('Write why this advance is reversed.');
+  return withLock_(function () {
+    var all = rows_(T.ADV), p = all.filter(function (r) { return r.id === advId; })[0];
+    if (!p) throw new Error('Advance ' + advId + ' was not found.');
+    if (p.src === 'Busy') throw new Error(advId + ' comes from Busy. Correct it in Busy and upload the file again: the app then reverses it by itself.');
+    if (/^Reversal of /.test(String(p.note)) || (num_(p.amount) || 0) < 0) throw new Error(advId + ' is itself a reversal.');
+    if (all.some(function (r) { return String(r.note).indexOf('Reversal of ' + advId + ':') === 0; })) throw new Error(advId + ' is already reversed.');
+    if (ME.role !== 'Owner' && String(p.at).slice(0, 10) !== today_()) throw new Error('Only the Owner can reverse an advance entered on an earlier day.');
+    var id = appendAdv_({ date: today_(), transporter: p.transporter, vehicle: p.vehicle, driver: p.driver, amount: -(num_(p.amount) || 0), ref: '', note: 'Reversal of ' + advId + ': ' + reason, firm: p.firm });
+    log_('Advance reversed', advId, id + ': ' + reason);
+  });
+}
+
+function api_savePO(token, obj) {
+  auth_(token); need_('orders');
+  obj = obj || {};
+  delete obj.status; // Cancel / Short-close / Restore have their own checks
+  ORDER_LOCKED.forEach(function (k) { delete obj[k]; }); // Busy fields: set only by the Busy upload
+  return withLock_(function () {
+    checkOrderFirm_(T.PO, obj);
+    var id = saveRecord_(T.PO, obj);
+    var po = rows_(T.PO).filter(function (r) { return r.id === id; })[0];
+    if (po && po.linkSO && po.poType !== 'plant' && 'linkSO' in obj) {
+      rows_(T.TR).filter(function (t) { return t.po === po.id && !t.so && !isOff_(t); }).forEach(function (t) { saveRecord_(T.TR, { id: t.id, so: po.linkSO }); });
+    }
+  });
+}
+function api_saveSO(token, obj) {
+  auth_(token); need_('orders');
+  obj = obj || {};
+  delete obj.status; // Cancel / Short-close / Restore have their own checks
+  ORDER_LOCKED.forEach(function (k) { delete obj[k]; }); // Busy fields: set only by the Busy upload
+  return withLock_(function () { checkOrderFirm_(T.SO, obj); return saveRecord_(T.SO, obj); });
+}
+function checkOrderFirm_(name, obj) {
+  var S = readSettings_(), cur = obj.id ? rows_(name).filter(function (r) { return r.id === obj.id; })[0] : null;
+  var get = function (k) { return (k in obj) ? obj[k] : cur ? cur[k] : ''; };
+  if ('firm' in obj) {
+    obj.firm = normName_(obj.firm);
+    if (obj.firm && !isFirm_(obj.firm, S)) throw new Error('Unknown firm "' + obj.firm + '". Your firms are: ' + firms_(S).join(', ') + '.');
+  }
+  var firm = get('firm') ? normName_(get('firm')) : firms_(S)[0], H = hiddenSets_(S);
+  // Orders of a firm kept out of this app: no changes, no new ones; no own-plant POs when the plant firm is kept out.
+  if (cur && ((name === T.PO && H.po[cur.id]) || (name === T.SO && H.so[cur.id]))) throw hiddenErr_(cur.id, H);
+  if (H.firms.indexOf(firm) >= 0) throw new Error('Orders in ' + firm + ' are kept out of this app.');
+  if (name === T.PO && get('poType') === 'plant' && H.firms.indexOf(normName_(S.plantFirm)) >= 0) throw new Error('Own-plant POs belong to ' + normName_(S.plantFirm) + ', which is kept out of this app.');
+  if (name === T.PO && 'takenIn' in obj && obj.takenIn) {
+    obj.takenIn = normName_(obj.takenIn);
+    var tf = String(S.tradingFirms || '').split(',').map(function (f) { return normName_(f); }).filter(String);
+    if (tf.length && tf.indexOf(obj.takenIn) < 0) throw new Error('Unknown firm "' + obj.takenIn + '" in Booked in the name of.');
+  }
+  if (name === T.PO) {
+    if ('poType' in obj && obj.poType && ['trade', 'plant'].indexOf(obj.poType) < 0) throw new Error('Unknown PO type.');
+    if (get('poType') === 'plant') { if (get('linkSO')) obj.linkSO = ''; return; }
+    var link = get('linkSO');
+    if (link) {
+      var so = rows_(T.SO).filter(function (r) { return r.id === link; })[0];
+      if (!so || so.status === 'Cancelled') throw new Error('Sale order ' + link + ' not found.');
+      if (firmOf_(so, S) !== firm) throw new Error(link + ' belongs to ' + firmOf_(so, S) + ', but this PO is in ' + firm + '. Use a sale order of the same firm.');
+    }
+  } else {
+    if (normName_(get('buyer')) === firm) throw new Error('A firm cannot sell to itself. Check the firm and the customer.');
+  }
+}
+
+/** Cancel instead of delete, so nothing is ever lost. */
+function api_cancel(token, table, id, reason) {
+  auth_(token); need_(table === 'truck' ? 'cancelTruck' : 'orders');
+  return withLock_(function () {
+    if (table === 'truck') guardTruck_(id); else guardOrder_(table, id); // kept-out firms (hiddenFirms)
+    var name = { truck: T.TR, po: T.PO, so: T.SO }[table];
+    if (!name) throw new Error('Unknown record type');
+    if (table !== 'truck') {
+      var key = table === 'po' ? 'po' : 'so';
+      var n = rows_(T.TR).filter(function (t) { return (t[key] === id || t[key + '2'] === id) && !isOff_(t); }).length;
+      if (n) throw new Error(id + ' still has ' + n + ' active truck' + (n > 1 ? 's' : '') + '. Move or cancel them first.');
+      if (table === 'so') {
+        var lp = rows_(T.PO).filter(function (p) { return p.linkSO === id && p.status !== 'Cancelled'; })[0];
+        if (lp) throw new Error(lp.id + ' is set to sell to ' + id + '. Change that PO first.');
+      }
+    }
+    var old = rows_(name).filter(function (r) { return r.id === id; })[0];
+    var note = (old && old.note ? old.note + ' | ' : '') + 'Cancelled' + (reason ? ': ' + reason : '');
+    return saveRecord_(name, { id: id, status: 'Cancelled', note: note });
+  });
+}
+
+/** Mark a PO or SO settled (done, small over/under accepted) or undo it. */
+function api_settle(token, table, id, on) {
+  auth_(token); need_('orders');
+  var name = { po: T.PO, so: T.SO }[table];
+  if (!name) throw new Error('Unknown order type.');
+  return withLock_(function () {
+    guardOrder_(table, id);
+    var o = rows_(name).filter(function (r) { return r.id === id; })[0];
+    if (!o) throw new Error(id + ' not found.');
+    if (o.status === 'Cancelled') throw new Error(id + ' is cancelled.');
+    return saveRecord_(name, { id: id, status: on ? 'Settled' : '' });
+  });
+}
+
+/** A truck that reached the plant but went back without loading. Kept on record, stops counting against the PO. */
+function api_returned(token, id, reason) {
+  auth_(token); need_('trucks');
+  return withLock_(function () {
+    guardTruck_(id);
+    var t = rows_(T.TR).filter(function (r) { return r.id === id; })[0];
+    if (!t) throw new Error('Truck ' + id + ' not found.');
+    if (num_(t.loadWt) > 0) throw new Error('This truck already has a loaded weight. Use Cancel instead.');
+    if (isOff_(t)) throw new Error('This truck is already ' + t.status.toLowerCase() + '.');
+    var today = Utilities.formatDate(new Date(), tz_(), 'yyyy-MM-dd');
+    return saveRecord_(T.TR, { id: id, status: 'Returned', returnedDate: today, note: (t.note ? t.note + ' | ' : '') + 'Returned, not loaded' + (reason ? ': ' + reason : '') });
+  });
+}
+
+/** Design notes: anyone logged in can write what would make the screens easier; the Owner marks them done. */
+function api_addNote(token, area, text) {
+  auth_(token);
+  text = String(text || '').trim();
+  if (!text) throw new Error('Write the note first.');
+  if (text.length > 2000) throw new Error('Keep the note under 2000 letters.');
+  return withLock_(function () {
+    var sh = sheet_(T.NOTE) || makeTab_(T.NOTE);
+    var n = Math.max(0, sh.getLastRow() - 1) + 1;
+    var id = 'NOTE-' + ('000' + n).slice(-4);
+    var now = new Date();
+    sh.getRange(sh.getLastRow() + 1, 1, 1, 7).setValues([[id, Utilities.formatDate(now, tz_(), 'yyyy-MM-dd'), String(area || 'Other'), text, 'Open', ME.name || ME.id, Utilities.formatDate(now, tz_(), 'yyyy-MM-dd HH:mm')]]);
+    dropTab_(T.NOTE); markChanged_(T.NOTE);
+    log_('Design note', id, text.slice(0, 80));
+  });
+}
+function api_noteStatus(token, id, status) {
+  auth_(token);
+  if (ME.role !== 'Owner') throw new Error('Only the Owner can mark notes done.');
+  if (['Open', 'Done'].indexOf(status) < 0) throw new Error('Unknown status.');
+  return withLock_(function () {
+    var r = rows_(T.NOTE).filter(function (x) { return x.id === id; })[0];
+    if (!r) throw new Error('Note ' + id + ' not found.');
+    sheet_(T.NOTE).getRange(r._row, idx_(T.NOTE, 'status') + 1).setValue(status);
+    dropTab_(T.NOTE); markChanged_(T.NOTE);
+  });
+}
+
+/** One bank payment for several trucks: marks each paid with the same date and UTR. */
+function api_payBatch(token, kind, ids, date, utr, amount, rid) {
+  auth_(token); need_('truckMoney');
+  if (kind !== 'plant' && kind !== 'freight') throw new Error('Unknown payment type.');
+  ids = (ids || []).filter(String);
+  if (!ids.length) throw new Error('Tick at least one truck.');
+  utr = String(utr || '').trim().toUpperCase();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(date || ''))) throw new Error('Enter the payment date.');
+  return withLock_(function () {
+    var A = deriveAll_(), map = {};
+    A.trucks.forEach(function (t) { map[t.id] = t; });
+    ids.forEach(function (id) {
+      var t = map[id];
+      if (!t || t.cx) throw new Error('Truck ' + id + ' not found or cancelled.');
+      if (kind === 'plant' && !(t.L > 0)) throw new Error(t.truck + ' has no loaded weight yet.');
+      if (kind === 'plant' && t.plantPaid) throw new Error(t.truck + ' is already marked supplier paid.');
+      if (kind === 'freight' && !(t.U > 0)) throw new Error(t.truck + ' is not unloaded yet.');
+      if (kind === 'freight' && (t.freightPaid || t.fBuyer)) throw new Error(t.truck + ' freight is already paid or paid by the customer.');
+    });
+    ids.forEach(function (id) {
+      var t = map[id];
+      if (kind === 'plant') saveRecord_(T.TR, { id: id, plantPaid: true, plantPaidDate: date, plantUTR: utr });
+      else saveRecord_(T.TR, { id: id, freightPaid: true, freightPaidDate: date, freightUTR: utr, detention: t.det, tAdv: t.advUsed || '' });
+    });
+    log_(kind === 'plant' ? 'Plant payment' : 'Freight payment', utr || 'no UTR', ids.length + ' trucks: ' + ids.join(', ') + ' | amount entered ' + (amount === '' || amount == null ? '-' : amount));
+  }, cleanRid_(rid));
+}
+
+function api_restore(token, table, id) {
+  auth_(token);
+  var ret = table === 'truck' && rows_(T.TR).some(function (r) { return r.id === id && r.status === 'Returned'; });
+  need_(table === 'truck' ? (ret ? 'trucks' : 'cancelTruck') : 'orders');
+  return withLock_(function () {
+    if (table === 'truck') guardTruck_(id); else guardOrder_(table, id);
+    var name = { truck: T.TR, po: T.PO, so: T.SO }[table];
+    if (!name) throw new Error('Unknown record type');
+    if (table === 'truck') {
+      // Restoring a returned or cancelled truck must not create a second entry of the same vehicle on the same day.
+      var t = rows_(T.TR).filter(function (r) { return r.id === id; })[0];
+      if (!t) throw new Error('Truck ' + id + ' not found.');
+      var dup = sameDayTruck_({ id: id, truck: t.truck });
+      if (dup && ME.role !== 'Owner') throw new Error('This truck is already entered again that day as ' + dup.id + '. Only the Owner can undo this.');
+      return saveRecord_(name, ret ? { id: id, status: '', returnedDate: '' } : { id: id, status: '' });
+    }
+    return saveRecord_(name, { id: id, status: '' });
+  });
+}
+
+/* ---------------- activity review (Owner only) ---------------- */
+var REVIEW_DATE_FIELDS_ = ['Dispatch Date', 'Supplier Paid Date', 'Unload Date', 'Freight Paid Date', 'Received Date', 'Returned Date'];
+var REVIEW_WEIGHT_RATE_ = ['Dispatch Wt (qtl)', 'Received Wt (qtl)', 'Freight Rate', 'Invoice Rate (this vehicle)'];
+var REVIEW_LATE_FROM_ = 21; // an entry at or after 21:00 ...
+var REVIEW_LATE_TO_ = 6;    // ... or before 06:00 is late-night
+var REVIEW_MANY_ = 5;       // this many changes to one truck on one day is flagged
+
+/* "Field: old -> new; Field: old -> new" (as written by saveRecord_) back into parts. */
+function parseChanges_(s) {
+  var out = [];
+  String(s || '').split('; ').forEach(function (part) {
+    var i = part.indexOf(': ');
+    if (i < 0) return;
+    var rest = part.slice(i + 2), j = rest.indexOf(' -> ');
+    if (j < 0) return;
+    out.push({ f: part.slice(0, i), o: rest.slice(0, j), n: rest.slice(j + 4) });
+  });
+  return out;
+}
+function paidBy_(flag, d, date) { return flag === true && !!d && String(d) <= date; }
+/* Deterministic pick: the same day always gives the same spot-check entries. */
+function seededPick_(list, k, seed) {
+  var h = 2166136261;
+  for (var i = 0; i < seed.length; i++) { h ^= seed.charCodeAt(i); h = Math.imul(h, 16777619) >>> 0; }
+  var a = h >>> 0;
+  var rnd = function () {
+    a = (a + 0x6D2B79F5) >>> 0;
+    var t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+  var copy = list.slice();
+  for (var j = copy.length - 1; j > 0; j--) { var r = Math.floor(rnd() * (j + 1)); var tmp = copy[j]; copy[j] = copy[r]; copy[r] = tmp; }
+  return copy.slice(0, k);
+}
+
+function api_getReview(token, date, person) {
+  auth_(token); need_('review');
+  date = String(date || '').slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error('Pick a date.');
+  person = cleanUser_(person);
+  var all = rows_(T.LOG).filter(function (r) { return String(r.time).length >= 16; });
+  var creator = {}, trucks = {};
+  all.forEach(function (r) { if (r.action === 'Created' && !creator[r.record]) creator[r.record] = r.user; });
+  rows_(T.TR).forEach(function (t) { trucks[t.id] = t; });
+  var day = all.filter(function (r) { return r.time.slice(0, 10) === date && r.action !== 'Login'; });
+  var perTruck = {};
+  day.forEach(function (r) { if (r.action === 'Updated') perTruck[r.record] = (perTruck[r.record] || 0) + 1; });
+  var entries = day.map(function (r) {
+    var hh = Number(r.time.slice(11, 13)), changes = r.action === 'Updated' ? parseChanges_(r.details) : [], flags = [];
+    var t = trucks[r.record];
+    if (hh >= REVIEW_LATE_FROM_ || hh < REVIEW_LATE_TO_) flags.push('Late-night entry');
+    changes.forEach(function (c) {
+      if (c.f === 'Status' && (c.n === 'Cancelled' || c.n === 'Returned')) flags.push(c.n === 'Cancelled' ? 'Cancelled' : 'Returned empty');
+      if (REVIEW_DATE_FIELDS_.indexOf(c.f) >= 0 && /^\d{4}-\d{2}-\d{2}$/.test(c.n) && days_(c.n, date) > 1) flags.push('Backdated: ' + c.f + ' set to ' + dmy_(c.n));
+      if (REVIEW_WEIGHT_RATE_.indexOf(c.f) >= 0 && t && (paidBy_(t.plantPaid, t.plantPaidDate, date) || paidBy_(t.freightPaid, t.freightPaidDate, date) || (Number(t.received) > 0 && t.receivedDate && String(t.receivedDate) <= date))) flags.push('Weight or rate changed after payment (' + c.f + ')');
+    });
+    if (r.action === 'Updated' && perTruck[r.record] >= REVIEW_MANY_ && r.record.indexOf('DISP-') === 0) flags.push(perTruck[r.record] + ' changes to this truck today');
+    return { row: r._row, time: r.time, user: r.user, action: r.action, record: r.record, details: r.details, changes: changes, flags: flags,
+      verified: r.verified === true, verifiedBy: r.verifiedBy || '', verifiedAt: r.verifiedAt || '',
+      view: r.record.indexOf('DISP-') === 0 ? 'truck' : r.record.indexOf('PO-') === 0 ? 'po' : r.record.indexOf('SO-') === 0 ? 'so' : '' };
+  });
+  var people = {}, order = [];
+  entries.forEach(function (e) {
+    if (!people[e.user]) { people[e.user] = { name: e.user, entries: 0, corrections: 0, unverified: 0, flagged: 0 }; order.push(e.user); }
+    var p = people[e.user];
+    p.entries++;
+    if (e.action === 'Updated' && creator[e.record] && creator[e.record] !== e.user) p.corrections++;
+    if (!e.verified) p.unverified++;
+    if (e.flags.length) p.flagged++;
+  });
+  var pool = entries.filter(function (e) { return e.action === 'Created' || e.action === 'Updated'; });
+  return {
+    date: date, person: person, total: entries.length,
+    unverified: entries.filter(function (e) { return !e.verified; }).length,
+    flagged: entries.filter(function (e) { return e.flags.length > 0; }).length,
+    people: order.map(function (u) { return people[u]; }),
+    entries: person ? entries.filter(function (e) { return e.user === person; }) : entries,
+    spot: seededPick_(pool, 5, date)
+  };
+}
+
+/* Ticks entries as checked. Each line is matched by time, user and record first, so a moved log line is never ticked by mistake. */
+function api_verifyEntries(token, items, on) {
+  auth_(token); need_('review');
+  if (!items || !items.length) throw new Error('Nothing to verify.');
+  return withLock_(function () {
+    var sh = sheet_(T.LOG);
+    if (!sh) throw new Error('The activity log is missing.');
+    var rowsToSet = items.map(function (it) {
+      var row = Number(it.row);
+      if (!(row > 1) || row > sh.getLastRow()) throw new Error('That log line was not found. Reload the page and try again.');
+      var v = sh.getRange(row, 1, 1, 4).getValues()[0];
+      var time = v[0] instanceof Date ? Utilities.formatDate(v[0], tz_(), 'yyyy-MM-dd HH:mm') : String(v[0]);
+      if (time !== String(it.time) || String(v[1]) !== String(it.user) || String(v[3]) !== String(it.record)) throw new Error('The log changed while you were reviewing. Reload the page and try again.');
+      return row;
+    });
+    var c = idx_(T.LOG, 'verified') + 1;
+    rowsToSet.forEach(function (row) {
+      sh.getRange(row, c, 1, 3).setValues([[on === true, on === true ? ME.id : '', on === true ? nowStr_() : '']]);
+      dropTab_(T.LOG);
+    });
+  });
+}
+
+/* ---------------- bank details for paying suppliers and transporters ---------------- */
+function api_saveBank(token, kind, name, accName, accNo, ifsc) {
+  auth_(token); need_('bank');
+  if (kind !== 'supplier' && kind !== 'transporter') throw new Error('Unknown bank type.');
+  var key = normName_(name);
+  if (!key) throw new Error('The name is missing.');
+  accName = String(accName || '').trim();
+  accNo = String(accNo || '').replace(/\s+/g, '');
+  ifsc = String(ifsc || '').replace(/\s+/g, '').toUpperCase();
+  if (!accName) throw new Error('Enter the account name.');
+  if (!/^\d{6,20}$/.test(accNo)) throw new Error('The account number should be 6 to 20 digits.');
+  if (!/^[A-Z]{4}0[A-Z0-9]{6}$/.test(ifsc)) throw new Error('The IFSC looks wrong. It has 11 characters, like SBIN0001234.');
+  return withLock_(function () {
+    var sh = sheet_(T.BANK) || makeTab_(T.BANK), id = kind + ': ' + key;
+    sh.getRange(2, idx_(T.BANK, 'accNo') + 1, Math.max(sh.getMaxRows() - 1, 1), 1).setNumberFormat('@');
+    var cur = rows_(T.BANK).filter(function (r) { return r.id === id; })[0];
+    var row = rowFor_(T.BANK, { id: id, kind: kind, name: key, accName: accName, accNo: accNo, ifsc: ifsc });
+    if (cur) sh.getRange(cur._row, 1, 1, row.length).setValues([row]);
+    else sh.getRange(sh.getLastRow() + 1, 1, 1, row.length).setValues([row]);
+    dropTab_(T.BANK); markChanged_(T.BANK);
+    log_(cur ? 'Bank updated' : 'Bank added', key, kind === 'supplier' ? 'Supplier bank details' : 'Transporter bank details');
+  });
+}
+
+/* ---------------- photos: weighment slip and payment screenshots, kept in Drive under the dispatch number ---------------- */
+function api_savePhoto(token, id, kind, b64, mime) {
+  auth_(token);
+  var col = { slip: 'slipPhoto', plantPay: 'plantPayPhoto', freightPay: 'freightPayPhoto' }[kind];
+  if (!col) throw new Error('Unknown photo type.');
+  need_(kind === 'slip' ? 'trucks' : 'truckMoney');
+  b64 = String(b64 || '');
+  if (!b64 || b64.length > 3000000) throw new Error('The photo is too large. Take it again, or use a smaller picture.');
+  return withLock_(function () {
+    guardTruck_(id);
+    var t = rows_(T.TR).filter(function (r) { return r.id === id; })[0];
+    if (!t) throw new Error('Truck ' + id + ' was not found.');
+    var root = folder_(APP_DRIVE_ + ' Slips'), it = root.getFoldersByName(id), sub = it.hasNext() ? it.next() : root.createFolder(id);
+    var label = { slip: 'weighment-slip', plantPay: 'supplier-payment', freightPay: 'freight-payment' }[kind];
+    var name = label + '_' + Utilities.formatDate(new Date(), tz_(), 'yyyyMMdd_HHmmss') + '.jpg';
+    var file = sub.createFile(Utilities.newBlob(Utilities.base64Decode(b64), mime || 'image/jpeg', name));
+    var upd = { id: id };
+    upd[col] = file.getUrl();
+    saveRecord_(T.TR, upd);
+  });
+}
+
+/* ---------------- logins ---------------- */
+
+function cleanUser_(u) { return String(u || '').trim().toLowerCase().replace(/[^a-z0-9._-]/g, ''); }
+
+function users_() { return sheet_(T.US) ? rows_(T.US) : []; }
+
+function isOwnerGoogle_() {
+  try {
+    var a = Session.getActiveUser().getEmail(), e = Session.getEffectiveUser().getEmail();
+    return !!a && a === e;
+  } catch (x) { return false; }
+}
+
+function hash_(salt, pw) {
+  var s = salt + '|' + pw;
+  for (var i = 0; i < 200; i++) {
+    s = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, s + salt)
+      .map(function (b) { return ('0' + (b & 255).toString(16)).slice(-2); }).join('');
+  }
+  return s;
+}
+
+function createUser_(obj, isNew) {
+  var id = cleanUser_(obj.id);
+  if (!id || id.length < 3) throw new Error('Username must be at least 3 letters or numbers.');
+  var rec = { id: id };
+  if (isNew || 'name' in obj) rec.name = String(obj.name || '').trim();
+  if (isNew && !rec.name) throw new Error('Enter the person’s name.');
+  if (isNew || obj.role) {
+    if (!ROLES[obj.role]) throw new Error('Choose a role.');
+    rec.role = obj.role;
+  }
+  if ('active' in obj || isNew) rec.active = obj.active !== false;
+  if (isNew || obj.password) {
+    if (String(obj.password || '').length < 6) throw new Error('Password must be at least 6 characters.');
+    rec.salt = Utilities.getUuid();
+    rec.hash = hash_(rec.salt, String(obj.password));
+  }
+  var sh = sheet_(T.US) || makeTab_(T.US);
+  var cols = SCHEMA[T.US], existing = users_().filter(function (x) { return x.id === id; })[0];
+  if (isNew && existing) throw new Error('Username ' + id + ' is already taken.');
+  if (!isNew && !existing) throw new Error('User ' + id + ' was not found.');
+  var base = existing || {};
+  var row = cols.map(function (c) { var k = c[0]; return toCell_(k in rec ? rec[k] : base[k], c[2]); });
+  row[idx_(T.US, 'by')] = user_();
+  row[idx_(T.US, 'at')] = nowStr_();
+  if (existing) sh.getRange(existing._row, 1, 1, cols.length).setValues([row]);
+  else sh.getRange(sh.getLastRow() + 1, 1, 1, cols.length).setValues([row]);
+  dropTab_(T.US); markChanged_(T.US);
+  CacheService.getScriptCache().remove('users_v1'); // the login check must see this change at once
+  log_(isNew ? 'User created' : 'User updated', id, (rec.role ? 'Role ' + rec.role : '') + (rec.hash ? ' (password set)' : '') + ('active' in rec ? ' active=' + rec.active : ''));
+}
+
+function startSession_(u) {
+  var props = PropertiesService.getScriptProperties(), now = Date.now();
+  var all = props.getProperties();
+  Object.keys(all).forEach(function (k) {
+    if (k.indexOf('s_') === 0) { try { if (JSON.parse(all[k]).exp < now) props.deleteProperty(k); } catch (e) { props.deleteProperty(k); } }
+  });
+  var token = Utilities.getUuid().replace(/-/g, '') + Utilities.getUuid().replace(/-/g, '');
+  props.setProperty('s_' + token, JSON.stringify({ u: u, exp: now + 30 * 864e5 }));
+  ME = { id: u };
+  log_('Login', u, '');
+  return { token: token };
+}
+
+/* The new screen sends {t: token, d: 1}: after a save it takes back only what changed.
+   A screen that was opened before this update sends the plain token and still gets everything, as before. */
+function tok_(x) {
+  if (x && typeof x === 'object') { REQ_.delta = x.d === 1; return String(x.t || ''); }
+  return x ? String(x) : '';
+}
+
+/* Users for the login check, kept in Apps Script's cache for 5 minutes (one sheet read less on every call).
+   Saving a user in the app clears it at once. */
+function authUsers_() {
+  var cache = CacheService.getScriptCache(), raw = cache.get('users_v1');
+  if (raw) { try { return JSON.parse(raw); } catch (e) {} }
+  var list = users_().map(function (u) { return { id: u.id, name: u.name, role: u.role, active: u.active }; });
+  try { cache.put('users_v1', JSON.stringify(list), 300); } catch (e) {}
+  return list;
+}
+
+function auth_(token) {
+  token = tok_(token);
+  // The login is looked up in Apps Script's cache first (10 min): the screen checks for news every 15 s, and
+  // script properties have a daily read limit. Logging out removes it from both.
+  var cache = CacheService.getScriptCache(), raw = token ? cache.get('sess_' + token) : null;
+  if (!raw && token) {
+    raw = PropertiesService.getScriptProperties().getProperty('s_' + token);
+    if (raw) { try { cache.put('sess_' + token, raw, 600); } catch (e) {} }
+  }
+  if (!raw) throw new Error('LOGIN');
+  var s = JSON.parse(raw);
+  if (s.exp < Date.now()) { PropertiesService.getScriptProperties().deleteProperty('s_' + token); cache.remove('sess_' + token); throw new Error('LOGIN'); }
+  var u = authUsers_().filter(function (x) { return x.id === s.u && x.active; })[0];
+  if (!u) throw new Error('LOGIN');
+  ME = { id: u.id, name: u.name, role: u.role, can: ROLES[u.role] || ROLES.Viewer };
+  return ME;
+}
+
+function need_(perm) {
+  if (!ME || !ME.can[perm]) throw new Error('Your role (' + (ME ? ME.role : 'none') + ') is not allowed to do this.');
+}
+
+function lockRun_(fn) {
+  var lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try { return fn(); } finally { lock.releaseLock(); }
+}
+
+/* ---------------- core ---------------- */
+
+/* Memory for ONE server call. Every call from the screen starts with fresh globals, so nothing here can go stale
+   between calls. Inside a call, each tab is read from the sheet at most once; later reads use this copy. */
+var REQ_ = { ss: null, tz: null, v: null, sheets: {}, tabs: {}, dates: {}, changed: {}, delta: false, inLock: false, logBuf: [] };
+
+function ss_() { return REQ_.ss || (REQ_.ss = SpreadsheetApp.getActiveSpreadsheet()); }
+function tz_() {
+  if (REQ_.tz) return REQ_.tz;
+  var c = CacheService.getScriptCache(), z = c.get('tz');
+  if (!z) { z = ss_().getSpreadsheetTimeZone(); try { c.put('tz', z, 21600); } catch (e) {} }
+  return (REQ_.tz = z);
+}
+function today_() { return Utilities.formatDate(new Date(), tz_(), 'yyyy-MM-dd'); }
+function user_() {
+  if (ME && ME.id) return ME.id;
+  try { return Session.getActiveUser().getEmail() || 'unknown'; } catch (e) { return 'unknown'; }
+}
+function nowStr_() { return Utilities.formatDate(new Date(), tz_(), 'yyyy-MM-dd HH:mm'); }
+
+/* Every save runs here: one at a time (lock), fresh data, log lines written together, then the result for the screen.
+   rid = the screen's id for this save. If the same save arrives twice (the reply was lost and the screen sent it again),
+   the second one changes nothing. */
+function withLock_(fn, rid) {
+  var lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  REQ_.inLock = true;
+  try {
+    REQ_.tabs = {}; REQ_.changed = {}; REQ_.v = null; // read fresh data now that we hold the lock
+    REQ_.pv = dataVersion_(); // the version before this save: the screen checks it was up to date
+    if (rid && seenRid_(rid)) return readAll_();
+    try { fn(); } finally { flushLog_(); if (dataChanged_()) bumpVersion_(); }
+    if (rid) CacheService.getScriptCache().put('rid_' + rid, '1', 21600);
+    if (REQ_.delta) return changes_();
+    Object.keys(REQ_.changed).forEach(dropTab_); // a screen opened before this update gets everything, read fresh from the sheet
+    return readAll_();
+  } finally {
+    REQ_.inLock = false;
+    lock.releaseLock();
+  }
+}
+
+function sheet_(name) { return REQ_.sheets[name] || (REQ_.sheets[name] = ss_().getSheetByName(name)); }
+
+function makeTab_(name) {
+  var sh = sheet_(name) || ss_().insertSheet(name);
+  REQ_.sheets[name] = sh;
+  var heads = SCHEMA[name].map(function (c) { return c[1]; });
+  sh.getRange(1, 1, 1, heads.length).setValues([heads])
+    .setFontWeight('bold').setBackground('#0f6b5c').setFontColor('#ffffff');
+  sh.setFrozenRows(1);
+  dropTab_(name);
+  return sh;
+}
+
+/* All rows of a tab as objects. The sheet is read once per call; each caller gets its own copies. */
+function rows_(name) {
+  var list = REQ_.tabs[name] || (REQ_.tabs[name] = readTab_(name));
+  return list.map(function (o) { var c = {}; for (var k in o) c[k] = o[k]; return c; });
+}
+function readTab_(name) {
+  var sh = sheet_(name);
+  if (!sh) return [];
+  var v = sh.getDataRange().getValues(), out = [];
+  for (var i = 1; i < v.length; i++) {
+    if (v[i][0] === '' || v[i][0] === null) continue;
+    out.push(rowObj_(name, v[i], i + 1));
+  }
+  return out;
+}
+/* One sheet row (array) -> object with the SCHEMA keys. */
+function rowObj_(name, v, rowNo) {
+  var cols = SCHEMA[name], o = { _row: rowNo };
+  for (var c = 0; c < cols.length; c++) {
+    var x = v[c], type = cols[c][2];
+    if (x === undefined || x === null) x = '';
+    if (type === 'date') x = x instanceof Date ? fmtDate_(x, 'yyyy-MM-dd') : String(x);
+    else if (type === 'num') x = x === '' ? '' : num_(x);
+    else if (type === 'bool') x = x === true || String(x).toUpperCase() === 'TRUE';
+    else x = x instanceof Date ? fmtDate_(x, 'yyyy-MM-dd HH:mm') : String(x);
+    o[cols[c][0]] = x;
+  }
+  return o;
+}
+/* The same dates repeat on many rows, so each one is formatted only once per call. */
+function fmtDate_(x, pattern) {
+  var key = pattern + x.getTime();
+  return REQ_.dates[key] || (REQ_.dates[key] = Utilities.formatDate(x, tz_(), pattern));
+}
+/* After writing to a tab: forget its copy (the next read gets the sheet again) and remember what changed. */
+function dropTab_(name) { delete REQ_.tabs[name]; }
+function markChanged_(name, id, rowNo) { var c = REQ_.changed[name] || (REQ_.changed[name] = {}); c[id || '*'] = rowNo || 0; }
+/* After saveRecord_ writes a row, the copy in memory is updated too, so several saves in one call need no new read. */
+function cacheRow_(name, row, rowNo) {
+  var list = REQ_.tabs[name];
+  if (!list) return;
+  var o = rowObj_(name, row, rowNo);
+  for (var i = 0; i < list.length; i++) if (list[i].id === o.id) { list[i] = o; return; }
+  list.push(o);
+}
+
+/* ---------------- data version: lets an open screen ask "anything new?" without reading the tabs ---------------- */
+var SCREEN_TABS_ = [T.PO, T.SO, T.TR, T.NOTE, T.BANK, T.US, T.PAY, T.ADV];
+function dataChanged_() { return SCREEN_TABS_.some(function (n) { return !!REQ_.changed[n]; }); }
+/* Kept in a script property (lasting) and mirrored in Apps Script's cache (fast, no daily read limit). */
+function dataVersion_() {
+  if (REQ_.v) return REQ_.v;
+  var c = CacheService.getScriptCache(), v = c.get('data_v');
+  if (!v) { v = PropertiesService.getScriptProperties().getProperty('data_v') || '0'; try { c.put('data_v', v, 21600); } catch (e) {} }
+  return (REQ_.v = v);
+}
+function bumpVersion_() {
+  var p = PropertiesService.getScriptProperties(), c = CacheService.getScriptCache();
+  REQ_.v = String(Math.max((Number(p.getProperty('data_v')) || 0) + 1, Date.now()));
+  p.setProperty('data_v', REQ_.v);
+  try { c.put('data_v', REQ_.v, 21600); } catch (e) { try { c.remove('data_v'); } catch (x) {} }
+}
+function cleanRid_(rid) { rid = String(rid || ''); return /^[A-Za-z0-9_-]{8,64}$/.test(rid) ? rid : ''; }
+function seenRid_(rid) { return CacheService.getScriptCache().get('rid_' + rid) !== null; }
+
+function readSettings_() {
+  var set = {};
+  if (sheet_(T.SET)) rows_(T.SET).forEach(function (r) { set[r.key] = isNaN(Number(r.value)) || r.value === '' ? r.value : Number(r.value); });
+  return set;
+}
+
+function readAll_() {
+  var can = ME && ME.can ? ME.can : ROLES.Viewer;
+  var v = dataVersion_(); // read before the tabs, so the data is never older than this version
+  var S = readSettings_(), V = visibleRows_(S); // firms kept out of this app (hiddenFirms) are not sent
+  var po = V.po, so = V.so, trucks = V.trucks;
+  shape_(po, so, trucks, can);
+  var out = {
+    po: po, so: so, trucks: trucks, settings: S,
+    me: ME ? { id: ME.id, name: ME.name, role: ME.role } : null, perm: can,
+    today: today_(), syncedAt: nowStr_(), v: v
+  };
+  out.notes = sheet_(T.NOTE) ? rows_(T.NOTE).reverse() : [];
+  if (can.money) out.pays = sheet_(T.PAY) ? rows_(T.PAY) : []; // customer payments (Receivables page)
+  if (can.money) out.advances = sheet_(T.ADV) ? rows_(T.ADV) : []; // transporter advances (Freight & Transport)
+  else out.advNames = advNames_(); // names only (no amounts): transporters with an advance show in the truck forms' list
+  if (can.bank) out.banks = sheet_(T.BANK) ? rows_(T.BANK) : [];
+  if (can.users) out.users = userList_();
+  return out;
+}
+function userList_() { return users_().map(function (u) { return { id: u.id, name: u.name, role: u.role, active: u.active, at: u.at }; }); }
+
+/* Role rules for what is sent to the screen. Staff without money access still need the correct stage,
+   so it is worked out here before the amounts are removed. */
+/* Transporter names from APP_ADVANCES (no amounts), for roles without money. */
+function advNames_() {
+  var m = {};
+  (sheet_(T.ADV) ? rows_(T.ADV) : []).forEach(function (a) { var k = normName_(a.transporter); if (k) m[k] = 1; });
+  return Object.keys(m).sort();
+}
+function shape_(po, so, trucks, can) {
+  if (can.money || !(po.length || so.length || trucks.length)) return;
+  var S = readSettings_(), today = today_(), pm = {}, sm = {};
+  rows_(T.PO).forEach(function (r) { pm[r.id] = r; });
+  rows_(T.SO).forEach(function (r) { sm[r.id] = r; });
+  trucks.forEach(function (t) { t._st = derive_(t, pm[t.po], sm[t.so], S, today).st; });
+  var strip = function (list, keys) { list.forEach(function (r) { keys.forEach(function (k) { delete r[k]; }); }); };
+  strip(po, ORDER_MONEY); strip(so, ORDER_MONEY); strip(trucks, TRUCK_HIDE);
+}
+
+/* After a save: only the records this call changed (read back from the sheet), with the same role rules.
+   The screen merges them into what it already has, instead of downloading everything again. */
+function changes_() {
+  var can = ME && ME.can ? ME.can : ROLES.Viewer, ch = REQ_.changed;
+  var out = { delta: true, v: dataVersion_(), pv: REQ_.pv, today: today_(), syncedAt: nowStr_(),
+    po: changedRows_(T.PO), so: changedRows_(T.SO), trucks: changedRows_(T.TR) };
+  var H = hiddenSets_(); // never send records of firms kept out of this app
+  out.po = out.po.filter(function (o) { return !H.po[o.id]; });
+  out.so = out.so.filter(function (o) { return !H.so[o.id]; });
+  out.trucks = out.trucks.filter(function (t) { return !hidTruck_(t, H); });
+  shape_(out.po, out.so, out.trucks, can);
+  if (ch[T.NOTE]) out.notes = rows_(T.NOTE).reverse();
+  if (ch[T.PAY] && can.money) out.pays = rows_(T.PAY);
+  if (ch[T.ADV] && can.money) out.advances = rows_(T.ADV);
+  if (ch[T.ADV] && !can.money) out.advNames = advNames_();
+  if (ch[T.BANK] && can.bank) out.banks = rows_(T.BANK);
+  if (ch[T.US] && can.users) out.users = userList_();
+  return out;
+}
+function changedRows_(name) {
+  var c = REQ_.changed[name];
+  if (!c) return [];
+  var ids = Object.keys(c);
+  if (c['*'] !== undefined || ids.length > 5) {
+    dropTab_(name); // many rows: one fresh read of the tab is cheaper than reading them one by one
+    return rows_(name).filter(function (r) { return c['*'] !== undefined || c.hasOwnProperty(r.id); });
+  }
+  var sh = sheet_(name), w = SCHEMA[name].length;
+  return ids.map(function (id) { return rowObj_(name, sh.getRange(c[id], 1, 1, w).getValues()[0], c[id]); });
+}
+
+function toCell_(x, type) {
+  if (x === undefined || x === null || x === '') return type === 'bool' ? false : '';
+  if (type === 'num') { var n = num_(x); return n === '' ? '' : n; }
+  if (type === 'bool') return x === true || String(x).toUpperCase() === 'TRUE';
+  if (type === 'date') { var d = parseDate_(x); return d || ''; }
+  return String(x).trim();
+}
+
+function saveRecord_(name, obj) {
+  var sh = sheet_(name);
+  if (!sh) throw new Error('Tab ' + name + ' is missing. Run setup.');
+  var cols = SCHEMA[name], existing = rows_(name), rec = null;
+  obj = obj || {};
+  if (obj.id) existing.forEach(function (r) { if (r.id === obj.id) rec = r; });
+  var isNew = !rec;
+
+  if (isNew) {
+    if (obj.id) throw new Error('Record ' + obj.id + ' was not found. Refresh and try again.');
+    rec = {};
+    obj.id = nextId_(name, existing, obj);
+  }
+  validate_(name, obj, rec, isNew);
+
+  var changes = [];
+  var row = cols.map(function (c) {
+    var k = c[0];
+    var val = (k in obj) ? toCell_(obj[k], c[2]) : toCell_(rec[k], c[2]);
+    if ((k in obj) && k !== 'by' && k !== 'at' && String(toCell_(rec[k], c[2])) !== String(val)) {
+      changes.push(c[1] + ': ' + fmtLog_(rec[k]) + ' -> ' + fmtLog_(obj[k]));
+    }
+    return val;
+  });
+  row[idx_(name, 'by')] = user_();
+  row[idx_(name, 'at')] = nowStr_();
+
+  var rowNo = isNew ? sh.getLastRow() + 1 : rec._row;
+  if (isNew) ensureRows_(sh, rowNo);
+  sh.getRange(rowNo, 1, 1, cols.length).setValues([row]);
+  cacheRow_(name, row, rowNo);
+  markChanged_(name, obj.id, rowNo);
+
+  log_(isNew ? 'Created' : 'Updated', obj.id, isNew ? 'New record' : changes.join('; '));
+  return obj.id;
+}
+
+function fmtLog_(v) { return v === undefined || v === null || v === '' ? '(blank)' : String(v); }
+function idx_(name, key) {
+  var cols = SCHEMA[name];
+  for (var i = 0; i < cols.length; i++) if (cols[i][0] === key) return i;
+  return -1;
+}
+
+function validate_(name, obj, rec, isNew) {
+  var get = function (k) { return (k in obj) ? obj[k] : rec[k]; };
+  ['transporter', 'plant', 'buyer'].forEach(function (k) { if (k in obj) obj[k] = normName_(obj[k]); });
+  if (name === T.TR) {
+    if (!String(get('truck') || '').trim()) throw new Error('Vehicle number is required.');
+    if (!get('po')) throw new Error('Choose a purchase order (PO) for this truck.');
+    if ('truck' in obj) obj.truck = normTruck_(obj.truck);
+    var placedOn = get('placedOn'), dispatchDate = get('date');
+    if (placedOn && dispatchDate && String(dispatchDate) < String(placedOn)) throw new Error('The date out cannot be before the date the vehicle was placed.');
+    ['loadWt', 'unloadWt', 'billQty', 'frate', 'advance', 'received', 'deduction', 'detention'].forEach(function (k) {
+      if (k in obj && obj[k] !== '' && obj[k] !== null && (isNaN(num_(obj[k])) || num_(obj[k]) < 0)) {
+        throw new Error('Enter a number of 0 or more.');
+      }
+    });
+    ['loadWt', 'unloadWt', 'billQty'].forEach(function (k) {
+      if (k in obj && num_(obj[k]) > 1000) throw new Error('Weight ' + obj[k] + ' looks like kg. Enter it in quintal (e.g. 384.50).');
+    });
+    var lw = num_(get('loadWt')), uw = num_(get('unloadWt'));
+    if (uw !== '' && lw !== '' && uw > lw * 1.05) throw new Error('Received weight is more than 5% above dispatch weight. Check the numbers.');
+  }
+  if (name === T.PO && isNew) {
+    if (!String(obj.plant || '').trim()) throw new Error('Supplier name is required.');
+    if (!(num_(obj.qty) > 0) || !(num_(obj.rate) > 0)) throw new Error('Enter quantity and rate.');
+  }
+  if (name === T.SO && isNew) {
+    if (!String(obj.buyer || '').trim()) throw new Error('Customer name is required.');
+    if (!(num_(obj.qty) > 0) || !(num_(obj.rate) > 0)) throw new Error('Enter quantity and rate.');
+    if (!obj.gstMode) throw new Error('Choose whether the rate includes GST.');
+    if (!obj.freightMode) throw new Error('Choose whether the rate includes freight.');
+  }
+  if (name === T.SO) {
+    if ('gstMode' in obj && obj.gstMode && ['incl', 'excl'].indexOf(obj.gstMode) < 0) throw new Error('Unknown GST option.');
+    if ('freightMode' in obj && obj.freightMode && ['ours', 'buyer'].indexOf(obj.freightMode) < 0) throw new Error('Unknown freight option.');
+  }
+}
+
+function nextId_(name, existing, obj) {
+  var max = 0, re = name === T.PO ? /^PO-(\d+)/ : name === T.SO ? /^SO-(\d+)/ : name === T.PAY ? /^PAY-(\d+)/ : name === T.ADV ? /^ADV-(\d+)/ : /^DISP-(\d+)/;
+  existing.forEach(function (r) { var m = String(r.id).match(re); if (m) max = Math.max(max, Number(m[1])); });
+  var n = max + 1;
+  if (name === T.PO) {
+    var code = String(obj.plant || '').toUpperCase().split(/\s+/)[0].replace(/[^A-Z0-9]/g, '').slice(0, 8) || 'PLANT';
+    return 'PO-' + pad_(n, 2) + '-' + code;
+  }
+  if (name === T.SO) return 'SO-' + pad_(n, 4);
+  if (name === T.PAY) return 'PAY-' + pad_(n, 5);
+  if (name === T.ADV) return 'ADV-' + pad_(n, 4);
+  return 'DISP-' + pad_(n, 4);
+}
+
+function normName_(s) { return String(s || '').toUpperCase().replace(/\s+/g, ' ').trim(); }
+/* yyyy-mm-dd -> dd-mm-yyyy for messages (dates are read as day-month-year). Anything else is returned as it is. */
+function dmy_(s) { var m = String(s == null ? '' : s).match(/^(\d{4})-(\d{2})-(\d{2})$/); return m ? m[3] + '-' + m[2] + '-' + m[1] : String(s == null ? '' : s); }
+
+function pad_(n, w) { var s = String(n); while (s.length < w) s = '0' + s; return s; }
+function normTruck_(s) { return String(s || '').toUpperCase().replace(/[^A-Z0-9]/g, ''); }
+
+function num_(x) {
+  if (typeof x === 'number') return x;
+  if (x === '' || x === null || x === undefined) return '';
+  var s = String(x).replace(/[₹,\s]/g, '');
+  if (s === '' || s.indexOf('#') === 0) return '';
+  var n = parseFloat(s);
+  return isNaN(n) ? '' : n;
+}
+
+/** Accepts Date, yyyy-mm-dd, dd-mm-yyyy, d/m/yy. Stores at noon to avoid time-zone day shifts. */
+function parseDate_(x) {
+  if (x instanceof Date) return isNaN(x.getTime()) ? null : x;
+  var s = String(x || '').trim(), m;
+  if ((m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/))) return new Date(+m[1], +m[2] - 1, +m[3], 12);
+  if ((m = s.match(/^(\d{1,2})[-\/.](\d{1,2})[-\/.](\d{2,4})$/))) {
+    var y = +m[3]; if (y < 100) y += 2000;
+    return new Date(y, +m[2] - 1, +m[1], 12);
+  }
+  return null;
+}
+
+function log_(action, record, details) {
+  var line = [nowStr_(), user_(), action, record, String(details || '').slice(0, 2000), '', '', ''];
+  if (REQ_.inLock) { REQ_.logBuf.push(line); return; } // written together when the save finishes (withLock_)
+  writeLog_([line]);
+}
+function flushLog_() { if (REQ_.logBuf.length) { var b = REQ_.logBuf; REQ_.logBuf = []; writeLog_(b); } }
+function writeLog_(lines) {
+  var sh = sheet_(T.LOG);
+  if (!sh) return;
+  ensureRows_(sh, sh.getLastRow() + lines.length);
+  sh.getRange(sh.getLastRow() + 1, 1, lines.length, 8).setValues(lines);
+  dropTab_(T.LOG);
+}
+
+/* ---------------- setup and import ---------------- */
+
+var SCHEMA_V = '7.1-busy1'; // busy1 (RAGHAV BUSY APP): Busy columns at the end of APP_PO / APP_SO / APP_TRUCKS / APP_PAYMENTS / APP_ADVANCES, BUSY_* tabs, Busy settings; 7.1: APP_TRUCKS po2Qty / so2Qty (both quantities of a split truck typed); 7.0: APP_TRUCKS po2 / poQty / so2 / soQty (one truck on two orders); 6.9: open screens fetch everything once after an upgrade; 6.5: setting qtyTolerancePct; 6.6: setting hiddenFirms; 6.7: transporter advances (APP_ADVANCES, APP_TRUCKS tAdv); 6.8: four firms, Firm on payments and advances
+function ensureSetup_() {
+  var cache = CacheService.getScriptCache();
+  if (cache.get('schema_ok') === SCHEMA_V) return null; // checked in the last 6 hours (setup clears this)
+  if (sheet_(T.TR)) {
+    // Checking and upgrading the tabs is slow, so it runs only once after each new version of the code.
+    var props = PropertiesService.getScriptProperties();
+    if (props.getProperty('schema_v') !== SCHEMA_V) {
+      upgradeHeaders_(); props.setProperty('schema_v', SCHEMA_V);
+      bumpVersion_(); // settings may have changed (e.g. new firms): every open screen fetches everything at its next check
+    }
+    try { cache.put('schema_ok', SCHEMA_V, 21600); } catch (e) {}
+    return null;
+  }
+  var lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    if (sheet_(T.TR)) return null;
+    [T.SET, T.PO, T.SO, T.TR, T.LOG, T.US, T.PAY, T.NOTE, T.BANK, T.ADV].forEach(makeTab_);
+    var set = sheet_(T.SET);
+    set.getRange(2, 1, SETTINGS_DEFAULT.length, 3).setValues(SETTINGS_DEFAULT);
+    var report = importOld_();
+    REQ_.tabs = {};
+    PropertiesService.getScriptProperties().setProperty('schema_v', SCHEMA_V);
+    log_('Setup', '-', JSON.stringify(report));
+    return report;
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/** Adds any new columns to existing APP_ tabs after an update. Old data stays where it is. */
+function upgradeHeaders_() {
+  [T.US, T.PAY, T.NOTE, T.BANK, T.ADV].forEach(function (name) { if (!sheet_(name)) makeTab_(name); });
+  var set = sheet_(T.SET);
+  if (set) {
+    var have = {};
+    rows_(T.SET).forEach(function (r) { have[r.key] = 1; });
+    SETTINGS_DEFAULT.forEach(function (s) { if (!have[s[0]]) set.getRange(set.getLastRow() + 1, 1, 1, 3).setValues([s]); });
+    dropTab_(T.SET);
+    renameFirm_('SRIRAM SOLVEX', 'SHREE RAM SOLVEX');
+    addTradingFirms_();
+    // Slip check starts on the day the app is upgraded, unless a date was already set.
+    var sdata = set.getDataRange().getValues();
+    for (var si = 1; si < sdata.length; si++) {
+      if (sdata[si][0] === 'slipCheckFrom' && !String(sdata[si][1]).trim()) {
+        set.getRange(si + 1, 2).setValue(Utilities.formatDate(new Date(), tz_(), 'yyyy-MM-dd'));
+      }
+    }
+  }
+  // Labels only: header rows are rewritten to the current names. Data under the headers is never moved.
+  Object.keys(SCHEMA).forEach(function (name) {
+    var sh = sheet_(name);
+    if (!sh) return;
+    var heads = SCHEMA[name].map(function (c) { return c[1]; });
+    var cur = sh.getRange(1, 1, 1, heads.length).getValues()[0];
+    if (cur.join('|') !== heads.join('|')) {
+      sh.getRange(1, 1, 1, heads.length).setValues([heads])
+        .setFontWeight('bold').setBackground('#0f6b5c').setFontColor('#ffffff');
+    }
+  });
+  REQ_.tabs = {}; REQ_.upgraded = true; // settings or firm names may have changed: read again, and send screens everything
+}
+
+/* 24-11-2026: Devan, Saraswati and Jai Mahavir (setting tradingFirms) become firms with their own window. Done once;
+   the firms cell keeps its firms, adds the missing trading firms after the shown ones, and hidden firms stay last. */
+function addTradingFirms_() {
+  var props = PropertiesService.getScriptProperties();
+  if (props.getProperty('firms_added') === 'yes') return;
+  var S = readSettings_(), cur = firms_(S).filter(String), hid = hiddenFirms_(S);
+  var tf = String(S.tradingFirms || '').split(',').map(function (f) { return normName_(f); }).filter(String);
+  var want = cur.filter(function (f) { return hid.indexOf(f) < 0; });
+  tf.forEach(function (f) { if (want.indexOf(f) < 0) want.push(f); });
+  cur.forEach(function (f) { if (want.indexOf(f) < 0) want.push(f); });
+  var row = rows_(T.SET).filter(function (r) { return r.key === 'firms'; })[0];
+  if (row && want.join(', ') !== cur.join(', ')) {
+    sheet_(T.SET).getRange(row._row, 2).setValue(want.join(', '));
+    dropTab_(T.SET);
+    log_('Firms', 'firms', cur.join(', ') + ' -> ' + want.join(', '));
+  }
+  props.setProperty('firms_added', 'yes');
+}
+
+/** One-time rename of a firm everywhere (settings, PO/SO firm, SO buyer). */
+function renameFirm_(from, to) {
+  var set = sheet_(T.SET), changed = false;
+  rows_(T.SET).forEach(function (r) {
+    if ((r.key === 'firms' || r.key === 'plantFirm') && String(r.value).toUpperCase().indexOf(from) >= 0) {
+      set.getRange(r._row, 2).setValue(String(r.value).toUpperCase().split(from).join(to)); changed = true;
+    }
+  });
+  if (!changed) return;
+  [[T.PO, ['firm']], [T.SO, ['firm', 'buyer']]].forEach(function (x) {
+    var sh = sheet_(x[0]);
+    if (!sh) return;
+    rows_(x[0]).forEach(function (r) {
+      x[1].forEach(function (k) { if (normName_(r[k]) === from) sh.getRange(r._row, idx_(x[0], k) + 1).setValue(to); });
+    });
+  });
+  log_('Renamed firm', from, from + ' -> ' + to);
+}
+
+function findOld_(label) {
+  var want = label.replace(/\s+/g, '').toUpperCase(), found = null;
+  ss_().getSheets().forEach(function (s) {
+    if (s.getName().replace(/\s+/g, '').toUpperCase() === want) found = s;
+  });
+  return found;
+}
+
+function oldValues_(label) {
+  var s = findOld_(label);
+  return s ? s.getDataRange().getValues() : [];
+}
+
+function isDispId_(v) { return /^DISP-\d+$/.test(String(v || '').trim()); }
+function cellBool_(v) { return v === true || String(v).toUpperCase() === 'TRUE'; }
+
+function importOld_() {
+  var report = { pos: 0, sos: 0, trucks: 0, skipped: [], notes: [] };
+  var gst = 0.05;
+
+  // Purchase orders: PO ID | VENDOR | DATE | COMMODITY | QTY | RATE
+  var po = oldValues_('MASTER PO'), poRows = [];
+  for (var i = 1; i < po.length; i++) {
+    var id = String(po[i][0] || '').trim();
+    if (!/^PO-/.test(id)) continue;
+    poRows.push(rowFor_(T.PO, { id: id, plant: normName_(po[i][1]), date: po[i][2], commodity: po[i][3] || 'DDGS',
+      qty: po[i][4], rate: po[i][5], gst: gst, note: 'Imported' }));
+  }
+
+  // Sale orders: DATE | SO ID | BUYER | QTY | RATE
+  var so = oldValues_('SALE ORDER'), soRows = [];
+  for (i = 1; i < so.length; i++) {
+    id = String(so[i][1] || '').trim();
+    if (!/^SO-/.test(id)) continue;
+    soRows.push(rowFor_(T.SO, { id: id, date: so[i][0], buyer: normName_(so[i][2]), commodity: 'DDGS',
+      qty: so[i][3], rate: so[i][4], gst: gst, note: 'Imported' }));
+  }
+
+  // SALE and Freight, keyed by Dispatch ID (never by row position)
+  var sale = {}, sv = oldValues_('SALE');
+  for (i = 1; i < sv.length; i++) {
+    if (isDispId_(sv[i][1])) sale[String(sv[i][1]).trim()] = { unloadWt: sv[i][6], received: sv[i][9], advance: sv[i][11] };
+    else if (hasInput_([sv[i][6], sv[i][9], sv[i][11]])) {
+      report.skipped.push('SALE row ' + (i + 1) + ' has values (' + [sv[i][6], sv[i][9], sv[i][11]].filter(String).join(', ') + ') but its Dispatch ID is broken (#REF!). Not imported.');
+    }
+  }
+  var fr = {}, fv = oldValues_('Freight');
+  for (i = 1; i < fv.length; i++) {
+    if (isDispId_(fv[i][1])) fr[String(fv[i][1]).trim()] = { unloadDate: fv[i][0], frate: fv[i][7], ref: fv[i][12], paid: fv[i][14] };
+    else if (hasInput_([fv[i][7], fv[i][14] === true ? 'paid' : ''])) {
+      report.skipped.push('Freight row ' + (i + 1) + ' has values but its Dispatch ID is broken (#REF!). Not imported.');
+    }
+  }
+
+  // Trucks: DATE | DISP ID | PO | TRUCK | TRANSPORTER | DRIVER | BUYER | WEIGHT | VENDOR PAYMENT | SO | PAID
+  var dv = oldValues_('DISPATCH'), trRows = [], seen = {};
+  for (i = 1; i < dv.length; i++) {
+    id = String(dv[i][1] || '').trim();
+    if (!isDispId_(id)) continue;
+    if (seen[id]) { report.skipped.push(id + ' appears twice in DISPATCH; kept the first.'); continue; }
+    seen[id] = 1;
+    var s = sale[id] || {}, f = fr[id] || {};
+    trRows.push(rowFor_(T.TR, {
+      id: id, date: dv[i][0], po: String(dv[i][2] || '').trim(), so: String(dv[i][9] || '').trim(),
+      truck: normTruck_(dv[i][3]), transporter: normName_(dv[i][4] || f.ref || ''), driver: dv[i][5],
+      loadWt: dv[i][7], plantPaid: cellBool_(dv[i][10]),
+      unloadWt: s.unloadWt, unloadDate: num_(s.unloadWt) !== '' ? f.unloadDate : '',
+      frate: f.frate, advance: s.advance, freightPaid: cellBool_(f.paid), received: s.received,
+      note: 'Imported'
+    }));
+  }
+
+  var put = function (name, rows) {
+    if (rows.length) sheet_(name).getRange(2, 1, rows.length, SCHEMA[name].length).setValues(rows);
+  };
+  put(T.PO, poRows); put(T.SO, soRows); put(T.TR, trRows);
+  report.pos = poRows.length; report.sos = soRows.length; report.trucks = trRows.length;
+  if (!trRows.length) report.notes.push('No trucks found in a DISPATCH tab. Start adding trucks in the app.');
+  return report;
+}
+
+function hasInput_(arr) {
+  return arr.some(function (v) { return v !== '' && v !== null && v !== undefined && v !== false && String(v).indexOf('#') !== 0; });
+}
+
+function rowFor_(name, obj) {
+  var by = user_(), at = nowStr_();
+  return SCHEMA[name].map(function (c) {
+    if (c[0] === 'by') return by;
+    if (c[0] === 'at') return at;
+    return toCell_(obj[c[0]], c[2]);
+  });
+}
+
+/* ---------------- calculations (same rules as the screen) ---------------- */
+
+function days_(a, b) {
+  if (!a || !b) return 0;
+  var pa = String(a).split('-'), pb = String(b).split('-');
+  return Math.round((new Date(+pb[0], +pb[1] - 1, +pb[2], 12) - new Date(+pa[0], +pa[1] - 1, +pa[2], 12)) / 864e5);
+}
+
+var STAGES_ = ['Vehicle placed', 'Loaded', 'Supplier paid', 'Unloaded', 'Part paid', 'Customer paid', 'Closed']; // same words as the screen
+
+function derive_(t, po, so, S, today, po2, so2) {
+  var n = function (x) { var v = parseFloat(x); return isNaN(v) ? 0 : v; };
+  var r2 = function (x) { return Math.round(x * 100) / 100; };
+  var L = n(t.loadWt), U = n(t.unloadWt), R = n(t.received), A = n(t.advance), FR = n(t.frate), DED = n(t.deduction);
+  var plantPO = !!(po && po.poType === 'plant');
+  if (plantPO) so = null;
+  var own = t.saleRate === '' || t.saleRate == null ? null : n(t.saleRate);
+  var poRate = po ? n(po.rate) : 0, poG = po ? n(po.gst) : 0, soRate = so ? (own !== null ? own : n(so.rate)) : 0, soG = so ? n(so.gst) : 0;
+  var x = {};
+  for (var k in t) x[k] = t[k];
+  x.L = L; x.U = U; x.R = R; x.A = A; x.FR = FR; x.DED = DED;
+  x.plant = po ? po.plant : ''; x.buyer = so ? so.buyer : '';
+  x.plantPO = plantPO; x.firm = firmOf_(po, S); x.ownBuyer = !!(so && isFirm_(so.buyer, S)); x.rateUsed = soRate;
+  x.purEx = r2(L * poRate); x.purTot = r2(x.purEx * (1 + poG));
+  // One truck on two orders (Nitish, 24-11-2026): the first order takes a fixed part, the second the rest. PO: poQty of
+  // the dispatch weight at PO 1's rate, the rest at PO 2's. SO: soQty of the sale weight (received, or dispatch until
+  // received) at SO 1's rate, the rest at SO 2's, so a shortage falls on SO 2 and is charged at SO 2's rate.
+  // A rate typed on the truck (saleRate) still prices the whole truck.
+  var p2 = t.po2 && po2 ? po2 : null, s2 = so && t.so2 && so2 ? so2 : null;
+  x.poQ1 = p2 ? r2(Math.min(L, n(t.poQty))) : L; x.poQ2 = p2 ? r2(L - x.poQ1) : 0;
+  x.soQ1 = s2 ? r2(Math.min(L, n(t.soQty))) : so ? L : 0; x.soQ2 = s2 ? r2(L - x.soQ1) : 0;
+  x.pur1Tot = x.purTot; x.pur2Tot = 0; x.rate2 = p2 ? n(p2.rate) : 0;
+  if (p2) {
+    var e1 = r2(x.poQ1 * poRate), e2 = r2(x.poQ2 * n(p2.rate));
+    x.pur1Tot = r2(e1 * (1 + poG)); x.pur2Tot = r2(e2 * (1 + n(p2.gst))); x.purEx = r2(e1 + e2); x.purTot = r2(x.pur1Tot + x.pur2Tot);
+  }
+  x.saleWt = U || L;
+  var gIncl = !!(so && so.gstMode === 'incl');
+  x.fBuyer = !!(so && so.freightMode === 'buyer');
+  x.soBase = gIncl ? soRate / (1 + soG) : soRate;
+  x.saleEx = so ? r2(x.saleWt * x.soBase) : 0;
+  x.saleTot = so ? r2(gIncl ? x.saleWt * soRate : x.saleEx * (1 + soG)) : 0;
+  x.sale1Qty = so ? x.saleWt : 0; x.sale2Qty = 0; x.sale1Tot = x.saleTot; x.sale2Tot = 0; x.soRate2 = s2 ? n(s2.rate) : 0;
+  var shB = x.soBase, shG = soG; // the rate a shortage is charged at (before GST)
+  if (s2 && own === null) {
+    var g2Incl = s2.gstMode === 'incl', sr2 = n(s2.rate), sg2 = n(s2.gst), sb2 = g2Incl ? sr2 / (1 + sg2) : sr2;
+    var q1 = r2(Math.min(x.saleWt, n(t.soQty))), q2 = r2(x.saleWt - q1), x1 = r2(q1 * x.soBase), x2 = r2(q2 * sb2);
+    x.sale1Qty = q1; x.sale2Qty = q2;
+    x.sale1Tot = r2(gIncl ? q1 * soRate : x1 * (1 + soG)); x.sale2Tot = r2(g2Incl ? q2 * sr2 : x2 * (1 + sg2));
+    x.saleEx = r2(x1 + x2); x.saleTot = r2(x.sale1Tot + x.sale2Tot); shB = sb2; shG = sg2;
+  }
+  x.short = U ? r2(Math.max(0, L - U)) : 0;
+  x.allow = L * n(S.shortageAllowancePct);
+  x.shortDed = !U || x.fBuyer ? 0 : plantPO ? r2(Math.max(0, x.short - x.allow) * poRate * (1 + poG)) : so ? r2(Math.max(0, x.short - x.allow) * shB * (1 + shG)) : 0;
+  // For showing the working: the charged shortage (above the free allowance) and the rate it is charged at (incl. GST)
+  x.shortOver = U ? r2(Math.max(0, x.short - x.allow)) : 0;
+  x.shortRate = !U || x.fBuyer ? 0 : plantPO ? r2(poRate * (1 + poG)) : so ? r2(shB * (1 + shG)) : 0;
+  x.frAmt = x.fBuyer ? 0 : r2(U * FR);
+  x.trip = t.date ? days_(t.date, t.unloadDate || today) : 0;
+  x.detDays = Math.max(0, x.trip - n(S.freeDays === undefined || S.freeDays === '' ? 3 : S.freeDays));
+  x.detSuggest = x.fBuyer ? 0 : x.detDays * n(S.detentionPerDay === undefined || S.detentionPerDay === '' ? 500 : S.detentionPerDay);
+  // Detention is only a suggestion: it counts only when someone enters an amount (decided per truck when paying freight).
+  x.det = x.fBuyer || !U ? 0 : (t.detention === '' || t.detention == null ? 0 : n(t.detention));
+  x.netFr = U && !x.fBuyer ? r2(x.frAmt - x.shortDed - A + x.det) : 0;
+  // Sales to your own firm: freight and detention are not taken off the margin (shortage recovered from the transporter still counts).
+  x.profit = U && so && po ? r2(x.saleEx - x.purEx - (x.ownBuyer ? -x.shortDed : x.frAmt - x.shortDed + x.det)) : 0;
+  x.cx = t.status === 'Cancelled' || t.status === 'Returned';
+  // Customer money is kept per customer (custAcc_), not per truck (Nov 2026). A truck is Closed when it is unloaded
+  // and the freight is paid (or the customer pays the freight); the supplier payment does not count (Nitish, 24-11-2026).
+  var st;
+  if (x.cx) st = -1;
+  else if (U && (t.freightPaid || x.fBuyer)) st = 6;
+  else if (U) st = 3;
+  else if (t.plantPaid) st = 2;
+  else if (L) st = 1;
+  else st = 0;
+  x.st = st; x.stage = st < 0 ? (t.status === 'Returned' ? 'Returned' : 'Cancelled') : plantPO && st === 3 ? 'Received' : STAGES_[st];
+  x.credit = so ? (so.creditDays === '' || so.creditDays == null ? n(S.defaultCreditDays || 7) : n(so.creditDays)) : 0;
+  x.due = U && so && t.unloadDate ? days_(t.unloadDate, today) - x.credit : 0; // days past the credit period (above 0 = due)
+  x.placed = t.placedOn || t.date;
+  x.noSlip = L > 0 && !t.slipPhoto && (!S.slipCheckFrom || String(t.date) >= String(S.slipCheckFrom));
+  return x;
+}
+
+/* Customer accounts. Customer money is kept per customer (factory), not per truck (Nitish, Nov 2026).
+   Sales = sale totals of the customer's unloaded trucks; Received / Deducted = its APP_PAYMENTS lines (reversals are negative);
+   Outstanding = Sales − Received − Deducted (below 0 = advance).
+   Overdue = sales past their credit days, less everything received; oldest = most days among trucks not covered
+   (trucks taken oldest unload date first). The screen has the same function (custAcc in Index.html). */
+function custAcc_(trucks, pays, S) {
+  var acc = {}, r2 = function (x) { return Math.round(x * 100) / 100; }, first = firms_(S)[0];
+  // One account per firm and customer (24-11-2026), key "FIRM|CUSTOMER". Old payments without a firm: the first firm.
+  var get = function (firm, name) {
+    var f = normName_(firm) || first, k = normName_(name);
+    return acc[f + '|' + k] || (acc[f + '|' + k] = { key: f + '|' + k, firm: f, name: k, own: isFirm_(k, S), trucks: 0, qty: 0, sales: 0, received: 0, deducted: 0, lastPaid: '', list: [] });
+  };
+  trucks.forEach(function (t) {
+    if (t.cx || !t.U || !t.so || t.plantPO || !t.buyer) return;
+    var a = get(t.firm, t.buyer);
+    a.trucks++; a.qty += t.U; a.sales += t.saleTot; a.list.push(t);
+  });
+  (pays || []).forEach(function (p) {
+    if (!p.buyer) return;
+    var a = get(p.firm, p.buyer), amt = Number(p.amount) || 0;
+    a.received += amt; a.deducted += Number(p.deduction) || 0;
+    if (amt > 0 && String(p.date) > a.lastPaid) a.lastPaid = String(p.date);
+  });
+  Object.keys(acc).forEach(function (k) {
+    var a = acc[k], pool = a.received + a.deducted, due = 0, run = 0;
+    a.list.sort(function (x, y) { return String(x.unloadDate).localeCompare(String(y.unloadDate)) || String(x.id).localeCompare(String(y.id)); });
+    a.oldest = 0;
+    a.list.forEach(function (t) {
+      if (t.due > 0) due += t.saleTot;
+      run += t.saleTot;
+      if (run > pool + 0.5 && t.due > a.oldest) a.oldest = t.due; // not (fully) covered by the money received
+    });
+    a.sales = r2(a.sales); a.received = r2(a.received); a.deducted = r2(a.deducted); a.qty = r2(a.qty);
+    a.outstanding = r2(a.sales - a.received - a.deducted);
+    a.overdue = r2(Math.max(0, due - pool));
+    if (!a.overdue) a.oldest = 0;
+    delete a.list;
+  });
+  return acc;
+}
+
+/* A driver's advance is adjusted across all trips of the same truck: extra advance on one trip reduces what is paid on its next trips. */
+function carry_(list) {
+  var by = {}, r = function (v) { return Math.round(v * 100) / 100; };
+  list.forEach(function (t) {
+    t.netPay = t.netFr; t.carryIn = 0; t.carryOut = 0; t.carryLeft = 0;
+    if (t.cx || t.fBuyer || !t.U) return;
+    var k = String(t.truck || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+    (by[k] = by[k] || []).push(t);
+  });
+  Object.keys(by).forEach(function (k) {
+    var run = 0, trips = by[k].sort(function (a, b) { return String(a.date).localeCompare(String(b.date)) || String(a.id).localeCompare(String(b.id)); });
+    trips.forEach(function (t) {
+      if (t.netFr < 0) { t.netPay = 0; t.carryOut = r(-t.netFr); run = r(run - t.netFr); return; }
+      var use = Math.min(run, t.netFr);
+      t.carryIn = r(use); t.netPay = r(t.netFr - use); run = r(run - use);
+    });
+    trips[trips.length - 1].carryLeft = run;
+  });
+  return list;
+}
+
+/* Transporter advances (Nitish, 23-11-2026): money given to a transporter that is not tied to a truck, used automatically.
+   A truck whose freight is paid keeps what it took (saved in tAdv when paid). Unloaded, unpaid trucks of that transporter
+   share what is left, oldest unload first. netPay (freight to pay) goes down by what is taken; left = given − used.
+   The screen has the same function (transAdv in Index.html). */
+function transAdv_(list, advs, first) {
+  // Per firm and transporter (24-11-2026), key "FIRM|TRANSPORTER": an advance is used only on that firm's trucks.
+  var r2 = function (x) { return Math.round(x * 100) / 100; }, acc = {}, open = {};
+  var norm = function (s) { return String(s || '').toUpperCase().replace(/\s+/g, ' ').trim(); };
+  var key = function (firm, tr) { var t = norm(tr); return t ? (norm(firm) || norm(first)) + '|' + t : ''; };
+  var get = function (k) { return acc[k] || (acc[k] = { key: k, firm: k.split('|')[0], name: k.split('|')[1], given: 0, used: 0, left: 0 }); };
+  (advs || []).forEach(function (a) { var k = key(a.firm, a.transporter); if (k) get(k).given += Number(a.amount) || 0; });
+  list.forEach(function (t) {
+    t.advUsed = 0; t.advAvail = 0;
+    var k = key(t.firm, t.transporter);
+    if (t.cx || t.fBuyer || !t.U || !k) return;
+    if (t.freightPaid) {
+      var u = Number(t.tAdv) || 0;
+      if (u) { t.advUsed = r2(u); t.netPay = r2(t.netPay - u); get(k).used += u; }
+      return;
+    }
+    (open[k] = open[k] || []).push(t);
+  });
+  Object.keys(acc).forEach(function (k) {
+    var a = acc[k], pool = r2(a.given - a.used);
+    (open[k] || []).sort(function (x, y) { return String(x.unloadDate).localeCompare(String(y.unloadDate)) || String(x.id).localeCompare(String(y.id)); }).forEach(function (t) {
+      t.advAvail = Math.max(0, pool);
+      var use = r2(Math.max(0, Math.min(pool, t.netPay)));
+      if (use > 0) { t.advUsed = use; t.netPay = r2(t.netPay - use); pool = r2(pool - use); a.used += use; }
+    });
+    a.given = r2(a.given); a.used = r2(a.used); a.left = r2(a.given - a.used);
+  });
+  return acc;
+}
+
+/* patch (optional): one truck's unsaved changes, to work out what it would take from its transporter's advance
+   when its freight is paid now (advForPay_). */
+function deriveAll_(patch) {
+  var po = {}, so = {}, S = readSettings_(), today = Utilities.formatDate(new Date(), tz_(), 'yyyy-MM-dd');
+  var V = visibleRows_(S); // firms kept out of this app (hiddenFirms) are not counted anywhere
+  V.po.forEach(function (r) { po[r.id] = r; });
+  V.so.forEach(function (r) { so[r.id] = r; });
+  var list = V.trucks.map(function (t) {
+    if (!patch || t.id !== patch.id) return t;
+    var c = {}, k;
+    for (k in t) c[k] = t[k];
+    for (k in patch) if (['freightPaid', 'freightPaidDate', 'freightUTR', 'tAdv'].indexOf(k) < 0) c[k] = patch[k];
+    return c;
+  });
+  var trucks = carry_(list.map(function (t) { return derive_(t, po[t.po], so[t.so], S, today, po[t.po2], so[t.so2]); }));
+  var pays = sheet_(T.PAY) ? rows_(T.PAY) : [], advs = sheet_(T.ADV) ? rows_(T.ADV) : [];
+  var tadv = transAdv_(trucks, advs, firms_(S)[0]);
+  return { po: po, so: so, S: S, today: today, trucks: trucks, pays: pays, accounts: custAcc_(trucks, pays, S), advs: advs, tadv: tadv };
+}
+/* What a truck takes from its transporter's advance if its freight is paid now (with the changes being saved). */
+function advForPay_(obj) {
+  var t = deriveAll_(obj).trucks.filter(function (x) { return x.id === obj.id; })[0];
+  return t && t.advUsed ? t.advUsed : '';
+}
+
+/* ---------------- Excel export ---------------- */
+
+function truckColumns_(can) {
+  var c = [['Dispatch No.', 'id'], ['Status', 'status'], ['Firm', 'firm'], ['Dispatch Date', 'date'], ['Vehicle Placed On', 'placedOn'], ['PO', 'po'], ['Supplier', 'plant'], ['Second PO', 'po2'], ['Qty on First PO', 'poQty'], ['Qty on Second PO', 'po2Qty'], ['SO', 'so'], ['Customer', 'buyer'], ['Second SO', 'so2'], ['Qty on First SO', 'soQty'], ['Qty on Second SO', 'so2Qty'],
+    ['Vehicle No', 'truck'], ['Transporter', 'transporter'], ['Driver', 'driver'], ['RST / Weighment Slip No', 'slip'], ['Slip Photo Link', 'slipPhoto'], ['Dispatch Wt (qtl)', 'L'], ['Supplier Invoice No', 'billNo'], ['Supplier Invoice Qty', 'billQty'],
+    ['Unload Date', 'unloadDate'], ['Received Wt (qtl)', 'U'], ['Shortage (qtl)', 'short'], ['Days on trip', 'trip'], ['Stage', 'stage']];
+  if (can.money) c = c.concat([['Supplier Amount incl GST', 'purTot'], ['Supplier Paid', 'plantPaid'], ['Supplier Paid Date', 'plantPaidDate'], ['Supplier UTR', 'plantUTR'],
+    ['Sale Rate', 'rateUsed'], ['Sale Total', 'saleTot'],
+    ['Freight Rate', 'FR'], ['Freight Amount', 'frAmt'], ['Free Shortage (qtl)', 'allowX'], ['Charged Shortage (qtl)', 'shortOver'], ['Shortage Rate incl GST', 'shortRate'], ['Shortage Deduction', 'shortDed'], ['Detention', 'det'],
+    ['Freight Advance', 'A'], ['Trip Net Freight', 'netFr'], ['Earlier Advance Adjusted', 'carryIn'], ['Transporter Advance Used', 'advUsed'], ['Net Freight Payable', 'netPay'], ['Freight Paid', 'freightPaid'], ['Freight Paid Date', 'freightPaidDate'], ['Freight UTR', 'freightUTR']]);
+  if (can.profit) c.push(['Profit before GST', 'profit']);
+  c.push(['Note', 'note']);
+  return c;
+}
+
+/* One Excel tab. S.No. comes first; yyyy-mm-dd values become real dates, shown as DD-MM-YYYY (format set in buildXlsx_). */
+function tab_(name, cols, list) {
+  var dateCols = {};
+  var body = list.map(function (r, i) {
+    return [i + 1].concat(cols.map(function (c, j) {
+      var v = r[c[1]];
+      if (v === undefined || v === null) return '';
+      if (typeof v === 'boolean') return v ? 'Yes' : 'No';
+      if (typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v)) { dateCols[j + 1] = 1; return parseDate_(v); }
+      return v;
+    }));
+  });
+  return { name: name, rows: [['S.No.'].concat(cols.map(function (c) { return c[0]; }))].concat(body), dateCols: Object.keys(dateCols).map(Number) };
+}
+
+var ADV_COLS_ = [['Advance No.', 'id'], ['Firm', 'firm'], ['Date', 'date'], ['Transporter', 'transporter'], ['Vehicle No', 'vehicle'], ['Driver', 'driver'], ['Amount', 'amount'], ['UTR / Ref', 'ref'], ['Note', 'note'], ['Entered By', 'by']];
+function exportTabs_(kind, key, ids, can, firm) {
+  var A = deriveAll_();
+  A.trucks.forEach(function (t) { t.allowX = Math.round((t.allow || 0) * 1000) / 1000; }); // free shortage, 3 decimals for Excel
+  if (firm) {
+    firm = normName_(firm);
+    A.trucks = A.trucks.filter(function (t) { return t.firm === firm; });
+    [A.po, A.so].forEach(function (m) { Object.keys(m).forEach(function (id) { if (firmOf_(m[id], A.S) !== firm) delete m[id]; }); });
+  }
+  var live = A.trucks.filter(function (t) { return !t.cx; });
+  var tc = truckColumns_(can), tabs = [];
+  var orderRows = function (map, k) {
+    return Object.keys(map).map(function (id) {
+      var o = map[id], tr = live.filter(function (t) { return t[k] === id || t[k + '2'] === id; }), done = 0;
+      tr.forEach(function (t) { done += partOn_(t, k, id, t.L); });
+      var r = { id: id, takenIn: o.takenIn || '', firm: firmOf_(o, A.S), type: k === 'po' ? (o.poType === 'plant' ? 'Own plant' : 'Trading') : (isFirm_(o.buyer, A.S) ? 'To group company' : 'Trading'), link: o.linkSO || '', party: o.plant || o.buyer, date: o.date, qty: o.qty, done: Math.round(done * 100) / 100,
+        bal: Math.round((Number(o.qty || 0) - done) * 100) / 100, trucks: tr.length, status: o.status === 'Settled' ? 'Short-closed' : o.status, rate: o.rate,
+        terms: o.gstMode ? (o.gstMode === 'incl' ? 'GST incl' : 'GST extra') + ', ' + (o.freightMode === 'buyer' ? 'buyer pays freight' : 'freight incl') : '' };
+      return r;
+    });
+  };
+  var oc = [['ID', 'id'], ['Firm', 'firm'], ['Type', 'type'], ['Party', 'party'], ['Sells To SO', 'link'], ['Date', 'date'], ['Quantity', 'qty'], ['Done', 'done'], ['Balance', 'bal'], ['Trucks', 'trucks'], ['Status', 'status']];
+  if (can.money) oc = oc.concat([['Rate', 'rate'], ['Terms', 'terms']]);
+  var pick = function (list) { return ids ? list.filter(function (t) { return ids.indexOf(t.id) >= 0; }) : list; };
+  // Customer money is kept per firm and customer. With a firm chosen: that firm's accounts and payments only.
+  var first = firms_(A.S)[0], fOf = function (x) { return normName_(x.firm) || first; };
+  var pays = A.pays.filter(function (p) { return !firm || fOf(p) === firm; }).map(function (p) { var c = {}; for (var k in p) c[k] = p[k]; c.firm = fOf(p); return c; });
+  var accRows = Object.keys(A.accounts).sort().filter(function (k) { return !firm || A.accounts[k].firm === firm; }).map(function (k) {
+    var a = A.accounts[k];
+    return { firm: a.firm, name: a.name, group: a.own ? 'Yes' : '', trucks: a.trucks, qty: a.qty, sales: a.sales, received: a.received, deducted: a.deducted,
+      outstanding: a.outstanding, overdue: a.overdue, oldest: a.oldest || '', lastPaid: a.lastPaid };
+  });
+  var ac = [['Firm', 'firm'], ['Customer', 'name'], ['Group company', 'group'], ['Trucks unloaded', 'trucks'], ['Qty unloaded (qtl)', 'qty'], ['Sales incl GST', 'sales'], ['Received', 'received'],
+    ['Deductions', 'deducted'], ['Outstanding', 'outstanding'], ['Overdue', 'overdue'], ['Oldest overdue (days)', 'oldest'], ['Last received', 'lastPaid']];
+  var pc = [['Payment ID', 'id'], ['Firm', 'firm'], ['Date', 'date'], ['Dispatch No.', 'truck'], ['SO', 'so'], ['Customer', 'buyer'], ['Amount', 'amount'], ['Deduction', 'deduction'], ['Note', 'note'], ['Entered By', 'by']];
+  var advRows = A.advs.filter(function (a) { return !firm || fOf(a) === firm; }).map(function (a) { var c = {}; for (var k in a) c[k] = a[k]; c.firm = fOf(a); return c; });
+  if (kind === 'full') {
+    tabs.push(tab_('Trucks', tc, A.trucks));
+    tabs.push(tab_('Purchase Orders', oc, orderRows(A.po, 'po')));
+    tabs.push(tab_('Sale Orders', oc, orderRows(A.so, 'so')));
+    if (can.money) {
+      var by = {};
+      live.filter(function (t) { return t.L && !t.fBuyer; }).forEach(function (t) {
+        var k = t.transporter || '(none)';
+        by[k] = by[k] || { name: k, trucks: 0, freight: 0, short: 0, det: 0, adv: 0, payable: 0, paid: 0 };
+        var b = by[k]; b.trucks++; b.freight += t.frAmt; b.short += t.shortDed; b.det += t.det; b.adv += t.A;
+        if (t.U && !t.freightPaid) b.payable += t.netPay; if (t.freightPaid) b.paid += t.netPay;
+      });
+      Object.keys(A.tadv).forEach(function (k) {
+        var x = A.tadv[k];
+        if (firm && x.firm !== firm) return;
+        var b = by[x.name] = by[x.name] || { name: x.name, trucks: 0, freight: 0, short: 0, det: 0, adv: 0, payable: 0, paid: 0, tGiven: 0, tUsed: 0, tLeft: 0 };
+        b.tGiven = (b.tGiven || 0) + x.given; b.tUsed = (b.tUsed || 0) + x.used; b.tLeft = (b.tLeft || 0) + x.left;
+      });
+      tabs.push(tab_('Transporters', [['Transporter', 'name'], ['Trucks', 'trucks'], ['Freight', 'freight'], ['Shortage Deduction', 'short'], ['Detention', 'det'], ['Freight Advance', 'adv'], ['Net Paid', 'paid'], ['Net Payable Now', 'payable'],
+        ['Transporter Advance Given', 'tGiven'], ['Transporter Advance Used', 'tUsed'], ['Transporter Advance Left', 'tLeft']], Object.keys(by).map(function (k) { return by[k]; })));
+      tabs.push(tab_('Transporter Advances', ADV_COLS_, advRows));
+      tabs.push(tab_('Customer Accounts', ac, accRows));
+      tabs.push(tab_('Customer Payments', pc, pays));
+    }
+  } else if (kind === 'accounts') { // Receivables page: one row per customer, and all customer payments
+    if (!can.money) throw new Error('Your role cannot download money figures.');
+    tabs.push(tab_('Customer Accounts', ac, ids ? accRows.filter(function (r) { return ids.indexOf(r.firm + '|' + r.name) >= 0 || ids.indexOf(r.name) >= 0; }) : accRows));
+    tabs.push(tab_('Customer Payments', pc, pays));
+  } else if (kind === 'shortage') { // Disputes tab: loaded / unloaded weight and how each shortage deduction was worked out. key = transporter (or blank)
+    if (!can.money) throw new Error('Your role cannot download money figures.');
+    var shc = [['Dispatch No.', 'id'], ['Firm', 'firm'], ['Date Out', 'date'], ['Unload Date', 'unloadDate'], ['Vehicle No', 'truck'], ['Transporter', 'transporter'], ['Customer', 'buyer'],
+      ['Loaded (qtl)', 'L'], ['Unloaded (qtl)', 'U'], ['Shortage (qtl)', 'short'], ['Free 0.2% (qtl)', 'allowX'], ['Charged Shortage (qtl)', 'shortOver'], ['Rate incl GST', 'shortRate'], ['Shortage Deduction', 'shortDed'],
+      ['Freight Rate', 'FR'], ['Freight', 'frAmt'], ['Freight Advance', 'advTot'], ['Detention', 'det'], ['Net Freight', 'netPay'], ['Freight Paid', 'freightPaid'], ['Freight Paid Date', 'freightPaidDate']];
+    var shl = pick(A.trucks.filter(function (t) { return !t.cx && t.U && !t.fBuyer && (!key || normName_(t.transporter || '(none)') === normName_(key)); }));
+    tabs.push(tab_('Shortage', shc, shl.map(function (t) { var o = {}; for (var k in t) o[k] = t[k]; o.advTot = Math.round(((t.A || 0) + (t.carryIn || 0) + (t.advUsed || 0)) * 100) / 100; return o; })));
+  } else if (kind === 'orders') { // a list of orders shown on screen (e.g. Closed & cancelled page): ids = the order ids
+    tabs.push(tab_('Purchase Orders', oc, pick(orderRows(A.po, 'po'))));
+    tabs.push(tab_('Sale Orders', oc, pick(orderRows(A.so, 'so'))));
+  } else {
+    var match = {
+      trucks: function () { return true; },
+      po: function (t) { return t.po === key || t.po2 === key; }, so: function (t) { return t.so === key || t.so2 === key; },
+      buyer: function (t) { return normName_(t.buyer) === normName_(key); }, plant: function (t) { return normName_(t.plant) === normName_(key); },
+      transporter: function (t) { return normName_(t.transporter || '(none)') === normName_(key); }
+    }[kind];
+    if (!match) throw new Error('Unknown export');
+    tabs.push(tab_(kind === 'transporter' ? 'Statement' : 'Trucks', tc, pick(A.trucks.filter(match))));
+    if (kind === 'transporter' && can.money) tabs.push(tab_('Advances', ADV_COLS_, advRows.filter(function (a) { return normName_(a.transporter) === normName_(key); })));
+    if (kind === 'po') tabs.push(tab_('PO', oc, orderRows(A.po, 'po').filter(function (r) { return r.id === key; })));
+    if (kind === 'so') tabs.push(tab_('SO', oc, orderRows(A.so, 'so').filter(function (r) { return r.id === key; })));
+    if (kind === 'buyer') tabs.push(tab_('Sale Orders', oc, orderRows(A.so, 'so').filter(function (r) { return normName_(r.party) === normName_(key); })));
+    if (kind === 'buyer' && can.money) {
+      tabs.push(tab_('Account', ac, accRows.filter(function (r) { return r.name === normName_(key); })));
+      tabs.push(tab_('Payments', pc, pays.filter(function (p) { return normName_(p.buyer) === normName_(key); })));
+    }
+    if (kind === 'plant') tabs.push(tab_('Purchase Orders', oc, orderRows(A.po, 'po').filter(function (r) { return normName_(r.party) === normName_(key); })));
+  }
+  return tabs;
+}
+
+function folder_(name) {
+  var it = DriveApp.getFoldersByName(name);
+  return it.hasNext() ? it.next() : DriveApp.createFolder(name);
+}
+
+function buildXlsx_(name, tabs) {
+  var tmp = SpreadsheetApp.create(name);
+  tabs.forEach(function (tb, i) {
+    var sh = i === 0 ? tmp.getSheets()[0].setName(tb.name) : tmp.insertSheet(tb.name);
+    var w = tb.rows[0].length;
+    var rows = tb.rows.map(function (r) { var a = r.slice(0, w); while (a.length < w) a.push(''); return a; });
+    sh.getRange(1, 1, rows.length, w).setValues(rows);
+    if (rows.length > 1) (tb.dateCols || []).forEach(function (c) { sh.getRange(2, c + 1, rows.length - 1, 1).setNumberFormat('dd-mm-yyyy'); });
+    sh.getRange(1, 1, 1, w).setFontWeight('bold').setBackground('#0f6b5c').setFontColor('#ffffff');
+    sh.setFrozenRows(1);
+  });
+  SpreadsheetApp.flush();
+  var resp = UrlFetchApp.fetch('https://docs.google.com/spreadsheets/d/' + tmp.getId() + '/export?format=xlsx',
+    { headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() } });
+  var blob = resp.getBlob().setName(name + '.xlsx');
+  DriveApp.getFileById(tmp.getId()).setTrashed(true);
+  return blob;
+}
+
+/** kind: full | trucks | po | so | buyer | plant | transporter. ids: optional list of Dispatch IDs (the list on screen). */
+function api_export(token, kind, key, ids, firm) {
+  auth_(token); need_('exportX');
+  var stamp = Utilities.formatDate(new Date(), tz_(), 'yyyy-MM-dd HHmm');
+  var name = 'DDGS ' + (firm ? firm + ' ' : '') + (kind === 'full' ? 'Full export' : (key ? key + ' ' : '') + (kind === 'trucks' ? 'Trucks' : kind)) + ' ' + stamp;
+  var blob = buildXlsx_(name, exportTabs_(kind, key, ids, ME.can, firm || ''));
+  var file = folder_(APP_DRIVE_ + ' Exports').createFile(blob);
+  log_('Export', kind, name);
+  return { name: blob.getName(), url: file.getUrl(), b64: Utilities.base64Encode(blob.getBytes()) };
+}
+
+/* ---------------- Dispatch report (PDF) ----------------
+   For a from–to range: every open PO and SO (and any order with trucks in the range) with its balance, the trucks
+   dispatched (date out) and the trucks unloaded, day by day. Rates and amounts only for money roles (Dispatch: weights only). */
+function api_reportPdf(token, from, to, firm) {
+  auth_(token);
+  var re = /^\d{4}-\d{2}-\d{2}$/;
+  if (!re.test(String(from || '')) || !re.test(String(to || ''))) throw new Error('Choose the from and to dates.');
+  if (from > to) throw new Error('The from date is after the to date.');
+  var day = function (s) { var p = s.split('-'); return Date.UTC(+p[0], +p[1] - 1, +p[2]) / 864e5; };
+  if (day(to) - day(from) > 366) throw new Error('Choose at most one year.');
+  var A = deriveAll_(), f = firm ? normName_(firm) : '';
+  if (f && (firms_(A.S).indexOf(f) < 0 || hiddenFirms_(A.S).indexOf(f) >= 0)) throw new Error('Unknown firm: ' + f);
+  var name = 'DDGS Dispatch report ' + (f ? shortFirm_(f) + ' ' : '') + dmy_(from) + (to !== from ? ' to ' + dmy_(to) : '');
+  var html = reportHtml_(A, from, to, f, !!(ME.can && ME.can.money), ME.name || ME.id);
+  var pdf = Utilities.newBlob(html, 'text/html', name + '.html').getAs('application/pdf').setName(name + '.pdf');
+  var file = folder_(APP_DRIVE_ + ' Exports').createFile(pdf);
+  log_('Report PDF', f || 'All firms', dmy_(from) + ' to ' + dmy_(to));
+  return { name: pdf.getName(), url: file.getUrl(), b64: Utilities.base64Encode(pdf.getBytes()) };
+}
+function shortFirm_(f) {
+  var w = normName_(f).split(' '), keep = [];
+  for (var i = 0; i < w.length; i++) { if (i > 0 && /^(SOLVEX|TRADING|TRADERS|AND|&|COMPANY|CO\.?|PVT|LTD|PRIVATE|LIMITED)$/.test(w[i])) break; keep.push(w[i]); }
+  return keep.map(function (x) { return x.charAt(0) + x.slice(1).toLowerCase(); }).join(' ');
+}
+function reportHtml_(A, from, to, f, money, who) {
+  var S = A.S, all = !f && firms_(S).filter(function (x) { return hiddenFirms_(S).indexOf(x) < 0; }).length > 1;
+  var esc = function (s) { return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); };
+  var q = function (x) { return qtl_(Number(x) || 0); }, rs = function (x) { return money_(Number(x) || 0); };
+  var nw = function (x) { return '<span class="nw">' + x + '</span>'; }, dt = function (d) { return nw(dmy_(d)); }, tk = function (k) { return k + (k === 1 ? ' truck' : ' trucks'); };
+  var sum = function (a, fn) { return Math.round(a.reduce(function (s, t) { return s + (Number(fn(t)) || 0); }, 0) * 100) / 100; };
+  var byId = function (a, b) { return String(a).localeCompare(String(b), 'en', { numeric: true }); };
+  var inR = function (d) { return !!d && d >= from && d <= to; };
+  var live = A.trucks.filter(function (t) { return !t.cx && (!f || t.firm === f); });
+  var disp = live.filter(function (t) { return t.L && inR(t.date); }).sort(function (a, b) { return byId(a.date, b.date) || byId(a.id, b.id); });
+  var unl = live.filter(function (t) { return t.U && inR(t.unloadDate); }).sort(function (a, b) { return byId(a.unloadDate, b.unloadDate) || byId(a.id, b.id); });
+  var fs = function (x) { return all ? '<br><span class="mu">' + esc(shortFirm_(x)) + '</span>' : ''; };
+  var dest = function (t) { return t.plantPO ? 'Own plant' : t.buyer ? esc(t.buyer) + (t.so ? '<br><span class="mu">' + esc(ordIds_(t, 'so')) + '</span>' : '') : '<span class="mu">not assigned</span>'; };
+  // a table: cols = [[heading, right-aligned?]], rows = arrays of cell html, tot = totals row (or null)
+  var table = function (cols, rows, tot) {
+    if (!rows.length) return '<p class="mu">None.</p>';
+    var cell = function (tag, c, i) { return '<' + tag + (cols[i][1] ? ' class="r"' : '') + '>' + c + '</' + tag + '>'; };
+    return '<table><thead><tr>' + cols.map(function (c, i) { return cell('th', c[0], i); }).join('') + '</tr></thead><tbody>' +
+      rows.map(function (r) { return '<tr>' + r.map(function (c, i) { return cell('td', c, i); }).join('') + '</tr>'; }).join('') +
+      (tot ? '<tr class="tot">' + tot.map(function (c, i) { return cell('td', c, i); }).join('') + '</tr>' : '') + '</tbody></table>';
+  };
+  var title = f || (all ? 'All firms' : firms_(S)[0]);
+  var period = dmy_(from) + (to !== from ? ' to ' + dmy_(to) : '');
+  var h = '<!DOCTYPE html><html><head><meta charset="utf-8"><style>' +
+    '@page{size:A4;margin:12mm}body{font-family:Arial,Helvetica,sans-serif;font-size:8pt;color:#14201e}.nw,td.r{white-space:nowrap}' +
+    'h1{font-size:16pt;color:#0f6b5c;margin:0 0 2px}h2{font-size:11pt;color:#0f6b5c;margin:16px 0 5px;padding-bottom:2px;border-bottom:1.5px solid #0f6b5c}' +
+    'table{border-collapse:collapse;width:100%;font-size:8pt}th{background:#0f6b5c;color:#fff;text-align:left;padding:4px 5px;font-size:7.5pt;font-weight:bold}' +
+    'td{border-bottom:1px solid #dfe6e3;padding:3px 5px;vertical-align:top}.r{text-align:right}tr.tot td{font-weight:bold;background:#eef4f2;border-top:1px solid #14201e}' +
+    '.mu{color:#5d6b68;font-size:7pt}.kp td{border:1px solid #cfdad6;padding:6px 8px;width:25%;vertical-align:top}.kp b{font-size:13pt}.top{color:#5d6b68;margin-bottom:10px}' +
+    '</style></head><body>';
+  h += '<h1>Dispatch report · ' + esc(title) + '</h1><div class="top">' + esc(period) + ' · made by ' + esc(who) + ' on ' + Utilities.formatDate(new Date(), tz_(), 'dd-MM-yyyy HH:mm') + (money ? '' : ' · weights only') + '</div>';
+  var shortT = unl.filter(function (t) { return t.short > 0; });
+  h += '<table class="kp"><tr>' +
+    '<td>Trucks dispatched<br><b>' + disp.length + '</b><br>' + q(sum(disp, function (t) { return t.L; })) + ' qtl' + (money ? '<br><span class="mu">purchase ' + rs(sum(disp, function (t) { return t.purTot; })) + '</span>' : '') + '</td>' +
+    '<td>Trucks unloaded<br><b>' + unl.length + '</b><br>' + q(sum(unl, function (t) { return t.U; })) + ' qtl received' + (money ? '<br><span class="mu">sale ' + rs(sum(unl, function (t) { return t.saleTot; })) + '</span>' : '') + '</td>' +
+    '<td>Shortage<br><b>' + q(sum(unl, function (t) { return t.short; })) + '</b> qtl<br>' + shortT.length + ' trucks' + (money ? '<br><span class="mu">deducted ' + rs(sum(unl, function (t) { return t.shortDed; })) + '</span>' : '') + '</td>' +
+    '<td>On the road now<br><b>' + live.filter(function (t) { return t.L && !t.U; }).length + '</b><br>' + q(sum(live.filter(function (t) { return t.L && !t.U; }), function (t) { return t.L; })) + ' qtl</td>' +
+    '</tr></table>';
+  if (to !== from) {
+    var days = {};
+    disp.forEach(function (t) { var d = days[t.date] = days[t.date] || { dn: 0, dq: 0, un: 0, uq: 0, sh: 0 }; d.dn++; d.dq += t.L; });
+    unl.forEach(function (t) { var d = days[t.unloadDate] = days[t.unloadDate] || { dn: 0, dq: 0, un: 0, uq: 0, sh: 0 }; d.un++; d.uq += t.U; d.sh += t.short; });
+    var dk = Object.keys(days).sort();
+    h += '<h2>Day by day</h2>' + table([['Date'], ['Trucks dispatched', 1], ['Dispatched qtl', 1], ['Trucks unloaded', 1], ['Received qtl', 1], ['Shortage qtl', 1]],
+      dk.map(function (k) { var d = days[k]; return [dt(k), d.dn || '—', d.dn ? q(d.dq) : '—', d.un || '—', d.un ? q(d.uq) : '—', d.sh ? q(d.sh) : '—']; }),
+      ['Total', disp.length, q(sum(disp, function (t) { return t.L; })), unl.length, q(sum(unl, function (t) { return t.U; })), q(sum(unl, function (t) { return t.short; }))]);
+  }
+  // orders: every open one in this firm, plus closed ones that had trucks in the range
+  var orders = function (map, k) {
+    return Object.keys(map).map(function (id) { return map[id]; }).filter(function (o) {
+      if (f && firmOf_(o, S) !== f) return false;
+      var open = o.status !== 'Cancelled' && o.status !== 'Settled';
+      var on = function (t) { return t[k] === o.id || t[k + '2'] === o.id; };
+      return open || disp.some(on) || unl.some(on);
+    }).sort(function (a, b) { return byId(a.id, b.id); }).map(function (o) {
+      var on = function (t) { return t[k] === o.id || t[k + '2'] === o.id; }, done = sum(live, function (t) { return partOn_(t, k, o.id, t.L); }), qty = Number(o.qty) || 0;
+      var dp = disp.filter(on), up = unl.filter(on);
+      return { o: o, qty: qty, done: done, bal: Math.round((qty - done) * 100) / 100, dp: dp, up: up, dq: sum(dp, function (t) { return partOn_(t, k, o.id, t.L); }), uq: sum(up, function (t) { return partOn_(t, k, o.id, t.U); }) };
+    });
+  };
+  var st = function (o) { return o.status === 'Settled' ? ' <span class="mu">short-closed</span>' : o.status === 'Cancelled' ? ' <span class="mu">cancelled</span>' : ''; };
+  var pos = orders(A.po, 'po');
+  h += '<h2>Purchase orders</h2>' + table([['PO'], ['Date'], ['Supplier']].concat(money ? [['Rate', 1]] : []).concat([['Ordered qtl', 1], ['Loaded qtl', 1], ['Balance qtl', 1], ['In period', 1]]),
+    pos.map(function (x) {
+      return [nw(esc(x.o.id)) + fs(firmOf_(x.o, S)) + st(x.o), dt(x.o.date), esc(x.o.plant)].concat(money ? [rs(x.o.rate) + '<br><span class="mu">+ GST ' + Math.round((Number(x.o.gst) || 0) * 100) + '%</span>'] : [])
+        .concat([q(x.qty), q(x.done), '<b>' + q(x.bal) + '</b>', x.dp.length ? tk(x.dp.length) + '<br>' + q(x.dq) + ' qtl' : '—']);
+    }), ['Total', '', ''].concat(money ? [''] : []).concat([q(sum(pos, function (x) { return x.qty; })), q(sum(pos, function (x) { return x.done; })), q(sum(pos, function (x) { return x.bal; })), tk(disp.filter(function (t) { return t.po; }).length)]));
+  var sos = orders(A.so, 'so');
+  var terms = function (o) { return (o.gstMode === 'incl' ? 'GST incl.' : o.gstMode === 'excl' ? '+ GST' : '') + (o.freightMode === 'buyer' ? ', customer pays freight' : o.freightMode === 'ours' ? ', freight incl.' : ''); };
+  h += '<h2>Sale orders</h2>' + table([['SO'], ['Date'], ['Customer']].concat(money ? [['Rate', 1]] : []).concat([['Ordered qtl', 1], ['Dispatched qtl', 1], ['Balance qtl', 1], ['Dispatched in period', 1], ['Unloaded in period', 1]]),
+    sos.map(function (x) {
+      return [nw(esc(x.o.id)) + fs(firmOf_(x.o, S)) + st(x.o), dt(x.o.date), esc(x.o.buyer)].concat(money ? [rs(x.o.rate) + '<br><span class="mu">' + esc(terms(x.o)) + '</span>'] : [])
+        .concat([q(x.qty), q(x.done), '<b>' + q(x.bal) + '</b>', x.dp.length ? tk(x.dp.length) + '<br>' + q(x.dq) + ' qtl' : '—',
+          x.up.length ? tk(x.up.length) + '<br>' + q(x.uq) + ' qtl' : '—']);
+    }), ['Total', '', ''].concat(money ? [''] : []).concat([q(sum(sos, function (x) { return x.qty; })), q(sum(sos, function (x) { return x.done; })), q(sum(sos, function (x) { return x.bal; })),
+      tk(sum(sos, function (x) { return x.dp.length; })), tk(sum(sos, function (x) { return x.up.length; }))]));
+  h += '<h2>Trucks dispatched (' + disp.length + ')</h2>' + table([['#'], ['Date out'], ['Dispatch No.'], ['Vehicle'], ['Supplier / PO'], ['Customer / SO'], ['Transporter'], ['Loaded qtl', 1]].concat(money ? [['Purchase incl. GST', 1]] : []),
+    disp.map(function (t, i) {
+      return [i + 1, dt(t.date), nw(esc(t.id)) + fs(t.firm), nw('<b>' + esc(t.truck) + '</b>'), esc(t.plant) + '<br><span class="mu">' + esc(ordIds_(t, 'po')) + '</span>', dest(t), esc(t.transporter || '—'), q(t.L)].concat(money ? [rs(t.purTot)] : []);
+    }), ['', 'Total', '', '', '', '', '', q(sum(disp, function (t) { return t.L; }))].concat(money ? [rs(sum(disp, function (t) { return t.purTot; }))] : []));
+  h += '<h2>Trucks unloaded (' + unl.length + ')</h2>' + table([['#'], ['Unloaded'], ['Dispatch No.'], ['Vehicle'], ['Customer / SO'], ['Date out'], ['Loaded qtl', 1], ['Received qtl', 1], ['Shortage qtl', 1]].concat(money ? [['Sale amount', 1], ['Shortage deduction', 1]] : []),
+    unl.map(function (t, i) {
+      return [i + 1, dt(t.unloadDate), nw(esc(t.id)) + fs(t.firm), nw('<b>' + esc(t.truck) + '</b>'), dest(t), dt(t.date), q(t.L), q(t.U), t.short ? q(t.short) : '—'].concat(money ? [t.plantPO ? '—' : rs(t.saleTot), t.shortDed ? rs(t.shortDed) : '—'] : []);
+    }), ['', 'Total', '', '', '', '', q(sum(unl, function (t) { return t.L; })), q(sum(unl, function (t) { return t.U; })), q(sum(unl, function (t) { return t.short; }))].concat(money ? [rs(sum(unl, function (t) { return t.saleTot; })), rs(sum(unl, function (t) { return t.shortDed; }))] : []));
+  return h + '<p class="mu" style="margin-top:14px">Weights in quintals. Dispatched = date the truck left the plant (date out). Cancelled and returned trucks are not counted. DDGS Trade Control.</p></body></html>';
+}
+
+/* ---------------- Reports (Nitish, 25-11-2026) ----------------
+   Purchase-order-wise: where each PO's trucks went (one line per sale order: rate, trucks, loaded, unloaded, sale amount),
+   then the trucks of each sale order with the rate each was sold at and its amount. Sale-order-wise: the mirror (where
+   the trucks came from, at the purchase rate and amount). On screen, PDF and Excel, all from the same numbers. Money
+   roles only. No profit: amounts only (Nitish works the profit out himself). Amounts incl. GST, as on the truck page. */
+function pdfHead_() {
+  return '<!DOCTYPE html><html><head><meta charset="utf-8"><style>' +
+    '@page{size:A4;margin:10mm}body{font-family:Arial,Helvetica,sans-serif;font-size:8pt;color:#14201e}.nw,td.r{white-space:nowrap}' +
+    'h1{font-size:16pt;color:#0f6b5c;margin:0 0 2px}h2{font-size:11pt;color:#0f6b5c;margin:12px 0 4px;padding-bottom:2px;border-bottom:1.5px solid #0f6b5c}' +
+    'table{border-collapse:collapse;width:100%;font-size:8pt}th{background:#0f6b5c;color:#fff;text-align:left;padding:4px 5px;font-size:7.5pt;font-weight:bold}' +
+    'td{border-bottom:1px solid #dfe6e3;padding:3px 5px;vertical-align:top}.r{text-align:right}tr.tot td{font-weight:bold;background:#eef4f2;border-top:1px solid #14201e}' +
+    '.mu{color:#5d6b68;font-size:7pt}.kp td{border:1px solid #cfdad6;padding:6px 8px;width:20%;vertical-align:top}.kp b{font-size:13pt}.top{color:#5d6b68;margin-bottom:10px}' +
+    'h2{page-break-after:avoid}tr{page-break-inside:avoid}' + // no forced new pages: sections follow on (no wasted paper); a heading stays with its table
+    '</style></head><body>';
+}
+/* The pieces of one truck: (PO, SO) pairs with their loaded and unloaded qty, the rates, and the purchase and sale amount
+   (incl. GST) of each piece. A truck on two orders (po2 / so2) is matched old with old along its dispatch weight: the
+   first PO's part and the first SO's part come first, and a shortage falls at the end (the second order), as in derive_.
+   The pieces of each part add up to the truck's own amounts (purTot / pur1Tot / pur2Tot, saleTot / sale1Tot / sale2Tot). */
+function truckPieces_(t, A) {
+  var L = t.L, U = t.U, r2 = function (x) { return Math.round(x * 100) / 100; };
+  if (!(L > 0)) return [];
+  var noSO = t.plantPO || !t.so, own = !(t.saleRate === '' || t.saleRate == null);
+  var rate1 = A.po[t.po] ? Number(A.po[t.po].rate) || 0 : 0;
+  var recv = function (a, b) { return U ? Math.max(0, Math.min(b, U) - a) : 0; }; // received part of [a, b]
+  var sw = function (a, b) { return U ? recv(a, b) : b - a; }; // sale weight: received, or dispatch until received
+  // parts: [order, from, to, amount of the part, rate]
+  var pp = t.po2 ? [[t.po, 0, t.poQ1, t.pur1Tot, rate1], [t.po2, t.poQ1, L, t.pur2Tot, t.rate2]] : [[t.po, 0, L, t.purTot, rate1]];
+  var sp;
+  if (noSO) sp = [['', 0, L, 0, 0]];
+  else if (!t.so2) sp = [[t.so, 0, L, t.saleTot, t.rateUsed]];
+  else if (own) { var a1 = r2(t.saleTot * sw(0, t.soQ1) / (sw(0, L) || 1)); sp = [[t.so, 0, t.soQ1, a1, t.rateUsed], [t.so2, t.soQ1, L, r2(t.saleTot - a1), t.rateUsed]]; }
+  else sp = [[t.so, 0, t.soQ1, t.sale1Tot, t.rateUsed], [t.so2, t.soQ1, L, t.sale2Tot, t.soRate2]];
+  var out = [];
+  pp.forEach(function (p, i) {
+    sp.forEach(function (s, j) {
+      var a = Math.max(p[1], s[1]), b = Math.min(p[2], s[2]);
+      if (b - a < 0.005) return;
+      var sws = sw(s[1], s[2]);
+      out.push({ t: t, po: p[0], so: s[0], pi: i, si: j, L: r2(b - a), U: r2(recv(a, b)), purRate: p[4], saleRate: s[4],
+        pur: r2(p[3] * (b - a) / (p[2] - p[1])), sale: r2(s[3] * (sws > 0 ? sw(a, b) / sws : (b - a) / (s[2] - s[1]))) });
+    });
+  });
+  // the pieces of each part add up to that part's amount exactly (the last piece takes the rounding)
+  [['pur', 'pi', pp], ['sale', 'si', sp]].forEach(function (f) {
+    f[2].forEach(function (part, k) {
+      var mine = out.filter(function (x) { return x[f[1]] === k; });
+      if (!mine.length) return;
+      var rest = part[3];
+      mine.forEach(function (x, m) { if (m < mine.length - 1) rest -= x[f[0]]; });
+      mine[mine.length - 1][f[0]] = r2(rest);
+    });
+  });
+  return out;
+}
+function reportPieces_(A) {
+  var all = [];
+  A.trucks.forEach(function (t) { if (!t.cx) truckPieces_(t, A).forEach(function (x) { all.push(x); }); });
+  return all;
+}
+function reportSum_(list, k) { return Math.round(list.reduce(function (s, x) { return s + (Number(x[k]) || 0); }, 0) * 100) / 100; }
+function reportOrder_(o, kind, A) { // the order's own line: party, rate, terms
+  return { kind: kind, id: o.id, party: kind === 'po' ? o.plant : o.buyer, date: o.date, rate: Number(o.rate) || 0, gst: Number(o.gst) || 0,
+    terms: kind === 'po' ? (o.poType === 'plant' ? 'own plant' : '+ GST ' + Math.round((Number(o.gst) || 0) * 100) + '%') :
+      (o.gstMode === 'incl' ? 'GST incl.' : o.gstMode === 'excl' ? '+ GST ' + Math.round((Number(o.gst) || 0) * 100) + '%' : '') + (o.freightMode === 'buyer' ? ', customer pays freight' : o.freightMode === 'ours' ? ', freight incl.' : ''),
+    qty: Number(o.qty) || 0, firm: firmOf_(o, A.S), status: o.status === 'Settled' ? 'Short-closed' : o.status || '' };
+}
+/* One line per order (kind 'po' or 'so'), newest first: rate, quantity, loaded, unloaded, trucks, amount
+   (purchase amount for a PO, sale amount for an SO). */
+function reportList_(A, kind, firm) {
+  var map = kind === 'po' ? A.po : A.so, pieces = reportPieces_(A), amt = kind === 'po' ? 'pur' : 'sale';
+  var rows = Object.keys(map).map(function (id) { return map[id]; }).filter(function (o) { return o.status !== 'Cancelled' && (!firm || firmOf_(o, A.S) === firm); }).map(function (o) {
+    var my = pieces.filter(function (x) { return x[kind] === o.id; }), seen = {};
+    my.forEach(function (x) { seen[x.t.id] = 1; });
+    var r = reportOrder_(o, kind, A);
+    r.trucks = Object.keys(seen).length; r.L = reportSum_(my, 'L'); r.U = reportSum_(my, 'U'); r.bal = Math.round((r.qty - r.L) * 100) / 100;
+    r.road = reportSum_(my.filter(function (x) { return !x.t.U; }), 'L'); r.amt = reportSum_(my, amt);
+    return r;
+  }).sort(function (a, b) { return String(b.date).localeCompare(String(a.date)) || String(b.id).localeCompare(String(a.id), 'en', { numeric: true }); });
+  var tot = { trucks: rows.reduce(function (s, r) { return s + r.trucks; }, 0), L: reportSum_(rows, 'L'), U: reportSum_(rows, 'U'), road: reportSum_(rows, 'road'), amt: reportSum_(rows, 'amt') };
+  return { kind: kind, firm: firm || '', rows: rows, tot: tot };
+}
+/* One order: its own line, then one group per sale order (for a PO: at the sale rate and amount) or purchase order
+   (for an SO: at the purchase rate and amount), each with its trucks. */
+function orderReport_(A, kind, id) {
+  if (kind !== 'po' && kind !== 'so') throw new Error('Choose purchase orders or sale orders.');
+  var map = kind === 'po' ? A.po : A.so, o = map[id], other = kind === 'po' ? 'so' : 'po', omap = kind === 'po' ? A.so : A.po;
+  var amt = kind === 'po' ? 'sale' : 'pur', rateK = kind === 'po' ? 'saleRate' : 'purRate';
+  if (!o) throw new Error(id + ' was not found.');
+  var my = reportPieces_(A).filter(function (x) { return x[kind] === id; }), G = {};
+  my.forEach(function (x) {
+    var key = x[other] || (x.t.plantPO ? '(own plant)' : '(no customer yet)');
+    var g = G[key];
+    if (!g) {
+      var c = omap[x[other]];
+      g = G[key] = c ? reportOrder_(c, other, A) : { kind: other, id: '', party: key === '(own plant)' ? 'Own plant' : 'No customer yet', date: '', rate: 0, terms: '' };
+      g.key = key; g.rows = [];
+    }
+    g.rows.push({ id: x.t.id, date: x.t.date, unloadDate: x.t.U ? x.t.unloadDate : '', truck: x.t.truck, L: x.L, U: x.U, of: x.L !== x.t.L ? x.t.L : '', road: !x.t.U, rate: x[rateK], amt: x[amt] });
+  });
+  var groups = Object.keys(G).map(function (k) {
+    var g = G[k], seen = {};
+    g.rows.sort(function (a, b) { return String(a.date).localeCompare(String(b.date)) || String(a.id).localeCompare(String(b.id), 'en', { numeric: true }); });
+    g.rows.forEach(function (r) { seen[r.id] = 1; });
+    g.trucks = Object.keys(seen).length; g.L = reportSum_(g.rows, 'L'); g.U = reportSum_(g.rows, 'U'); g.amt = reportSum_(g.rows, 'amt');
+    return g;
+  }).sort(function (a, b) { return (a.id ? 0 : 1) - (b.id ? 0 : 1) || String(a.date).localeCompare(String(b.date)) || String(a.id).localeCompare(String(b.id), 'en', { numeric: true }); });
+  var head = reportOrder_(o, kind, A), seen = {};
+  my.forEach(function (x) { seen[x.t.id] = 1; });
+  head.trucks = Object.keys(seen).length; head.L = reportSum_(my, 'L'); head.U = reportSum_(my, 'U'); head.bal = Math.round((head.qty - head.L) * 100) / 100;
+  head.road = reportSum_(my.filter(function (x) { return !x.t.U; }), 'L'); head.pur = reportSum_(my, 'pur'); head.sale = reportSum_(my, 'sale');
+  return { order: head, groups: groups };
+}
+function api_reports(token, kind, firm) {
+  auth_(token); need_('money');
+  if (kind !== 'po' && kind !== 'so') throw new Error('Choose purchase orders or sale orders.');
+  var A = deriveAll_(), f = firm ? normName_(firm) : '';
+  if (f && firms_(A.S).indexOf(f) < 0) throw new Error('Unknown firm: ' + f);
+  return reportList_(A, kind, f);
+}
+function api_orderReport(token, kind, id) {
+  auth_(token); need_('money');
+  return orderReport_(deriveAll_(), kind, id);
+}
+/** A report as PDF or Excel (format 'pdf' / 'xlsx'): one order (id), or the list of orders (no id). */
+function api_reportFile(token, kind, id, firm, format) {
+  auth_(token); need_('money');
+  if (kind !== 'po' && kind !== 'so') throw new Error('Choose purchase orders or sale orders.');
+  var A = deriveAll_(), f = firm ? normName_(firm) : '', who = ME.name || ME.id;
+  if (f && firms_(A.S).indexOf(f) < 0) throw new Error('Unknown firm: ' + f);
+  var data = id ? orderReport_(A, kind, id) : reportList_(A, kind, f);
+  var stamp = Utilities.formatDate(new Date(), tz_(), 'dd-MM-yyyy HHmm');
+  var name = 'DDGS ' + (id ? id + ' report' : (kind === 'po' ? 'Purchase orders' : 'Sale orders') + ' report' + (f ? ' ' + shortFirm_(f) : '')) + ' ' + stamp;
+  var blob = format === 'xlsx' ? buildXlsx_(name, id ? orderReportTabs_(data) : listReportTabs_(data)) :
+    Utilities.newBlob(id ? orderReportHtml_(data, who) : listReportHtml_(data, who), 'text/html', name + '.html').getAs('application/pdf').setName(name + '.pdf');
+  var file = folder_(APP_DRIVE_ + ' Exports').createFile(blob);
+  log_('Report ' + (format === 'xlsx' ? 'Excel' : 'PDF'), id || (kind === 'po' ? 'Purchase orders' : 'Sale orders'), name);
+  return { name: blob.getName(), url: file.getUrl(), b64: Utilities.base64Encode(blob.getBytes()) };
+}
+function reportEsc_(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
+function reportTable_(cols, rows, tot) { // cols = [[heading, right-aligned?]]
+  if (!rows.length) return '<p class="mu">None.</p>';
+  var cell = function (tag, c, i) { return '<' + tag + (cols[i][1] ? ' class="r"' : '') + '>' + c + '</' + tag + '>'; };
+  return '<table><thead><tr>' + cols.map(function (c, i) { return cell('th', c[0], i); }).join('') + '</tr></thead><tbody>' +
+    rows.map(function (r) { return '<tr>' + r.map(function (c, i) { return cell('td', c, i); }).join('') + '</tr>'; }).join('') +
+    (tot ? '<tr class="tot">' + tot.map(function (c, i) { return cell('td', c, i); }).join('') + '</tr>' : '') + '</tbody></table>';
+}
+function reportRs_(x) { // Rs 2,745 or Rs 2,821.60
+  var v = Number(x) || 0, p = Math.abs(v).toFixed(Math.round(v * 100) % 100 ? 2 : 0).split('.'), i = p[0], last = i.slice(-3), rest = i.slice(0, -3);
+  return (v < 0 ? '-' : '') + 'Rs ' + (rest ? rest.replace(/\B(?=(\d{2})+(?!\d))/g, ',') + ',' : '') + last + (p[1] ? '.' + p[1] : '');
+}
+function orderReportHtml_(d, who) {
+  var o = d.order, e = reportEsc_, q = function (x) { return qtl_(Number(x) || 0); }, rs = function (x) { return money_(Number(x) || 0); };
+  var isPO = o.kind === 'po', mk = function (k) { return k + (k === 1 ? ' truck' : ' trucks'); }, amtH = isPO ? 'Sale amount' : 'Purchase amount';
+  var h = pdfHead_() + '<h1>' + e(o.id) + ' · ' + e(o.party) + '</h1><div class="top">' + (isPO ? 'Purchase order' : 'Sale order') + ' of ' + dmy_(o.date) + ' · ' + reportRs_(o.rate) + ' ' + e(o.terms) + ' · ' + e(o.firm) +
+    (o.status ? ' · ' + e(o.status) : '') + ' · made by ' + e(who) + ' on ' + Utilities.formatDate(new Date(), tz_(), 'dd-MM-yyyy HH:mm') + '</div>';
+  h += '<table class="kp"><tr><td>Quantity<br><b>' + q(o.qty) + '</b> qtl<br>balance ' + q(o.bal) + '</td><td>' + (isPO ? 'Loaded' : 'Dispatched') + '<br><b>' + q(o.L) + '</b> qtl<br>' + mk(o.trucks) + '</td><td>Unloaded<br><b>' + q(o.U) + '</b> qtl' + (o.road ? '<br>on the road ' + q(o.road) : '') + '</td>' +
+    '<td>Purchase amount<br><b>' + rs(o.pur) + '</b></td><td>Sale amount<br><b>' + rs(o.sale) + '</b></td></tr></table>';
+  var cols = [['#'], [isPO ? 'Customer' : 'Supplier'], [isPO ? 'Sale order' : 'Purchase order'], ['Rate', 1], ['Trucks', 1], ['Loaded qtl', 1], ['Unloaded qtl', 1], [amtH, 1]];
+  h += '<h2>' + (isPO ? 'Where the trucks went' : 'Where the trucks came from') + '</h2>' + reportTable_(cols, d.groups.map(function (g, i) {
+    return [i + 1, e(g.party), e(g.id || '—') + (g.date ? '<br><span class="mu">' + dmy_(g.date) + '</span>' : ''), g.rate ? reportRs_(g.rate) + '<br><span class="mu">' + e(g.terms) + '</span>' : '—', g.trucks, q(g.L), q(g.U), g.amt ? rs(g.amt) : '—'];
+  }), ['', 'Total', '', '', o.trucks, q(o.L), q(o.U), rs(isPO ? o.sale : o.pur)]);
+  var tc = [['#'], ['Dispatch No.'], ['Date out'], ['Vehicle'], ['Loaded qtl', 1], ['Unloaded qtl', 1], ['Rate', 1], [amtH, 1]];
+  d.groups.forEach(function (g) {
+    h += '<h2>' + e(g.id || g.party) + (g.id ? ' · ' + e(g.party) : '') + (g.rate ? ' · ' + reportRs_(g.rate) + ' ' + e(g.terms) : '') + ' · ' + mk(g.trucks) + '</h2>' + reportTable_(tc, g.rows.map(function (r, i) {
+      return [i + 1, e(r.id), '<span class="nw">' + dmy_(r.date) + '</span>', '<b class="nw">' + e(r.truck) + '</b>', q(r.L) + (r.of ? '<br><span class="mu">of ' + q(r.of) + ' (2 orders)</span>' : ''),
+        r.road ? '<span class="mu">on the road</span>' : q(r.U) + '<br><span class="mu">' + dmy_(r.unloadDate) + '</span>', r.rate ? reportRs_(r.rate) : '—',
+        r.amt ? rs(r.amt) + (isPO && r.road ? '<br><span class="mu">on loaded wt</span>' : '') : '—'];
+    }), ['', 'Total', '', '', q(g.L), q(g.U), '', g.amt ? rs(g.amt) : '—']);
+  });
+  return h + '<p class="mu" style="margin-top:14px">Weights in quintals. Amounts incl. GST: purchase on the loaded weight; sale on the received weight (loaded weight until unloaded). A truck on two orders counts only its part on each. DDGS Trade Control.</p></body></html>';
+}
+function listReportHtml_(d, who) {
+  var e = reportEsc_, q = function (x) { return qtl_(Number(x) || 0); }, rs = function (x) { return money_(Number(x) || 0); }, isPO = d.kind === 'po';
+  var h = pdfHead_() + '<h1>' + (isPO ? 'Purchase orders' : 'Sale orders') + ' report · ' + e(d.firm || 'All firms') + '</h1><div class="top">made by ' + e(who) + ' on ' + Utilities.formatDate(new Date(), tz_(), 'dd-MM-yyyy HH:mm') + '</div>';
+  var cols = [['#'], [isPO ? 'PO' : 'SO'], [isPO ? 'Supplier' : 'Customer'], ['Rate', 1], ['Quantity', 1], [isPO ? 'Loaded' : 'Dispatched', 1], ['Unloaded', 1], ['Balance', 1], ['Trucks', 1], [isPO ? 'Purchase amount' : 'Sale amount', 1]];
+  h += reportTable_(cols, d.rows.map(function (r, i) {
+    return [i + 1, e(r.id) + (r.status ? '<br><span class="mu">' + e(r.status) + '</span>' : '') + (d.firm ? '' : '<br><span class="mu">' + e(shortFirm_(r.firm)) + '</span>'), e(r.party) + '<br><span class="mu">' + dmy_(r.date) + '</span>',
+      reportRs_(r.rate) + '<br><span class="mu">' + e(r.terms) + '</span>', q(r.qty), q(r.L), q(r.U), q(r.bal), r.trucks, rs(r.amt)];
+  }), ['', 'Total', '', '', '', q(d.tot.L), q(d.tot.U), '', d.tot.trucks, rs(d.tot.amt)]);
+  return h + '<p class="mu" style="margin-top:14px">Weights in quintals. Amounts incl. GST' + (isPO ? ' on the loaded weight' : ': received weight, or loaded weight until unloaded') + '. DDGS Trade Control.</p></body></html>';
+}
+/* Excel: the order, where the trucks went (or came from), then one sheet per sale order (or purchase order). */
+function orderReportTabs_(d) {
+  var o = d.order, isPO = o.kind === 'po', tabs = [], amtH = isPO ? 'Sale Amount' : 'Purchase Amount';
+  tabs.push({ name: 'Order', rows: [['', o.id], [isPO ? 'Supplier' : 'Customer', o.party], ['Date', dmy_(o.date)], ['Rate', o.rate], ['Terms', o.terms], ['Firm', o.firm], ['Status', o.status || 'Open'],
+    ['Quantity (qtl)', o.qty], [isPO ? 'Loaded (qtl)' : 'Dispatched (qtl)', o.L], ['Unloaded (qtl)', o.U], ['On the road (qtl)', o.road], ['Balance (qtl)', o.bal], ['Trucks', o.trucks],
+    ['Purchase Amount', o.pur], ['Sale Amount', o.sale]] });
+  tabs.push({ name: isPO ? 'Where it went' : 'Where it came from', dateCols: [3], rows: [['S.No.', isPO ? 'Customer' : 'Supplier', isPO ? 'Sale Order' : 'Purchase Order', 'Order Date', 'Rate', 'Terms', 'Trucks', 'Loaded (qtl)', 'Unloaded (qtl)', amtH]]
+    .concat(d.groups.map(function (g, i) { return [i + 1, g.party, g.id, g.date ? parseDate_(g.date) : '', g.rate || '', g.terms, g.trucks, g.L, g.U, g.amt || '']; }))
+    .concat([['', 'Total', '', '', '', '', o.trucks, o.L, o.U, isPO ? o.sale : o.pur]]) });
+  var used = {};
+  d.groups.forEach(function (g) {
+    var nm = String(g.id || g.party).replace(/[\[\]:*?\/\\]/g, ' ').slice(0, 30), k = 2;
+    while (used[nm]) nm = String(g.id || g.party).slice(0, 27) + ' ' + k++;
+    used[nm] = 1;
+    tabs.push({ name: nm, dateCols: [2, 6], rows: [['S.No.', 'Dispatch No.', 'Date Out', 'Vehicle No', 'Loaded (qtl)', 'Unloaded (qtl)', 'Unload Date', 'Rate', amtH]]
+      .concat(g.rows.map(function (r, i) { return [i + 1, r.id, parseDate_(r.date), r.truck, r.L, r.road ? '' : r.U, r.road ? '' : parseDate_(r.unloadDate), r.rate || '', r.amt || '']; }))
+      .concat([['', 'Total', '', '', g.L, g.U, '', '', g.amt || '']]) });
+  });
+  return tabs;
+}
+function listReportTabs_(d) {
+  var isPO = d.kind === 'po';
+  return [{ name: isPO ? 'Purchase orders' : 'Sale orders', dateCols: [4], rows: [['S.No.', isPO ? 'PO' : 'SO', 'Firm', isPO ? 'Supplier' : 'Customer', 'Date', 'Rate', 'Terms', 'Quantity (qtl)', isPO ? 'Loaded (qtl)' : 'Dispatched (qtl)', 'Unloaded (qtl)', 'Balance (qtl)', 'Trucks', 'Status', isPO ? 'Purchase Amount' : 'Sale Amount']]
+    .concat(d.rows.map(function (r, i) { return [i + 1, r.id, r.firm, r.party, parseDate_(r.date), r.rate, r.terms, r.qty, r.L, r.U, r.bal, r.trucks, r.status || 'Open', r.amt]; }))
+    .concat([['', 'Total', '', '', '', '', '', '', d.tot.L, d.tot.U, '', d.tot.trucks, '', d.tot.amt]]) }];
+}
+
+/* ---------------- daily report and weekly backup ---------------- */
+
+function ensureTriggers_() {
+  try {
+    var cache = CacheService.getScriptCache();
+    if (cache.get('trig_ok') === 'on') return; // checked in the last 6 hours (setup clears this)
+    var props = PropertiesService.getScriptProperties();
+    if (props.getProperty('triggers_v4') === 'on') { try { cache.put('trig_ok', 'on', 21600); } catch (x) {} return; }
+    var have = {}, S = readSettings_(); // RAGHAV BUSY APP: the 9 pm email and the Sunday backup only when switched on in the settings
+    ScriptApp.getProjectTriggers().forEach(function (t) { have[t.getHandlerFunction()] = 1; });
+    if (!have.dailyReport && busyOn_(S.dailyReport)) ScriptApp.newTrigger('dailyReport').timeBased().atHour(21).everyDays(1).inTimezone(tz_()).create();
+    if (!have.weeklyBackup && busyOn_(S.weeklyBackup)) ScriptApp.newTrigger('weeklyBackup').timeBased().onWeekDay(ScriptApp.WeekDay.SUNDAY).atHour(22).inTimezone(tz_()).create();
+    props.setProperty('triggers_v4', 'on');
+  } catch (e) { if (ME === null) throw e; /* from the app: permissions not granted yet, try again next time */ }
+}
+
+function money_(x) { var s = Math.round(Math.abs(x)).toString(), last = s.slice(-3), rest = s.slice(0, -3); if (rest) last = ',' + last; return (x < 0 ? '-' : '') + 'Rs ' + rest.replace(/\B(?=(\d{2})+(?!\d))/g, ',') + last; }
+
+/** Runs every evening around 9 pm (time trigger). Sends the owner a summary and the full Excel. */
+function dailyReport(e) {
+  if (!fromTrigger_(e)) return;
+  if (!busyOn_(readSettings_().dailyReport)) return; // switched off in the settings (a trigger made earlier stays harmless)
+  sendDailyReport_();
+}
+function sendDailyReport_() {
+  ME = { id: 'auto-report', role: 'Owner', can: ROLES.Owner };
+  var A = deriveAll_(), today = A.today, live = A.trucks.filter(function (t) { return !t.cx; });
+  var esc = function (s) { return String(s == null ? '' : s).replace(/[&<>]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]; }); };
+  var q = function (x) { return (Math.round(x * 100) / 100).toFixed(2); };
+  var table = function (head, rows) {
+    if (!rows.length) return '<p style="color:#5d6b68">None.</p>';
+    return '<table cellpadding="6" style="border-collapse:collapse;font-size:13px"><tr>' + head.map(function (h) { return '<th style="background:#0f6b5c;color:#fff;text-align:left">' + h + '</th>'; }).join('') + '</tr>' +
+      rows.map(function (r) { return '<tr>' + r.map(function (c) { return '<td style="border-bottom:1px solid #dfe6e3">' + esc(c) + '</td>'; }).join('') + '</tr>'; }).join('') + '</table>';
+  };
+  var sum = function (a, f) { return a.reduce(function (s, t) { return s + f(t); }, 0); };
+  var added = live.filter(function (t) { return (t.placedOn || t.date) === today; });
+  var unloaded = live.filter(function (t) { return t.unloadDate === today; });
+  var plantPaid = live.filter(function (t) { return t.plantPaidDate === today; });
+  var frPaid = live.filter(function (t) { return t.freightPaidDate === today; });
+  var pays = (sheet_(T.PAY) ? rows_(T.PAY) : []).filter(function (p) { return p.date === today; });
+  var h = '<div style="font-family:Arial,sans-serif;color:#14201e"><h2 style="color:#0f6b5c">Daily report · ' + today.split('-').reverse().join('-') + '</h2>';
+  h += '<p><b>Today:</b> ' + added.length + ' new trucks · ' + unloaded.length + ' unloaded · paid plants ' + money_(sum(plantPaid, function (t) { return t.purTot; })) +
+    ' · freight paid ' + money_(sum(frPaid, function (t) { return t.netPay; })) + ' · received from customers ' + money_(sum(pays, function (p) { return Number(p.amount || 0); })) + '</p>';
+  // Customer money is per customer (custAcc_): what each factory owes, not per truck.
+  var accs = Object.keys(A.accounts).map(function (k) { return A.accounts[k]; });
+  var owes = function (a) { return Math.max(0, a.outstanding); };
+  var ownDue = sum(accs.filter(function (a) { return a.own; }), owes);
+  h += '<p><b>Position now:</b> outside customers owe ' + money_(sum(accs.filter(function (a) { return !a.own; }), owes)) + (ownDue ? ' · group company owes ' + money_(ownDue) : '') + ' (overdue ' + money_(sum(accs, function (a) { return a.overdue; })) + ') · suppliers unpaid ' +
+    money_(sum(live.filter(function (t) { return t.L && !t.plantPaid; }), function (t) { return t.purTot; })) + ' · freight payable ' +
+    money_(sum(live.filter(function (t) { return t.U && !t.freightPaid; }), function (t) { return t.netPay; })) + ' · transporter advances left ' +
+    money_(sum(Object.keys(A.tadv).map(function (k) { return A.tadv[k]; }), function (a) { return Math.max(0, a.left); })) + ' · on the road ' +
+    q(sum(live.filter(function (t) { return t.L && !t.U; }), function (t) { return t.L; })) + ' qtl</p>';
+  var shown = firms_(A.S).filter(function (f) { return f && hiddenFirms_(A.S).indexOf(f) < 0; });
+  if (shown.length > 1) h += '<h3>By firm</h3>' + table(['Firm', 'New trucks', 'Unloaded', 'Customers owe', 'Overdue', 'Suppliers unpaid', 'Freight payable'], shown.map(function (f) {
+    var tf = live.filter(function (t) { return t.firm === f; }), af = accs.filter(function (a) { return a.firm === f; });
+    return [f, added.filter(function (t) { return t.firm === f; }).length, unloaded.filter(function (t) { return t.firm === f; }).length, money_(sum(af, owes)), money_(sum(af, function (a) { return a.overdue; })),
+      money_(sum(tf.filter(function (t) { return t.L && !t.plantPaid; }), function (t) { return t.purTot; })), money_(sum(tf.filter(function (t) { return t.U && !t.freightPaid; }), function (t) { return t.netPay; }))];
+  }));
+  var dest = function (t) { return t.plantPO ? 'Own plant' : t.buyer || 'not assigned'; };
+  h += '<h3>Trucks added today</h3>' + table(['Dispatch', 'Firm', 'Truck', 'PO / Supplier', 'Going to', 'Loaded qtl'], added.map(function (t) { return [t.id, t.firm, t.truck, ordIds_(t, 'po') + ' ' + t.plant, dest(t), t.L ? q(t.L) : '-']; }));
+  h += '<h3>Unloaded / received today</h3>' + table(['Dispatch', 'Firm', 'Truck', 'At', 'Loaded', 'Unloaded', 'Short', 'Days'], unloaded.map(function (t) { return [t.id, t.firm, t.truck, dest(t), q(t.L), q(t.U), q(t.short), t.trip]; }));
+  h += '<h3>Money today</h3>' + table(['What', 'Dispatch / Payment', 'Party', 'Amount'],
+    plantPaid.map(function (t) { return ['Supplier paid', t.id, t.plant, money_(t.purTot)]; })
+      .concat(frPaid.map(function (t) { return ['Freight paid', t.id, t.transporter, money_(t.netPay)]; }))
+      .concat(A.advs.filter(function (a) { return a.date === today; }).map(function (a) { return [Number(a.amount) < 0 ? 'Transporter advance reversed' : 'Transporter advance', a.id + (a.vehicle ? ' / ' + a.vehicle : ''), a.transporter, money_(Number(a.amount || 0))]; }))
+      .concat(pays.map(function (p) { return [(Number(p.amount) < 0 || Number(p.deduction) < 0 ? 'Reversed' : 'Received') + (p.deduction ? ' (deduction ' + p.deduction + (p.note ? ': ' + p.note : '') + ')' : ''), p.id + (p.truck ? ' / ' + p.truck : ''), p.buyer, money_(Number(p.amount || 0))]; })));
+  var bal = function (map, k) {
+    return Object.keys(map).filter(function (id) { return map[id].status !== 'Cancelled' && map[id].status !== 'Settled'; }).map(function (id) {
+      var o = map[id], done = sum(live, function (t) { return partOn_(t, k, id, t.L); });
+      return [id, firmOf_(o, A.S), o.plant || o.buyer, q(Number(o.qty || 0)), q(done), q(Number(o.qty || 0) - done)];
+    });
+  };
+  h += '<h3>Purchase orders</h3>' + table(['PO', 'Firm', 'Supplier', 'Ordered', 'Loaded', 'Outstanding'], bal(A.po, 'po'));
+  h += '<h3>Sale orders</h3>' + table(['SO', 'Firm', 'Customer', 'Ordered', 'Dispatched', 'Outstanding'], bal(A.so, 'so'));
+  var probs = [];
+  accs.forEach(function (a) {
+    if (a.overdue > 0) probs.push([a.name, a.firm, 'Customer payment overdue ' + money_(a.overdue) + (a.oldest ? ', oldest ' + a.oldest + ' days past credit' : '') + ' · outstanding ' + money_(a.outstanding)]);
+  });
+  live.forEach(function (t) {
+    if (t.L && !t.U && t.detDays > 0) probs.push([t.id, t.truck, 'On the road ' + t.trip + ' days (over the free days: detention claim possible, ' + money_(t.detSuggest) + ' if agreed)']);
+    if (t.L && !t.so && !t.plantPO) probs.push([t.id, t.truck, 'Loaded, no customer assigned']);
+    if (t.L && t.billQty !== '' && t.billQty != null && Math.abs(Number(t.billQty) - t.L) >= 0.005) probs.push([t.id, t.truck, 'Slip weight ' + q(t.L) + ' but plant bill ' + q(Number(t.billQty))]);
+    if (t.noSlip) probs.push([t.id, t.truck, 'No slip photo']);
+    if (t.carryLeft > 0) probs.push([t.id, t.truck, 'Advance ' + money_(t.carryLeft) + ' still to adjust on the next trip of this truck']);
+  });
+  h += '<h3>Needs attention</h3>' + table(['Dispatch / Customer', 'Truck', 'Problem'], probs);
+  var staff = {};
+  (sheet_(T.LOG) ? rows_(T.LOG) : []).forEach(function (r) {
+    if (String(r.time).indexOf(today) !== 0 || ['Created', 'Updated'].indexOf(r.action) < 0) return;
+    staff[r.user] = staff[r.user] || { n: 0 }; staff[r.user].n++;
+  });
+  h += '<h3>Staff activity today</h3>' + table(['User', 'Entries'], Object.keys(staff).map(function (u) { return [u, staff[u].n]; }));
+  h += '<p style="color:#5d6b68;font-size:12px">The full Excel is attached. Sent automatically by DDGS Trade Control.</p></div>';
+  var set = readSettings_();
+  var to = set.reportEmail || Session.getEffectiveUser().getEmail();
+  var stamp = Utilities.formatDate(new Date(), tz_(), 'yyyy-MM-dd');
+  var blob = buildXlsx_('DDGS Daily ' + stamp, exportTabs_('full', '', null, ROLES.Owner));
+  MailApp.sendEmail({ to: to, subject: 'DDGS daily report ' + today.split('-').reverse().join('-'), htmlBody: h, attachments: [blob] });
+  log_('Daily report', '-', 'Sent to ' + to);
+}
+
+/** Runs every Sunday night (time trigger). Keeps the last 12 copies in Drive > RAGHAV BUSY APP Backups. */
+function weeklyBackup(e) {
+  if (!fromTrigger_(e)) return;
+  if (!busyOn_(readSettings_().weeklyBackup)) return; // switched off in the settings
+  var folder = folder_(APP_DRIVE_ + ' Backups');
+  var name = APP_DRIVE_ + ' Backup ' + Utilities.formatDate(new Date(), tz_(), 'yyyy-MM-dd');
+  DriveApp.getFileById(ss_().getId()).makeCopy(name, folder);
+  var files = [], it = folder.getFiles();
+  while (it.hasNext()) files.push(it.next());
+  files.sort(function (a, b) { return b.getDateCreated() - a.getDateCreated(); });
+  files.slice(12).forEach(function (f) { f.setTrashed(true); });
+  ME = { id: 'auto-backup' };
+  log_('Backup', '-', name);
+}
+
+/* ======================================================================================================
+   BUSY → APP (RAGHAV BUSY APP, Nitish 25-11-2026)
+   Raghav Trading and Co.'s Busy registers are exported to Excel (Busy Export shortcut) and uploaded on the Busy page.
+   1. Reading (busyRows_ / busyParse_): each file is checked (company, register, Voucher Series All, period, the file's
+      own Total row, Dr = Cr in every voucher, item lines in sales/purchases) and kept as Busy gave it in the raw tabs
+      BUSY_VOUCHERS / BUSY_ITEMS / BUSY_LINES. A file replaces its register for its own period. Nothing is deleted: an
+      entry that vanished from Busy is marked "Not in Busy any more"; same file twice = no change.
+   2. Building (busyBuild_ → busyApply_): the raw data becomes the app's own records, marked Source = Busy with a Busy Key:
+      - purchase / sale orders: bills of the same party + item + exact rate; a gap of more than busyGapDays (15) days
+        since that rate's previous bill starts a new order (2750 Godrej 12-05 = one, 2850 13-05 = next, 2750 12-08 = new);
+      - trucks: a purchase bill and a sale bill of the same weight (busyPairQty 0.05 qtl; sale 3 days before .. 4 days
+        after the purchase) are one truck; a bill with no partner is a truck on its own (sale only: on a
+        "NO PURCHASE BILL" PO). Imported trucks are history: received = the sale bill, freight done in Busy (closed);
+      - customer money (receipts, credit notes, part returns; a whole-bill return takes that bill off its truck);
+      - transporters: freight booked by journal (−), payments (+), moves between vehicle accounts (±) → APP_ADVANCES,
+        details in BUSY_TRANSPORT;
+      - wet cake is kept apart: every wet cake bill, its money and its freight only in BUSY_WETCAKE.
+   3. Re-upload: Busy fields follow Busy; what staff typed is never overwritten (vehicle, driver, transporter, freight
+      rate, advance, slip, placed on, notes, photos, UTRs). A vanished order / truck is cancelled ("not in Busy any
+      more"); a vanished or changed money line is reversed by a minus line. Every change goes to APP_LOG.
+   ====================================================================================================== */
+T.BUP = 'BUSY_UPLOADS'; T.BV = 'BUSY_VOUCHERS'; T.BI = 'BUSY_ITEMS'; T.BL = 'BUSY_LINES'; T.BTR = 'BUSY_TRANSPORT'; T.BWC = 'BUSY_WETCAKE';
+SCHEMA[T.BUP] = [['id', 'Upload No.', 'text'], ['at', 'Uploaded At', 'text'], ['by', 'Uploaded By', 'text'], ['file', 'File', 'text'], ['reg', 'Register', 'text'],
+  ['company', 'Busy Company', 'text'], ['from', 'From', 'date'], ['to', 'To', 'date'], ['vouchers', 'Entries', 'num'], ['lines', 'Lines', 'num'],
+  ['added', 'New', 'num'], ['changed', 'Changed', 'num'], ['gone', 'Not In Busy Any More', 'num'], ['check', 'Checks', 'text'], ['built', 'App Records', 'text']];
+SCHEMA[T.BV] = [['key', 'Busy Key', 'text'], ['reg', 'Register', 'text'], ['date', 'Date', 'date'], ['no', 'Vch/Bill No', 'text'], ['party', 'Account', 'text'],
+  ['gstin', 'GSTIN', 'text'], ['mobile', 'Mobile No', 'text'], ['vtype', 'Type', 'text'], ['total', 'Total Amount', 'num'], ['base', 'Sale/Purc Amount', 'num'],
+  ['taxable', 'Taxable Amt', 'num'], ['igst', 'IGST', 'num'], ['cgst', 'CGST', 'num'], ['sgst', 'SGST', 'num'], ['other', 'Other Amount', 'num'],
+  ['paid', 'Paid/Received (Busy)', 'num'], ['bstatus', 'Bill Status (Busy)', 'text'], ['dr', 'Debit', 'num'], ['cr', 'Credit', 'num'],
+  ['narration', 'Narration', 'text'], ['cancelled', 'Cancelled', 'bool'], ['hash', 'Content Check', 'text'], ['scope', 'Register Scope', 'text'],
+  ['inBusy', 'In Busy', 'text'], ['first', 'First Seen', 'text'], ['last', 'Last Seen', 'text']];
+SCHEMA[T.BI] = [['key', 'Busy Key', 'text'], ['vkey', 'Voucher Key', 'text'], ['reg', 'Register', 'text'], ['date', 'Date', 'date'], ['no', 'Vch/Bill No', 'text'],
+  ['party', 'Account', 'text'], ['item', 'Item', 'text'], ['qty', 'Qty', 'num'], ['unit', 'Unit', 'text'], ['rate', 'Rate', 'num'], ['amount', 'Amount', 'num'], ['inBusy', 'In Busy', 'text']];
+SCHEMA[T.BL] = [['key', 'Busy Key', 'text'], ['vkey', 'Voucher Key', 'text'], ['reg', 'Register', 'text'], ['date', 'Date', 'date'], ['no', 'Vch/Bill No', 'text'],
+  ['acc', 'Account', 'text'], ['dr', 'Debit', 'num'], ['cr', 'Credit', 'num'], ['kind', 'Line Type', 'text'], ['extra', 'Other Columns', 'text'], ['inBusy', 'In Busy', 'text']];
+SCHEMA[T.BTR] = [['key', 'Busy Key', 'text'], ['account', 'Busy Account', 'text'], ['vehicle', 'Vehicle No', 'text'], ['person', 'Name', 'text'], ['kind', 'Type', 'text'],
+  ['date', 'Date', 'date'], ['reg', 'Register', 'text'], ['head', 'Freight Head / Other Side', 'text'], ['booked', 'Freight Booked', 'num'], ['tds', 'TDS', 'num'],
+  ['paid', 'Paid', 'num'], ['moved', 'Moved', 'num'], ['balance', 'We Owe (running)', 'num'], ['wet', 'Wet Cake', 'bool'], ['vkey', 'Voucher Key', 'text']];
+SCHEMA[T.BWC] = [['key', 'Busy Key', 'text'], ['date', 'Date', 'date'], ['what', 'What', 'text'], ['reg', 'Register', 'text'], ['no', 'Vch/Bill No', 'text'],
+  ['party', 'Party / Account', 'text'], ['item', 'Item', 'text'], ['qty', 'Qty', 'num'], ['rate', 'Rate', 'num'], ['amount', 'Amount', 'num'], ['total', 'Bill Total', 'num'],
+  ['note', 'Note', 'text'], ['vkey', 'Voucher Key', 'text']];
+
+var BUSY_REG_ = { 'SALES REGISTER': 'SALE', 'PURCHASE REGISTER': 'PURC', 'SALES RETURN REGISTER': 'SRET', 'PURCHASE RETURN REGISTER': 'PRET',
+  'CREDIT NOTE REGISTER': 'CN', 'DEBIT NOTE REGISTER': 'DN', 'PAYMENT REGISTER': 'PAY', 'RECEIPT REGISTER': 'RCPT', 'JOURNAL REGISTER': 'JRNL',
+  'CONTRA REGISTER': 'CONTRA', 'CASH/BANK BOOK': 'CASH' };
+var BUSY_REG_NAME_ = { SALE: 'Sales Register', PURC: 'Purchase Register', SRET: 'Sales Return Register', PRET: 'Purchase Return Register', CN: 'Credit Note Register',
+  DN: 'Debit Note Register', PAY: 'Payment Register', RCPT: 'Receipt Register', JRNL: 'Journal Register', CONTRA: 'Contra Register', CASH: 'Cash/Bank Book' };
+var BUSY_ORDER_ = ['SALE', 'PURC', 'SRET', 'PRET', 'CN', 'DN', 'RCPT', 'PAY', 'JRNL', 'CONTRA', 'CASH'];
+var BUSY_GONE_ = 'Not in Busy any more';
+
+function busyR2_(x) { return Math.round(x * 100) / 100; }
+function busyNum_(x) { var s = String(x == null ? '' : x).replace(/,/g, '').trim(); if (s === '') return 0; var n = parseFloat(s); return isNaN(n) ? 0 : n; }
+function busyYmd_(s) { var m = String(s || '').trim().match(/^(\d{1,2})-(\d{1,2})-(\d{4})$/); return m ? m[3] + '-' + pad_(+m[2], 2) + '-' + pad_(+m[1], 2) : ''; }
+function busyHash_(s) { var h = 2166136261; s = String(s); for (var i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619) >>> 0; } return ('0000000' + (h >>> 0).toString(16)).slice(-8); }
+function busyList_(s) { return String(s || '').split(',').map(function (x) { return normName_(x); }).filter(String); }
+function busySet_(S, k, def) { var v = num_(S[k]); return v === '' ? def : v; }
+function busyOn_(v) { return /^(yes|on|true|1)$/i.test(String(v == null ? '' : v).trim()); }
+function busyFirm_(S) { var f = normName_(S.busyFirm); return f && isFirm_(f, S) ? f : firms_(S)[0]; }
+function busyDec_(s) {
+  return String(s).replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&apos;/g, "'")
+    .replace(/&#x([0-9a-f]+);/gi, function (m, h) { return String.fromCharCode(parseInt(h, 16)); })
+    .replace(/&#(\d+);/g, function (m, d) { return String.fromCharCode(+d); }).replace(/&amp;/g, '&');
+}
+/* A vehicle account in Busy ("PB29R7103 GURJIT", "PB11CL4967 (PRADEEP SINGH RANA)", "HR63B5735"): vehicle no. + name. */
+function busyVehicle_(acc) {
+  var m = String(acc || '').toUpperCase().trim().match(/^([A-Z]{2}\s?\d{1,2}\s?[A-Z]{0,3}\s?\d{3,4})\b\s*\(?([^)]*)\)?\s*$/);
+  return m ? { vehicle: m[1].replace(/\s+/g, ''), person: m[2].trim() } : null;
+}
+
+/* ---------------- reading an Excel file (xlsx = zip of XML) ---------------- */
+/** The first sheet of an .xlsx as rows of text cells (index = column). */
+function busyRows_(bytes) {
+  var parts;
+  try { parts = Utilities.unzip(Utilities.newBlob(bytes, 'application/zip', 'busy.zip')); }
+  catch (e) { throw new Error('This is not an Excel (.xlsx) file (' + (e && e.message ? e.message : e) + '). Export it from Busy again (Download → Export to Excel).'); }
+  var files = {};
+  parts.forEach(function (b) { files[b.getName()] = b; });
+  var names = Object.keys(files).filter(function (n) { return /^xl\/worksheets\/sheet\d+\.xml$/.test(n); }).sort();
+  var sheet = files['xl/worksheets/sheet1.xml'] ? 'xl/worksheets/sheet1.xml' : names[0];
+  if (!sheet) throw new Error('This Excel file has no sheet. Export it from Busy again.');
+  var strip = function (s) { return s.replace(/<(\/?)[A-Za-z0-9]+:/g, '<$1'); };
+  var shared = [], m, m2;
+  if (files['xl/sharedStrings.xml']) {
+    var ss = strip(files['xl/sharedStrings.xml'].getDataAsString('UTF-8')), reSi = /<si(?:\s*\/>|>([\s\S]*?)<\/si>)/g;
+    while ((m = reSi.exec(ss))) {
+      var t = '', reT = /<t(?:\s[^>]*)?>([\s\S]*?)<\/t>/g, body = m[1] || '';
+      while ((m2 = reT.exec(body))) t += m2[1];
+      shared.push(busyDec_(t));
+    }
+  }
+  var xml = strip(files[sheet].getDataAsString('UTF-8')), rows = [], reRow = /<row\b[^>]*>([\s\S]*?)<\/row>/g, reC = /<c\s([^>]*?)(?:\/>|>([\s\S]*?)<\/c>)/g;
+  var colNo = function (ref) { var n = 0; for (var i = 0; i < ref.length; i++) n = n * 26 + ref.charCodeAt(i) - 64; return n - 1; };
+  while ((m = reRow.exec(xml))) {
+    var row = [], c;
+    reC.lastIndex = 0;
+    while ((c = reC.exec(m[1]))) {
+      var a = c[1], b = c[2] || '', ref = (a.match(/\br="([A-Z]+)\d+"/) || [])[1], type = (a.match(/\bt="(\w+)"/) || [])[1], v = b.match(/<v>([\s\S]*?)<\/v>/), val;
+      if (v) val = type === 's' ? shared[+v[1]] : busyDec_(v[1]);
+      else { var is = b.match(/<t(?:\s[^>]*)?>([\s\S]*?)<\/t>/); val = is ? busyDec_(is[1]) : ''; }
+      row[ref ? colNo(ref) : row.length] = val == null ? '' : String(val);
+    }
+    for (var i = 0; i < row.length; i++) if (row[i] === undefined) row[i] = '';
+    rows.push(row);
+  }
+  return rows;
+}
+
+/** One Busy register file → { reg, scope, company, from, to, vouchers, items, lines, check } (refused with a plain message if it does not add up). */
+function busyParse_(name, rows) {
+  var cell = function (r, c) { return rows[r] && rows[r][c] != null ? String(rows[r][c]).trim() : ''; };
+  var company = cell(0, 0), title = cell(1, 0), reg = BUSY_REG_[title.toUpperCase()];
+  if (!reg) throw new Error(name + ': this is not a Busy register the app reads ("' + (title || 'no title') + '"). Use: ' + BUSY_ORDER_.map(function (r) { return BUSY_REG_NAME_[r]; }).join(', ') + '.');
+  var head = -1, i, from = '', to = '', series = '', account = '', opening = '', closing = '';
+  for (i = 0; i < Math.min(rows.length, 20); i++) if (cell(i, 0) === 'Date') { head = i; break; }
+  if (head < 0) throw new Error(name + ': the heading row (Date, Vch/Bill No, Account …) was not found.');
+  for (i = 1; i < head; i++) {
+    for (var c = 0; c < (rows[i] || []).length; c++) {
+      var s = cell(i, c), m = s.match(/^From\s+(\d{1,2}-\d{1,2}-\d{4})\s+to\s+(\d{1,2}-\d{1,2}-\d{4})/i);
+      if (m) { from = busyYmd_(m[1]); to = busyYmd_(m[2]); }
+      if (/^Voucher Series\s*:/i.test(s)) series = s.replace(/^Voucher Series\s*:/i, '').trim();
+      if (/^Account\s*:/i.test(s)) account = normName_(s.replace(/^Account\s*:/i, ''));
+      if (/^Opening Bal/i.test(s)) opening = s;
+      if (/^Closing Bal/i.test(s)) closing = s;
+    }
+  }
+  if (!from || !to) throw new Error(name + ': the period (From … to …) is missing at the top. Export it from Busy again.');
+  if (reg !== 'CASH' && normName_(series) !== 'ALL') throw new Error(name + ': exported for Voucher Series "' + (series || '?') + '". Export with Voucher Series = All, so no bill is left out.');
+  if (reg === 'CASH' && !account) throw new Error(name + ': the account (Account : …) is missing at the top.');
+  var H = (rows[head] || []).map(function (h) { return String(h || '').trim(); });
+  var col = function (re) { for (var j = 0; j < H.length; j++) if (re.test(H[j])) return j; return -1; };
+  var out = { reg: reg, scope: reg === 'CASH' ? 'CASH|' + account : reg, company: company, from: from, to: to, account: account, vouchers: [], items: [], lines: [], file: name };
+  var body = rows.slice(head + 1), total = null, seen = {};
+  var keyOf = function (base) { seen[base] = (seen[base] || 0) + 1; return seen[base] > 1 ? base + '#' + seen[base] : base; };
+  var isDate = function (s) { return /^\d{1,2}-\d{1,2}-\d{4}$/.test(s); };
+  if (['SALE', 'PURC', 'SRET', 'PRET', 'CN', 'DN'].indexOf(reg) >= 0) {
+    var iNo = col(/^Vch\/Bill No/i), iAcc = col(/^Account$/i), iG = col(/GSTIN/i), iMob = col(/^Mobile/i), iType = col(/^Type$/i), iTot = col(/^Total Amount$/i),
+      iBase = col(/^(Sale|Purc\.?) Amount$/i), iTax = col(/^Taxable Amt/i), iI = col(/^IGST$/i), iC = col(/^CGST$/i), iS = col(/^SGST$/i), iO = col(/^Other Amount$/i),
+      iPd = col(/^(Pymt|Rcpt)\.? Amt/i), iSt = col(/^Status$/i);
+    if (iAcc < 0 || iTot < 0) throw new Error(name + ': the Account or Total Amount column is missing.');
+    var cur = null, n = 0, sum = 0;
+    var finish = function () { if (cur) cur.hash = busyHash_(JSON.stringify([cur._t])); };
+    body.forEach(function (r) {
+      var a = String(r[0] == null ? '' : r[0]).trim(), v = function (j) { return j >= 0 && r[j] != null ? String(r[j]).trim() : ''; };
+      if (a === 'Total') { total = busyNum_(v(iTot)); return; }
+      if (isDate(a)) {
+        finish();
+        var party = v(iAcc), cx = /^\(C A N C E L L E D\)\s*-\s*/i.test(party);
+        if (cx) party = party.replace(/^\(C A N C E L L E D\)\s*-\s*/i, '');
+        var date = busyYmd_(a), no = v(iNo);
+        cur = { reg: reg, date: date, no: no, party: normName_(party), gstin: v(iG), mobile: v(iMob), vtype: v(iType), total: busyNum_(v(iTot)), base: busyNum_(v(iBase)),
+          taxable: busyNum_(v(iTax)), igst: busyNum_(v(iI)), cgst: busyNum_(v(iC)), sgst: busyNum_(v(iS)), other: busyNum_(v(iO)), paid: busyNum_(v(iPd)), bstatus: v(iSt),
+          dr: '', cr: '', narration: '', cancelled: cx, _t: [] };
+        cur.key = keyOf(reg + '|' + date + '|' + no + '|' + cur.party);
+        cur._t.push([cur.total, cur.taxable, cur.igst, cur.cgst, cur.sgst, cur.other, cur.bstatus, cur.paid]);
+        out.vouchers.push(cur); n = 0;
+        if (!cx) sum += cur.total;
+        return;
+      }
+      if (!cur) return;
+      var t = String(r[iAcc] == null ? '' : r[iAcc]), tt = t.trim();
+      if (!tt || /^\*{4}\s*Total Qty/i.test(tt)) return;
+      var it = tt.match(/^(\S(?:.*?\S)?)\s{2,}(-?[\d,]*\.?\d+)\s+(\S+)\s+@\s+(-?[\d,]*\.?\d+)\s+=\s+(-?[\d,]*\.?\d+)$/);
+      if (it) {
+        n++;
+        var item = { key: cur.key + '|i' + n, vkey: cur.key, reg: reg, date: cur.date, no: cur.no, party: cur.party, item: normName_(it[1]), qty: busyNum_(it[2]), unit: it[3], rate: busyNum_(it[4]), amount: busyNum_(it[5]) };
+        out.items.push(item); cur._t.push(['i', item.item, item.qty, item.rate, item.amount]);
+        return;
+      }
+      var su = tt.match(/^([+-])\s+(.+?)\s+(?:@\s*(-?[\d,.]+)\s*%\s*)?=\s*(-?[\d,]*\.?\d+)$/);
+      if (su) {
+        n++;
+        var amt = busyNum_(su[4]), line = { key: cur.key + '|s' + n, vkey: cur.key, reg: reg, date: cur.date, no: cur.no, acc: normName_(su[2]), dr: su[1] === '+' ? amt : '', cr: su[1] === '-' ? amt : '', kind: 'sundry', extra: su[3] ? su[3] + '%' : '' };
+        out.lines.push(line); cur._t.push(['s', line.acc, su[1], amt]);
+        return;
+      }
+      cur.narration = (cur.narration ? cur.narration + ' ' : '') + tt; cur._t.push(['n', tt]);
+    });
+    finish();
+    if (total !== null && Math.abs(busyR2_(sum) - total) > 1) throw new Error(name + ': the file’s Total row is ' + total + ' but its bills add up to ' + busyR2_(sum) + '. Export it from Busy again.');
+    if ((reg === 'SALE' || reg === 'PURC') && out.vouchers.some(function (v) { return !v.cancelled; }) && !out.items.length) {
+      throw new Error(name + ': has no item lines. In Busy, open the register’s Filter, tick "Show Items Details?", Apply, then export again.');
+    }
+    out.check = (total !== null ? 'Total row ' + total + ' = bills read' : 'no Total row') + (reg === 'SALE' || reg === 'PURC' ? ' · ' + out.items.length + ' item lines' : '');
+  } else if (reg === 'CASH') {
+    var jT = col(/^Type$/i), jNo = col(/^Vch\/Bill No/i), jAcc = col(/^Account$/i), jR = col(/^Receipt/i), jP = col(/^Payment/i), jN = col(/Narration/i);
+    if (jAcc < 0 || jR < 0 || jP < 0) throw new Error(name + ': the Account, Receipt or Payment column is missing.');
+    var cv = null, rs = 0, ps = 0, tr = null, tp = null, k2 = 0;
+    var close = function () { if (cv) { cv.hash = busyHash_(JSON.stringify(cv._t)); cv.key = keyOf('CASH|' + account + '|' + cv.date + '|' + cv.vtype + '|' + cv.no + '|' + cv.hash); cv._lines.forEach(function (l, x) { l.vkey = cv.key; l.key = cv.key + '|l' + (x + 1); }); } };
+    body.forEach(function (r) {
+      var a = String(r[0] == null ? '' : r[0]).trim(), v = function (j) { return j >= 0 && r[j] != null ? String(r[j]).trim() : ''; };
+      if (a === 'Total') { tr = busyNum_(v(jR)); tp = busyNum_(v(jP)); return; }
+      if (isDate(a)) { close(); cv = { reg: reg, date: busyYmd_(a), no: v(jNo), vtype: v(jT), party: normName_(v(jAcc)), total: 0, dr: 0, cr: 0, narration: '', cancelled: false, _t: [], _lines: [] }; out.vouchers.push(cv); k2 = 0; }
+      if (!cv) return;
+      var acc = v(jAcc), rr = busyNum_(v(jR)), pp = busyNum_(v(jP)), nar = v(jN);
+      if (nar) cv.narration = (cv.narration ? cv.narration + ' ' : '') + nar;
+      if (!acc && !rr && !pp) return;
+      k2++;
+      var ln = { reg: reg, date: cv.date, no: cv.no, acc: normName_(acc), dr: rr || '', cr: pp || '', kind: 'cash', extra: [cv.vtype, nar].filter(String).join(' · ') };
+      cv._lines.push(ln); out.lines.push(ln); cv._t.push([ln.acc, rr, pp]);
+      cv.dr = busyR2_(cv.dr + rr); cv.cr = busyR2_(cv.cr + pp); cv.total = busyR2_(cv.dr + cv.cr); rs += rr; ps += pp;
+    });
+    close();
+    if (tr !== null && (Math.abs(busyR2_(rs) - tr) > 1 || Math.abs(busyR2_(ps) - tp) > 1)) throw new Error(name + ': the file’s Total row (' + tr + ' / ' + tp + ') is not what was read (' + busyR2_(rs) + ' / ' + busyR2_(ps) + ').');
+    out.check = (tr !== null ? 'Total row ' + tr + ' / ' + tp + ' = lines read' : 'no Total row') + (opening ? ' · ' + opening : '') + (closing ? ' · ' + closing : '');
+  } else {
+    var kNo = col(/^Vch\/Bill No/i), kAcc = col(/^Account$/i), kDr = col(/^Debit/i), kCr = col(/^Credit/i);
+    if (kAcc < 0 || kDr < 0 || kCr < 0) throw new Error(name + ': the Account, Debit or Credit column is missing.');
+    var extraCols = H.map(function (h, j) { return j > Math.max(kDr, kCr) && h ? j : -1; }).filter(function (j) { return j >= 0; });
+    var vv = null, sd = 0, sc = 0, td = null, tc = null, bad = [];
+    var shut = function () {
+      if (!vv) return;
+      vv.hash = busyHash_(JSON.stringify(vv._t));
+      vv.key = keyOf(reg + '|' + vv.date + '|' + vv.no + '|' + vv.hash);
+      vv._lines.forEach(function (l, x) { l.vkey = vv.key; l.key = vv.key + '|l' + (x + 1); });
+      if (Math.abs(busyR2_(vv.dr - vv.cr)) > 0.01) bad.push(dmy_(vv.date) + (vv.no ? ' ' + vv.no : '') + ' (Dr ' + vv.dr + ', Cr ' + vv.cr + ')');
+      var main = vv._lines.filter(function (l) { return reg === 'RCPT' ? l.cr : l.dr; })[0] || vv._lines[0];
+      vv.party = main ? main.acc : '';
+    };
+    body.forEach(function (r) {
+      var a = String(r[0] == null ? '' : r[0]).trim(), v = function (j) { return j >= 0 && r[j] != null ? String(r[j]).trim() : ''; };
+      if (a === 'Total') { td = busyNum_(v(kDr)); tc = busyNum_(v(kCr)); return; }
+      if (isDate(a)) { shut(); vv = { reg: reg, date: busyYmd_(a), no: v(kNo), party: '', total: 0, dr: 0, cr: 0, narration: '', cancelled: false, _t: [], _lines: [] }; out.vouchers.push(vv); }
+      if (!vv) return;
+      var acc = v(kAcc), d = busyNum_(v(kDr)), cr = busyNum_(v(kCr));
+      if (!d && !cr) { if (acc) { vv.narration = (vv.narration ? vv.narration + ' ' : '') + acc; vv._t.push(['n', acc]); } return; }
+      var ex = extraCols.map(function (j) { return v(j) ? H[j] + ' ' + v(j) : ''; }).filter(String).join(' · ');
+      var ln = { reg: reg, date: vv.date, no: vv.no, acc: normName_(acc), dr: d || '', cr: cr || '', kind: 'line', extra: ex };
+      vv._lines.push(ln); out.lines.push(ln); vv._t.push([ln.acc, d, cr]);
+      vv.dr = busyR2_(vv.dr + d); vv.cr = busyR2_(vv.cr + cr); vv.total = vv.dr; sd += d; sc += cr;
+    });
+    shut();
+    if (bad.length) throw new Error(name + ': ' + bad.length + ' entr' + (bad.length > 1 ? 'ies do' : 'y does') + ' not balance (Debit ≠ Credit), e.g. ' + bad.slice(0, 3).join('; ') + '. Export it from Busy again.');
+    if (td !== null && (Math.abs(busyR2_(sd) - td) > 1 || Math.abs(busyR2_(sc) - tc) > 1)) throw new Error(name + ': the file’s Total row (Dr ' + td + ', Cr ' + tc + ') is not what was read (Dr ' + busyR2_(sd) + ', Cr ' + busyR2_(sc) + ').');
+    out.check = (td !== null ? 'Total row Dr ' + td + ' = Cr ' + tc + ' = lines read' : 'no Total row') + ' · every entry Dr = Cr';
+  }
+  out.vouchers.forEach(function (x) { delete x._t; delete x._lines; x.scope = out.scope; });
+  return out;
+}
+
+/* ---------------- keeping the raw data (nothing is ever deleted) ---------------- */
+/* Text from Busy is written as text: a leading = + - @ (or something Sheets would read as a number or date) gets a ' first. */
+function busyCell_(x, type) {
+  var v = toCell_(x, type);
+  if (type === 'text' && typeof v === 'string' && v && (/^[=+\-@']/.test(v) || /^[\d\s.,\/:\-]+$/.test(v) || /^(true|false)$/i.test(v))) return "'" + v;
+  return v;
+}
+function busyRowVals_(name, o) { return SCHEMA[name].map(function (c) { return busyCell_(o[c[0]], c[2]); }); }
+/* Grow the sheet before writing below its last row (Sheets refuses ranges past the grid). */
+function ensureRows_(sh, lastRow) { var max = sh.getMaxRows(); if (lastRow > max) sh.insertRowsAfter(max, lastRow - max + 200); }
+function busyWriteAll_(name, list) {
+  var sh = sheet_(name) || makeTab_(name), w = SCHEMA[name].length, old = Math.max(0, sh.getLastRow() - 1);
+  var rows = list.map(function (o) { return busyRowVals_(name, o); });
+  ensureRows_(sh, Math.max(rows.length, old) + 1);
+  if (rows.length) sh.getRange(2, 1, rows.length, w).setValues(rows);
+  if (old > rows.length) {
+    var blank = [], b = []; for (var j = 0; j < w; j++) b.push('');
+    for (var k = rows.length; k < old; k++) blank.push(b);
+    sh.getRange(rows.length + 2, 1, blank.length, w).setValues(blank);
+  }
+  dropTab_(name);
+}
+function busyAppendRows_(name, list) {
+  if (!list.length) return;
+  var sh = sheet_(name) || makeTab_(name), w = SCHEMA[name].length, at = sh.getLastRow() + 1;
+  ensureRows_(sh, at + list.length);
+  sh.getRange(at, 1, list.length, w).setValues(list.map(function (o) { return busyRowVals_(name, o); }));
+  dropTab_(name);
+}
+function busyLive_(r) { return r.inBusy !== BUSY_GONE_; }
+var BUSY_V_FIELDS_ = ['date', 'no', 'party', 'gstin', 'mobile', 'vtype', 'total', 'base', 'taxable', 'igst', 'cgst', 'sgst', 'other', 'paid', 'bstatus', 'dr', 'cr', 'narration', 'cancelled', 'hash'];
+var BUSY_V_LABEL_ = { date: 'Date', no: 'No', party: 'Account', gstin: 'GSTIN', mobile: 'Mobile', vtype: 'Type', total: 'Total', base: 'Amount', taxable: 'Taxable', igst: 'IGST', cgst: 'CGST', sgst: 'SGST',
+  other: 'Other', paid: 'Paid/Received', bstatus: 'Status', dr: 'Debit', cr: 'Credit', narration: 'Narration', cancelled: 'Cancelled', hash: 'Items/lines' };
+function busyCmp_(type, x) { var v = toCell_(x, type); if (v instanceof Date) return fmtDate_(v, 'yyyy-MM-dd'); return type === 'num' && v !== '' ? String(busyR2_(v)) : String(v); }
+
+/** Merges parsed files into the raw tabs (in memory: state = { V, I, L }). Returns what changed per file. */
+function busyMergeRaw_(state, p, confirmed) {
+  var now = nowStr_(), types = {};
+  SCHEMA[T.BV].forEach(function (c) { types[c[0]] = c[2]; });
+  var inScope = function (r) { return r.scope === p.scope && String(r.date) >= p.from && String(r.date) <= p.to; };
+  var byKey = {}, newKeys = {}, live = 0, gone = [], res = { file: p.file, reg: p.reg, regName: BUSY_REG_NAME_[p.reg], from: p.from, to: p.to, vouchers: p.vouchers.length,
+    lines: p.items.length + p.lines.length, added: 0, changed: 0, gone: 0, check: p.check, company: p.company, changes: [] };
+  state.V.forEach(function (r) { byKey[r.key] = r; });
+  p.vouchers.forEach(function (v) { newKeys[v.key] = 1; });
+  state.V.forEach(function (r) { if (inScope(r) && busyLive_(r)) { live++; if (!newKeys[r.key]) gone.push(r); } });
+  if (gone.length && live >= 10 && gone.length > live * 0.1 && !confirmed) {
+    throw new Error('CONFIRM|' + p.file + ': ' + gone.length + ' of the ' + live + ' ' + BUSY_REG_NAME_[p.reg] + ' entries from ' + dmy_(p.from) + ' to ' + dmy_(p.to) +
+      ' already in the app are not in this file. Was the right file chosen (full period, Voucher Series All)? Only the Owner can upload it anyway.');
+  }
+  var touched = {};
+  p.vouchers.forEach(function (v) {
+    var cur = byKey[v.key];
+    touched[v.key] = 1;
+    v.inBusy = 'Yes'; v.last = now;
+    if (!cur) { v.first = now; state.V.push(v); byKey[v.key] = v; res.added++; return; }
+    var diff = BUSY_V_FIELDS_.filter(function (k) { return busyCmp_(types[k], cur[k]) !== busyCmp_(types[k], v[k]); });
+    if (diff.length || !busyLive_(cur)) {
+      res.changed++;
+      if (res.changes.length < 40) res.changes.push(v.key + ': ' + (!busyLive_(cur) ? 'back in Busy' : diff.filter(function (k) { return k !== 'hash'; }).map(function (k) { return BUSY_V_LABEL_[k] + ' ' + busyCmp_(types[k], cur[k]) + ' -> ' + busyCmp_(types[k], v[k]); }).join('; ') || 'items/lines changed'));
+    }
+    v.first = cur.first;
+    for (var k in v) cur[k] = v[k];
+  });
+  var goneKeys = {};
+  gone.forEach(function (r) { r.inBusy = BUSY_GONE_; goneKeys[r.key] = 1; res.gone++; if (res.changes.length < 40) res.changes.push(r.key + ': not in Busy any more'); });
+  ['I', 'L'].forEach(function (k) {
+    var fresh = k === 'I' ? p.items : p.lines;
+    state[k] = state[k].filter(function (r) { return !touched[r.vkey]; }).concat(fresh.map(function (x) { x.inBusy = 'Yes'; return x; }));
+    state[k].forEach(function (r) { if (goneKeys[r.vkey]) r.inBusy = BUSY_GONE_; });
+  });
+  return res;
+}
+
+/* ---------------- building the app's records from the raw data ---------------- */
+function busyGroup_(list, key) { var g = {}; list.forEach(function (x) { (g[x[key]] = g[x[key]] || []).push(x); }); return g; }
+function busyByDate_(a, b) { return String(a.date).localeCompare(String(b.date)) || String(a.key).localeCompare(String(b.key)); }
+function busyGst_(tax, taxable) {
+  if (!(taxable > 0)) return 0;
+  var g = tax / taxable, std = [0, 0.05, 0.12, 0.18, 0.28];
+  for (var i = 0; i < std.length; i++) if (Math.abs(g - std[i]) < 0.003) return std[i];
+  return Math.round(g * 10000) / 10000;
+}
+
+/** Works out every record the app should have from the raw Busy tabs. Pure: reads tabs, writes nothing. */
+function busyBuild_() {
+  var S = readSettings_(), firm = busyFirm_(S), gap = busySet_(S, 'busyGapDays', 15), tol = busySet_(S, 'busyPairQty', 0.05);
+  var before = busySet_(S, 'busyPairBefore', 3), after = busySet_(S, 'busyPairAfter', 4);
+  var wetItems = busyList_(S.busyWetCakeItems === undefined || S.busyWetCakeItems === '' ? 'WET CAKE' : S.busyWetCakeItems), wetAcc = busyList_(S.busyWetCakeAccounts);
+  var V = (sheet_(T.BV) ? rows_(T.BV) : []).filter(busyLive_), I = (sheet_(T.BI) ? rows_(T.BI) : []).filter(busyLive_), L = (sheet_(T.BL) ? rows_(T.BL) : []).filter(busyLive_);
+  var n = function (x) { return busyNum_(x); };
+  var items = busyGroup_(I, 'vkey'), lines = busyGroup_(L, 'vkey'), vOf = {};
+  V.forEach(function (v) { vOf[v.key] = v; });
+  var isWet = function (item) { return wetItems.indexOf(normName_(item)) >= 0; };
+
+  // 1. Sale and purchase bills, at item-line level (qty > 0). Wet cake lines are kept apart.
+  var bills = { SALE: [], PURC: [] }, byParty = { SALE: {}, PURC: {} }, newest = '';
+  V.forEach(function (v) {
+    if ((v.reg !== 'SALE' && v.reg !== 'PURC') || v.cancelled) return;
+    var b = { key: v.key, reg: v.reg, date: v.date, no: v.no, party: normName_(v.party), gstin: v.gstin, total: n(v.total), taxable: n(v.taxable),
+      tax: n(v.igst) + n(v.cgst) + n(v.sgst), bstatus: String(v.bstatus || ''), lines: [], other: [], returned: '' };
+    b.gst = busyGst_(b.tax, b.taxable);
+    (items[v.key] || []).sort(busyByDate_).forEach(function (it) {
+      var l = { key: it.key, bill: b, date: b.date, party: b.party, item: normName_(it.item), qty: n(it.qty), rate: n(it.rate), amount: n(it.amount), wet: isWet(it.item), reg: v.reg };
+      if (l.qty > 0) b.lines.push(l); else b.other.push(l);
+    });
+    var amt = b.lines.reduce(function (s, l) { return s + l.amount; }, 0);
+    b.lines.forEach(function (l) { l.share = busyR2_(b.total * (amt ? l.amount / amt : 1 / b.lines.length)); });
+    b.wet = b.lines.length > 0 && b.lines.every(function (l) { return l.wet; });
+    bills[v.reg].push(b);
+    (byParty[v.reg][b.party] = byParty[v.reg][b.party] || []).push(b);
+    if (b.lines.length && String(b.date) > newest) newest = String(b.date);
+  });
+  Object.keys(byParty).forEach(function (r) { Object.keys(byParty[r]).forEach(function (p) { byParty[r][p].sort(busyByDate_); }); });
+
+  // 2. Returns. A return of the whole bill (same party, same total, on or after the bill) takes that bill out: the truck pairs with the re-bill.
+  var partRet = [];
+  [['SRET', 'SALE'], ['PRET', 'PURC']].forEach(function (x) {
+    V.filter(function (v) { return v.reg === x[0] && !v.cancelled; }).sort(busyByDate_).forEach(function (v) {
+      var list = (byParty[x[1]][normName_(v.party)] || []).filter(function (b) { return !b.returned && b.lines.length && String(b.date) <= String(v.date) && Math.abs(b.total - n(v.total)) <= 1; });
+      if (list.length) { var b = list[list.length - 1]; b.returned = v.no || v.key; b.retDate = v.date; }
+      else partRet.push(v);
+    });
+  });
+
+  // 3. Same truck: a sale line and a purchase line of the same weight, the sale 3 days before .. 4 days after the purchase. Nearest date wins.
+  var sl = [], pl = [];
+  bills.SALE.forEach(function (b) { if (!b.returned) b.lines.forEach(function (l) { if (!l.wet) sl.push(l); }); });
+  bills.PURC.forEach(function (b) { if (!b.returned) b.lines.forEach(function (l) { if (!l.wet) pl.push(l); }); });
+  sl.sort(busyByDate_); pl.sort(busyByDate_);
+  var used = {};
+  sl.forEach(function (s) {
+    var c = pl.filter(function (p) { if (used[p.key]) return false; var d = days_(p.date, s.date); return Math.abs(p.qty - s.qty) <= tol + 1e-9 && d >= -before && d <= after; });
+    if (!c.length) return;
+    c.sort(function (a, b) {
+      return Math.abs(days_(a.date, s.date)) - Math.abs(days_(b.date, s.date)) || (a.item === s.item ? 0 : 1) - (b.item === s.item ? 0 : 1) || busyByDate_(a, b);
+    });
+    used[c[0].key] = 1; s.pair = c[0]; c[0].pair = s; s.cands = c.length;
+  });
+
+  // 4. Orders: party + item + exact rate; a gap of more than `gap` days since that rate's previous bill starts a new order.
+  var group = function (list, kind) {
+    var g = {}, orders = [];
+    list.forEach(function (l) { var k = l.party + '|' + l.item + '|' + l.rate; (g[k] = g[k] || []).push(l); });
+    Object.keys(g).forEach(function (k) {
+      var cur = null, last = '';
+      g[k].sort(busyByDate_).forEach(function (l) {
+        if (!cur || days_(last, l.date) > gap) { cur = { kind: kind, lines: [] }; orders.push(cur); }
+        cur.lines.push(l); l.order = cur; last = l.date;
+      });
+    });
+    orders.forEach(function (o) {
+      var f = o.lines[0], billsIn = {};
+      o.lines.forEach(function (l) { billsIn[l.bill.key] = 1; });
+      o.bkey = kind.toUpperCase() + '|' + f.key; o.date = f.date; o.party = f.party; o.item = f.item; o.rate = f.rate; o.gst = f.bill.gst; o.gstin = f.bill.gstin;
+      o.qty = busyR2_(o.lines.reduce(function (s, l) { return s + l.qty; }, 0)); o.last = o.lines[o.lines.length - 1].date;
+      o.bills = Object.keys(billsIn).length; o.amt = busyR2_(o.lines.reduce(function (s, l) { return s + l.share; }, 0));
+    });
+    return orders.sort(function (a, b) { return String(a.date).localeCompare(String(b.date)) || a.party.localeCompare(b.party) || a.bkey.localeCompare(b.bkey); });
+  };
+  var POs = group(pl, 'po'), SOs = group(sl, 'so');
+  var quiet = function (last) { return newest && days_(last, newest) > gap; };
+  var credit = busySet_(S, 'defaultCreditDays', 7), out = { pos: [], sos: [], trucks: [], pays: [], advs: [], transport: [], wet: [], info: {} };
+  var span = function (o) { return o.bills + ' bill' + (o.bills > 1 ? 's' : '') + ' ' + dmy_(o.date) + (o.last !== o.date ? ' to ' + dmy_(o.last) : ''); };
+  POs.forEach(function (o) {
+    out.pos.push({ bkey: o.bkey, obj: { date: o.date, plant: o.party, commodity: o.item, qty: o.qty, rate: o.rate, gst: o.gst, status: quiet(o.last) ? 'Settled' : '',
+      note: 'From Busy: ' + span(o), firm: firm, poType: 'trade', src: 'Busy', bkey: o.bkey, gstin: o.gstin, bBills: o.bills, bAmt: o.amt, bLast: o.last } });
+  });
+  SOs.forEach(function (o) {
+    out.sos.push({ bkey: o.bkey, obj: { date: o.date, buyer: o.party, commodity: o.item, qty: o.qty, rate: o.rate, gst: o.gst, status: quiet(o.last) ? 'Settled' : '',
+      note: 'From Busy: ' + span(o) + '. Rate before GST; terms set by the app (we pay freight, ' + credit + ' days credit): change if needed.', gstMode: 'excl', freightMode: 'ours',
+      creditDays: credit, firm: firm, src: 'Busy', bkey: o.bkey, gstin: o.gstin, bBills: o.bills, bAmt: o.amt, bLast: o.last } });
+  });
+  // Sale bills with no purchase bill: on one "NO PURCHASE BILL" PO per item (rate 0: the purchase is not in this Busy).
+  var nob = {};
+  sl.forEach(function (s) {
+    if (s.pair) return;
+    var o = nob[s.item] || (nob[s.item] = { bkey: 'PO|NOBILL|' + s.item, date: s.date, last: s.date, qty: 0, n: 0 });
+    if (String(s.date) < String(o.date)) o.date = s.date;
+    if (String(s.date) > String(o.last)) o.last = s.date;
+    o.qty = busyR2_(o.qty + s.qty); o.n++;
+  });
+  Object.keys(nob).sort().forEach(function (item) {
+    var o = nob[item];
+    out.pos.push({ bkey: o.bkey, obj: { date: o.date, plant: 'NO PURCHASE BILL', commodity: item, qty: o.qty, rate: 0, gst: 0, status: quiet(o.last) ? 'Settled' : '',
+      note: 'From Busy: ' + o.n + ' sale bill' + (o.n > 1 ? 's' : '') + ' with no purchase bill in this Busy (stock, or bought by another firm).', firm: firm, poType: 'trade', src: 'Busy', bkey: o.bkey, gstin: '', bBills: o.n, bAmt: 0, bLast: o.last } });
+  });
+
+  // 5. Supplier paid: the supplier's payments, debit notes and returns in Busy cover its bills oldest first (all its bills, wet cake
+  //    too), or Busy says the bill is Cleared. Busy's "Pending" is not used: it is not kept bill by bill (e.g. Balrampur: 25 bills
+  //    paid in full, all still "Pending"), so it is only shown as Busy's status on the truck.
+  var supp = {}, cust = {};
+  bills.PURC.forEach(function (b) { supp[b.party] = 1; });
+  bills.SALE.forEach(function (b) { if (b.lines.some(function (l) { return !l.wet; })) cust[b.party] = 1; });
+  var credits = {};
+  var addCr = function (party, date, amt) { if (supp[party] && amt) (credits[party] = credits[party] || []).push({ date: date, amt: amt }); };
+  V.forEach(function (v) {
+    if (v.reg === 'PAY' || v.reg === 'RCPT' || v.reg === 'JRNL') (lines[v.key] || []).forEach(function (l) { addCr(normName_(l.acc), v.date, n(l.dr) - n(l.cr)); });
+    if ((v.reg === 'DN' || v.reg === 'PRET') && !v.cancelled) addCr(normName_(v.party), v.date, n(v.total));
+  });
+  var paidOn = {};
+  Object.keys(byParty.PURC).forEach(function (party) {
+    var cr = (credits[party] || []).sort(function (a, b) { return String(a.date).localeCompare(String(b.date)); }), ci = 0, cumC = 0, cumB = 0, lastDate = '';
+    byParty.PURC[party].forEach(function (b) {
+      cumB += b.total;
+      while (cumC < cumB - 1 && ci < cr.length) { cumC += cr[ci].amt; lastDate = cr[ci].date; ci++; }
+      paidOn[b.key] = cumC >= cumB - 1 ? (String(lastDate) > String(b.date) ? lastDate : b.date) : '';
+    });
+  });
+  var supplierPaid = function (b) {
+    if (paidOn[b.key]) return { paid: true, date: paidOn[b.key] };
+    return normName_(b.bstatus) === 'CLEARED' ? { paid: true, date: '' } : { paid: false, date: '' };
+  };
+
+  // 6. Trucks: each pair, and each bill without a partner.
+  var trucks = [];
+  pl.forEach(function (p) { trucks.push({ p: p, s: p.pair || null }); });
+  sl.forEach(function (s) { if (!s.pair) trucks.push({ p: null, s: s }); });
+  trucks.forEach(function (t) { t.date = (t.p || t.s).date; t.sort = t.date + '|' + (t.p ? t.p.bill.no : '~') + '|' + (t.s ? t.s.bill.no : '') + '|' + (t.p || t.s).key; });
+  trucks.sort(function (a, b) { return a.sort < b.sort ? -1 : a.sort > b.sort ? 1 : 0; });
+  trucks.forEach(function (t) {
+    var p = t.p, s = t.s, sp = p ? supplierPaid(p.bill) : { paid: true, date: s.date };
+    var note = 'From Busy' + (p ? ': purchase bill ' + p.bill.no + ' (' + dmy_(p.date) + ')' : ': no purchase bill in Busy') + (s ? ', sale bill ' + s.bill.no + ' (' + dmy_(s.date) + ')' : ', no sale bill yet') +
+      (s ? '. Freight done in Busy.' : '.');
+    out.trucks.push({ poKey: p ? p.order.bkey : 'PO|NOBILL|' + s.item, soKey: s ? s.order.bkey : '', obj: {
+      date: t.date, placedOn: t.date, loadWt: (p || s).qty, billNo: p ? p.bill.no : '', billQty: p ? p.qty : '',
+      unloadWt: s ? s.qty : '', unloadDate: s ? s.date : '', plantPaid: sp.paid, plantPaidDate: sp.paid ? sp.date : '',
+      freightPaid: !!s, freightPaidDate: s ? s.date : '', note: note, src: 'Busy', bPKey: p ? p.key : '', bSKey: s ? s.key : '',
+      sBillNo: s ? s.bill.no : '', sBillQty: s ? s.qty : '', bPAmt: p ? p.share : '', bSAmt: s ? s.share : '', bPStat: p ? p.bill.bstatus : '', bSStat: s ? s.bill.bstatus : '',
+      bMatch: p && s ? (s.cands > 1 ? 'Pair (nearest of ' + s.cands + ')' : 'Pair') : p ? 'Purchase bill only' : 'Sale bill only' } });
+  });
+
+  // 7. Customer money (per customer, as the app keeps it): receipts, refunds, credit notes, part returns, debit notes, journals.
+  //    Only customers with DDGS sale bills; a party that is also a supplier keeps payments and journals on the supplier side.
+  var other = function (v, l) { return (lines[v.key] || []).filter(function (x) { return x !== l; }).map(function (x) { return x.acc; }).join(' + '); };
+  var pay = function (key, date, buyer, amount, deduction, note) {
+    out.pays.push({ bkey: key, obj: { date: date, truck: '', so: '', buyer: buyer, amount: amount ? busyR2_(amount) : '', deduction: deduction ? busyR2_(deduction) : '', note: note, firm: firm, src: 'Busy', bkey: key } });
+  };
+  V.slice().sort(busyByDate_).forEach(function (v) {
+    var party = normName_(v.party), nar = v.narration ? ' · ' + v.narration : '';
+    if (v.reg === 'RCPT') (lines[v.key] || []).forEach(function (l) {
+      var a = normName_(l.acc), amt = n(l.cr) - n(l.dr);
+      if (cust[a] && amt) pay(l.key, v.date, a, amt, 0, (amt > 0 ? 'Busy receipt' : 'Busy receipt reversed') + ' · ' + other(v, l) + nar);
+    });
+    if (v.reg === 'PAY') (lines[v.key] || []).forEach(function (l) {
+      var a = normName_(l.acc), amt = n(l.dr) - n(l.cr);
+      if (cust[a] && !supp[a] && amt) pay(l.key, v.date, a, -amt, 0, 'Busy payment to the customer (refund) · ' + other(v, l) + nar);
+    });
+    if (v.reg === 'JRNL') (lines[v.key] || []).forEach(function (l) {
+      var a = normName_(l.acc), amt = n(l.cr) - n(l.dr);
+      if (cust[a] && !supp[a] && amt) pay(l.key, v.date, a, 0, amt, 'Busy journal · ' + other(v, l) + nar);
+    });
+    if (v.cancelled) return;
+    if (v.reg === 'CN' && cust[party]) pay(v.key, v.date, party, 0, n(v.total), 'Credit note ' + v.no + nar);
+    if (v.reg === 'DN' && cust[party] && !supp[party]) pay(v.key, v.date, party, 0, -n(v.total), 'Debit note ' + v.no + ' (adds to what is owed)' + nar);
+  });
+  partRet.forEach(function (v) { if (v.reg === 'SRET' && cust[normName_(v.party)]) pay(v.key, v.date, normName_(v.party), 0, n(v.total), 'Sales return ' + v.no + ' (part of a bill)' + (v.narration ? ' · ' + v.narration : '')); });
+
+  // 8. Transporters and vehicles: freight booked by journal (FREIGHT … Dr, transporter Cr, TDS Cr), payments, moves between accounts.
+  var heads = {}, tAcc = {};
+  V.forEach(function (v) {
+    if (v.reg !== 'JRNL') return;
+    (lines[v.key] || []).forEach(function (l) { var a = normName_(l.acc); if (n(l.dr) > 0 && /FREIGHT/.test(a) && !/PAYABLE/.test(a)) heads[a] = /WET CAKE/.test(a) ? 'wet' : 'dry'; });
+  });
+  var isHead = function (a) { return !!heads[a]; }, isTds = function (a) { return /\bTDS\b/.test(a); };
+  V.forEach(function (v) {
+    if (v.reg !== 'JRNL') return;
+    var ls = lines[v.key] || [], hd = ls.filter(function (l) { return isHead(normName_(l.acc)) && n(l.dr) > 0; });
+    if (!hd.length) return;
+    var wet = hd.every(function (l) { return heads[normName_(l.acc)] === 'wet'; });
+    ls.forEach(function (l) { var a = normName_(l.acc); if (n(l.cr) > 0 && !isHead(a) && !isTds(a)) { var t = tAcc[a] || (tAcc[a] = { wet: 0, dry: 0 }); t[wet ? 'wet' : 'dry']++; } });
+  });
+  L.forEach(function (l) {
+    var a = normName_(l.acc);
+    if (!tAcc[a] && (l.reg === 'PAY' || l.reg === 'RCPT' || l.reg === 'JRNL') && (busyVehicle_(a) || /TRANSPORT|ROAD ?LINES?|CARRIER|CARIER|LOGISTIC|TRUCK OPERATOR|ROADWAYS|GOODS/.test(a)) && !cust[a] && !supp[a]) tAcc[a] = { wet: 0, dry: 0 };
+  });
+  wetAcc.forEach(function (a) { if (tAcc[a]) tAcc[a].forceWet = 1; });
+  var wetT = function (a) { var t = tAcc[a]; return !!(t && (t.forceWet || (t.wet > 0 && !t.dry))); };
+  var run = {};
+  V.slice().sort(busyByDate_).forEach(function (v) {
+    if (v.reg !== 'PAY' && v.reg !== 'RCPT' && v.reg !== 'JRNL') return;
+    var ls = lines[v.key] || [], hd = ls.filter(function (l) { return isHead(normName_(l.acc)) && n(l.dr) > 0; });
+    var booking = v.reg === 'JRNL' && hd.length > 0, tds = 0, tCr = 0;
+    if (booking) ls.forEach(function (l) { var a = normName_(l.acc); if (isTds(a)) tds += n(l.cr) - n(l.dr); if (tAcc[a]) tCr += n(l.cr); });
+    ls.forEach(function (l) {
+      var a = normName_(l.acc);
+      if (!tAcc[a]) return;
+      var delta = n(l.cr) - n(l.dr), veh = busyVehicle_(a), wet = wetT(a);
+      var rec = { key: l.key, account: a, vehicle: veh ? veh.vehicle : '', person: veh ? veh.person : '', kind: veh ? 'Vehicle' : 'Transporter', date: v.date, reg: BUSY_REG_NAME_[v.reg],
+        head: booking ? hd.map(function (x) { return normName_(x.acc); }).join(' + ') : other(v, l), booked: booking ? busyR2_(delta) : '', tds: booking && tCr ? busyR2_(tds * n(l.cr) / tCr) : '',
+        paid: v.reg === 'PAY' ? busyR2_(-delta) : v.reg === 'RCPT' ? busyR2_(-delta) : '', moved: v.reg === 'JRNL' && !booking ? busyR2_(delta) : '', wet: wet, vkey: v.key };
+      run[a] = busyR2_((run[a] || 0) + delta); rec.balance = run[a];
+      out.transport.push(rec);
+      if (wet) {
+        out.wet.push({ key: l.key, date: v.date, what: booking ? 'Freight booked' : v.reg === 'PAY' ? 'Freight paid' : v.reg === 'RCPT' ? 'Freight received back' : 'Freight moved', reg: BUSY_REG_NAME_[v.reg], no: v.no,
+          party: a, item: '', qty: '', rate: '', amount: busyR2_(-delta), total: '', note: rec.head, vkey: v.key });
+        return;
+      }
+      var what = booking ? 'Busy: freight booked · ' + rec.head + (rec.tds ? ' (TDS ' + rec.tds + ')' : '') : v.reg === 'PAY' ? 'Busy: paid · ' + rec.head : v.reg === 'RCPT' ? 'Busy: received back · ' + rec.head : 'Busy: moved · ' + rec.head;
+      out.advs.push({ bkey: l.key, obj: { date: v.date, transporter: a, vehicle: veh ? veh.vehicle : '', driver: veh ? veh.person : '', amount: busyR2_(-delta), ref: '', note: what + (v.narration ? ' · ' + v.narration : ''),
+        firm: firm, src: 'Busy', bkey: l.key } });
+    });
+  });
+
+  // 9. Wet cake: its bills, receipts from wet-cake-only customers, payments to wet-cake-only suppliers (its freight is added above).
+  var wetCust = {}, wetSupp = {};
+  bills.SALE.forEach(function (b) { if (b.wet && !cust[b.party]) wetCust[b.party] = 1; });
+  bills.PURC.forEach(function (b) { if (b.wet) wetSupp[b.party] = (wetSupp[b.party] === undefined ? true : wetSupp[b.party]); else wetSupp[b.party] = false; });
+  wetAcc.forEach(function (a) { if (!tAcc[a] && !cust[a] && !supp[a]) wetCust[a] = 1; });
+  ['SALE', 'PURC'].forEach(function (r) {
+    bills[r].forEach(function (b) { b.lines.forEach(function (l) { if (l.wet) out.wet.push({ key: l.key, date: b.date, what: r === 'SALE' ? 'Sale' : 'Purchase', reg: BUSY_REG_NAME_[r], no: b.no, party: b.party, item: l.item, qty: l.qty, rate: l.rate, amount: l.amount, total: l.share, note: b.returned ? 'returned (' + b.returned + ')' : '', vkey: b.key }); }); });
+  });
+  V.forEach(function (v) {
+    if (v.reg === 'RCPT' || v.reg === 'PAY') (lines[v.key] || []).forEach(function (l) {
+      var a = normName_(l.acc), amt = v.reg === 'RCPT' ? n(l.cr) - n(l.dr) : n(l.dr) - n(l.cr);
+      if (v.reg === 'RCPT' && wetCust[a] && amt) out.wet.push({ key: l.key, date: v.date, what: 'Receipt', reg: BUSY_REG_NAME_[v.reg], no: v.no, party: a, item: '', qty: '', rate: '', amount: busyR2_(amt), total: '', note: other(v, l), vkey: v.key });
+      if (v.reg === 'PAY' && wetSupp[a] === true && amt) out.wet.push({ key: l.key, date: v.date, what: 'Payment to supplier', reg: BUSY_REG_NAME_[v.reg], no: v.no, party: a, item: '', qty: '', rate: '', amount: busyR2_(amt), total: '', note: other(v, l), vkey: v.key });
+      if (v.reg === 'PAY' && wetCust[a] && amt) out.wet.push({ key: l.key, date: v.date, what: 'Payment to customer', reg: BUSY_REG_NAME_[v.reg], no: v.no, party: a, item: '', qty: '', rate: '', amount: busyR2_(amt), total: '', note: other(v, l), vkey: v.key });
+    });
+    if ((v.reg === 'CN' || v.reg === 'SRET') && !v.cancelled && wetCust[normName_(v.party)]) out.wet.push({ key: v.key, date: v.date, what: v.reg === 'CN' ? 'Credit note' : 'Sales return', reg: BUSY_REG_NAME_[v.reg], no: v.no, party: normName_(v.party), item: '', qty: '', rate: '', amount: n(v.total), total: '', note: v.narration || '', vkey: v.key });
+  });
+  out.wet.sort(busyByDate_);
+  out.info = { newest: newest, sales: bills.SALE.length, purchases: bills.PURC.length, pairs: sl.filter(function (s) { return s.pair; }).length,
+    saleOnly: sl.filter(function (s) { return !s.pair; }).length, purchaseOnly: pl.filter(function (p) { return !p.pair; }).length,
+    returned: bills.SALE.concat(bills.PURC).filter(function (b) { return b.returned; }).length, wetLines: out.wet.length };
+  return out;
+}
+
+/* Fields Busy owns on the records it made (the rest is the staff's and never overwritten after the first upload). */
+var BUSY_OWN_ = {
+  po: ['date', 'plant', 'commodity', 'qty', 'rate', 'gst', 'firm', 'src', 'bkey', 'gstin', 'bBills', 'bAmt', 'bLast'],
+  so: ['date', 'buyer', 'commodity', 'qty', 'rate', 'gst', 'firm', 'src', 'bkey', 'gstin', 'bBills', 'bAmt', 'bLast'],
+  tr: ['date', 'po', 'so', 'loadWt', 'billNo', 'billQty', 'unloadWt', 'unloadDate', 'src', 'bPKey', 'bSKey', 'sBillNo', 'sBillQty', 'bPAmt', 'bSAmt', 'bPStat', 'bSStat', 'bMatch']
+};
+function busySame_(name, k, a, b) {
+  var type = 'text';
+  SCHEMA[name].forEach(function (c) { if (c[0] === k) type = c[2]; });
+  return busyCmp_(type, a) === busyCmp_(type, b);
+}
+function busyUpdate_(name, cur, upd) {
+  var sh = sheet_(name), obj = {}, k;
+  for (k in cur) obj[k] = cur[k];
+  for (k in upd) obj[k] = upd[k];
+  obj.by = user_(); obj.at = nowStr_();
+  sh.getRange(cur._row, 1, 1, SCHEMA[name].length).setValues([busyRowVals_(name, obj)]);
+  markChanged_(name, cur.id || cur.key, cur._row);
+}
+function busyNextNo_(list, re) { var max = 0; list.forEach(function (r) { var m = String(r.id).match(re); if (m) max = Math.max(max, Number(m[1])); }); return max; }
+
+/** Puts the built records into the app's tabs (new → added, changed Busy fields → updated, vanished → cancelled / reversed). */
+function busyApply_(D) {
+  var now = nowStr_(), user = user_(), st = { po: [0, 0, 0], so: [0, 0, 0], tr: [0, 0, 0], pay: [0, 0], adv: [0, 0] }, ids = { po: {}, so: {} };
+  var diffText = function (name, cur, upd) {
+    var lab = {}; SCHEMA[name].forEach(function (c) { lab[c[0]] = c[1]; });
+    return Object.keys(upd).map(function (k) { return lab[k] + ': ' + fmtLog_(cur[k]) + ' -> ' + fmtLog_(upd[k]); }).join('; ');
+  };
+  // Orders
+  [['po', T.PO], ['so', T.SO]].forEach(function (x) {
+    var k = x[0], tab = x[1], have = rows_(tab), byKey = {}, adds = [], seen = {};
+    have.forEach(function (r) { if (r.src === 'Busy' && r.bkey) byKey[r.bkey] = r; });
+    D[k + 's'].forEach(function (w) {
+      var cur = byKey[w.bkey];
+      seen[w.bkey] = 1;
+      if (!cur) {
+        w.obj.id = nextId_(tab, have.concat(adds), w.obj); w.obj.by = user; w.obj.at = now;
+        adds.push(w.obj); ids[k][w.bkey] = w.obj.id; st[k][0]++;
+        log_('Created', w.obj.id, 'From Busy: ' + (w.obj.plant || w.obj.buyer) + ' · ' + w.obj.commodity + ' · ' + w.obj.qty + ' qtl @ ' + w.obj.rate + ' · ' + w.obj.note);
+        return;
+      }
+      ids[k][w.bkey] = cur.id;
+      var upd = {};
+      BUSY_OWN_[k].forEach(function (f) { if (!busySame_(tab, f, cur[f], w.obj[f])) upd[f] = w.obj[f]; });
+      var staffCx = cur.status === 'Cancelled' && String(cur.note).indexOf('not in Busy any more') < 0;
+      if (!staffCx && cur.status !== w.obj.status) upd.status = w.obj.status;
+      if (Object.keys(upd).length) { log_('Updated', cur.id, 'From Busy: ' + diffText(tab, cur, upd)); busyUpdate_(tab, cur, upd); st[k][1]++; }
+    });
+    have.forEach(function (r) {
+      if (r.src !== 'Busy' || !r.bkey || seen[r.bkey] || r.status === 'Cancelled') return;
+      var upd = { status: 'Cancelled', note: (r.note ? r.note + ' | ' : '') + 'Cancelled: not in Busy any more' };
+      log_('Updated', r.id, 'From Busy: ' + diffText(tab, r, upd)); busyUpdate_(tab, r, upd); st[k][2]++;
+    });
+    busyAppendRows_(tab, adds);
+    if (adds.length || st[k][1] || st[k][2]) markChanged_(tab);
+  });
+  // Trucks
+  var have = rows_(T.TR), byP = {}, byS = {}, used = {}, adds = [];
+  have.forEach(function (r) { if (r.src !== 'Busy') return; if (r.bPKey) byP[r.bPKey] = r; if (r.bSKey) byS[r.bSKey] = r; });
+  D.trucks.forEach(function (w) {
+    var o = w.obj;
+    o.po = ids.po[w.poKey] || ''; o.so = w.soKey ? (ids.so[w.soKey] || '') : '';
+    var cur = (o.bPKey && byP[o.bPKey]) || (o.bSKey && byS[o.bSKey]) || null;
+    if (cur && used[cur.id]) cur = (o.bSKey && byS[o.bSKey] && !used[byS[o.bSKey].id]) ? byS[o.bSKey] : null;
+    if (!cur) {
+      o.id = nextId_(T.TR, have.concat(adds), o); o.by = user; o.at = now; o.status = '';
+      adds.push(o); st.tr[0]++;
+      log_('Created', o.id, o.note + ' · ' + o.loadWt + ' qtl · ' + (o.po || '') + (o.so ? ' → ' + o.so : ''));
+      return;
+    }
+    used[cur.id] = 1;
+    var upd = {};
+    BUSY_OWN_.tr.forEach(function (f) { if (!busySame_(T.TR, f, cur[f], o[f])) upd[f] = o[f]; });
+    if (o.plantPaid && !cur.plantPaid) { upd.plantPaid = true; if (!cur.plantPaidDate) upd.plantPaidDate = o.plantPaidDate; } // Busy can mark paid, never unpaid
+    if (cur.status === 'Cancelled' && String(cur.note).indexOf('not in Busy any more') >= 0) upd.status = '';
+    if (Object.keys(upd).length) { log_('Updated', cur.id, 'From Busy: ' + diffText(T.TR, cur, upd)); busyUpdate_(T.TR, cur, upd); st.tr[1]++; }
+  });
+  have.forEach(function (r) {
+    if (r.src !== 'Busy' || used[r.id] || r.status === 'Cancelled') return;
+    var upd = { status: 'Cancelled', note: (r.note ? r.note + ' | ' : '') + 'Cancelled: not in Busy any more' };
+    log_('Updated', r.id, 'From Busy: ' + diffText(T.TR, r, upd)); busyUpdate_(T.TR, r, upd); st.tr[2]++;
+  });
+  busyAppendRows_(T.TR, adds);
+  if (adds.length || st.tr[1] || st.tr[2]) markChanged_(T.TR);
+  // Money lines (customer money, transporter accounts): never edited. Changed in Busy = a minus line for the old one + a new line.
+  [['pay', T.PAY, /^PAY-(\d+)/, 'PAY-', 5], ['adv', T.ADV, /^ADV-(\d+)/, 'ADV-', 4]].forEach(function (x) {
+    var k = x[0], tab = x[1], list = sheet_(tab) ? rows_(tab) : [], rev = {}, cur = {}, adds = [], seen = {}, no = busyNextNo_(list, x[2]);
+    list.forEach(function (r) { var m = /^Reversal of ([A-Z]+-\d+):/.exec(String(r.note || '')); if (m) rev[m[1]] = 1; });
+    list.forEach(function (r) { if (r.src === 'Busy' && r.bkey && !rev[r.id]) cur[r.bkey] = r; });
+    var same = function (a, b) { return k === 'pay' ? busySame_(tab, 'amount', a.amount, b.amount) && busySame_(tab, 'deduction', a.deduction, b.deduction) && normName_(a.buyer) === normName_(b.buyer) :
+      busySame_(tab, 'amount', a.amount, b.amount) && normName_(a.transporter) === normName_(b.transporter); };
+    var reverse = function (c, why) {
+      var r = { date: today_(), note: 'Reversal of ' + c.id + ': ' + why, firm: c.firm, src: 'Busy', bkey: '' };
+      if (k === 'pay') { r.truck = c.truck; r.so = c.so; r.buyer = c.buyer; r.amount = num_(c.amount) ? -num_(c.amount) : ''; r.deduction = num_(c.deduction) ? -num_(c.deduction) : ''; }
+      else { r.transporter = c.transporter; r.vehicle = c.vehicle; r.driver = c.driver; r.amount = -(num_(c.amount) || 0); r.ref = ''; }
+      return r;
+    };
+    var push = function (o, logTxt) { no++; o.id = x[3] + pad_(no, x[4]); o.by = user; o.at = now; adds.push(o); log_(k === 'pay' ? 'Customer payment' : 'Transporter advance', o.id, logTxt); };
+    D[k + 's'].forEach(function (w) {
+      seen[w.bkey] = 1;
+      var c = cur[w.bkey];
+      if (c && same(c, w.obj)) return;
+      if (c) { push(reverse(c, 'changed in Busy'), 'From Busy: ' + c.id + ' changed in Busy, reversed'); st[k][1]++; }
+      push(w.obj, 'From Busy: ' + (k === 'pay' ? w.obj.buyer + ' received ' + (w.obj.amount || 0) + (w.obj.deduction ? ', deduction ' + w.obj.deduction : '') : w.obj.transporter + ' ' + w.obj.amount) + ' · ' + w.obj.note);
+      st[k][0]++;
+    });
+    Object.keys(cur).forEach(function (key) { if (!seen[key]) { push(reverse(cur[key], 'not in Busy any more'), 'From Busy: ' + cur[key].id + ' not in Busy any more, reversed'); st[k][1]++; } });
+    busyAppendRows_(tab, adds);
+    if (adds.length) markChanged_(tab);
+  });
+  // Derived Busy tabs (views of Busy data; nothing typed there): rewritten each time.
+  busyWriteAll_(T.BTR, D.transport);
+  busyWriteAll_(T.BWC, D.wet);
+  var txt = 'POs ' + st.po[0] + ' new, ' + st.po[1] + ' changed, ' + st.po[2] + ' cancelled · SOs ' + st.so[0] + ' new, ' + st.so[1] + ' changed, ' + st.so[2] + ' cancelled · trucks ' +
+    st.tr[0] + ' new, ' + st.tr[1] + ' changed, ' + st.tr[2] + ' cancelled · customer money ' + st.pay[0] + ' new lines' + (st.pay[1] ? ', ' + st.pay[1] + ' reversed' : '') +
+    ' · transporter accounts ' + st.adv[0] + ' new lines' + (st.adv[1] ? ', ' + st.adv[1] + ' reversed' : '');
+  return { text: txt, stats: st, info: D.info };
+}
+
+/** Upload Busy files (Owner / Accounts). files = [{ name, b64 }]. All files are read and checked first; then, in one locked
+    save, each replaces its register for its period and the app's records are rebuilt. confirm: the Owner accepts a file
+    that would mark many entries as gone. */
+function api_busyUpload(token, files, confirm, rid) {
+  auth_(token); need_('busy');
+  files = (files || []).filter(function (f) { return f && f.b64; });
+  if (!files.length) throw new Error('Choose the Busy Excel files first.');
+  if (files.length > 20) throw new Error('Choose at most 20 files at a time.');
+  var S = readSettings_(), want = normName_(S.busyCompany);
+  var parsed = files.map(function (f) {
+    var name = String(f.name || 'file').slice(0, 120), b64 = String(f.b64);
+    if (b64.length > 7000000) throw new Error(name + ': the file is too big (over 5 MB).');
+    var p = busyParse_(name, busyRows_(Utilities.base64Decode(b64)));
+    if (want && normName_(p.company) !== want) throw new Error(name + ' is from "' + p.company + '". This app takes ' + S.busyCompany + ' (setting busyCompany).');
+    return p;
+  });
+  var scopes = {};
+  parsed.forEach(function (p) { if (scopes[p.scope]) throw new Error(p.file + ' and ' + scopes[p.scope] + ' are both ' + BUSY_REG_NAME_[p.reg] + '. Upload one of them.'); scopes[p.scope] = p.file; });
+  parsed.sort(function (a, b) { return BUSY_ORDER_.indexOf(a.reg) - BUSY_ORDER_.indexOf(b.reg); });
+  var res = { files: [] };
+  var out = withLock_(function () {
+    var state = { V: sheet_(T.BV) ? rows_(T.BV) : [], I: sheet_(T.BI) ? rows_(T.BI) : [], L: sheet_(T.BL) ? rows_(T.BL) : [] };
+    var ok = confirm === true && ME.role === 'Owner', any = false;
+    parsed.forEach(function (p) { var r = busyMergeRaw_(state, p, ok); res.files.push(r); if (r.added || r.changed || r.gone) any = true; });
+    if (any) { busyWriteAll_(T.BV, state.V); busyWriteAll_(T.BI, state.I); busyWriteAll_(T.BL, state.L); }
+    var built = busyApply_(busyBuild_());
+    res.built = built.text; res.info = built.info;
+    var upl = sheet_(T.BUP) ? rows_(T.BUP) : [], no = busyNextNo_(upl, /^UP-(\d+)/), now = nowStr_();
+    busyAppendRows_(T.BUP, res.files.map(function (r) {
+      no++;
+      r.id = 'UP-' + pad_(no, 4);
+      return { id: r.id, at: now, by: ME.id, file: r.file, reg: r.regName, company: r.company, from: r.from, to: r.to, vouchers: r.vouchers, lines: r.lines, added: r.added, changed: r.changed, gone: r.gone, check: r.check, built: built.text };
+    }));
+    res.files.forEach(function (r) {
+      log_('Busy upload', r.id, r.file + ' · ' + r.regName + ' ' + dmy_(r.from) + ' to ' + dmy_(r.to) + ' · ' + r.vouchers + ' entries: ' + r.added + ' new, ' + r.changed + ' changed, ' + r.gone + ' not in Busy any more · ' + r.check +
+        (r.changes.length ? ' · ' + r.changes.slice(0, 10).join(' | ') : ''));
+    });
+    log_('Busy build', '-', built.text);
+  }, cleanRid_(rid));
+  out.busy = res;
+  return out;
+}
+
+/** What the Busy pages show (Owner / Accounts): what = 'info' | 'transport' | 'wetcake' | 'gaps'. Worked out on the server. */
+function api_busy(token, what) {
+  auth_(token); need_('busy');
+  var S = readSettings_();
+  if (what === 'transport') return { rows: sheet_(T.BTR) ? rows_(T.BTR) : [] };
+  if (what === 'wetcake') return { rows: sheet_(T.BWC) ? rows_(T.BWC) : [] };
+  var V = sheet_(T.BV) ? rows_(T.BV) : [];
+  if (what === 'gaps') {
+    // Busy data with no page in the app (kept in the raw tabs): every account in payments / receipts / journals / contra that is
+    // not a customer, supplier, transporter, bank or cash, with its totals.
+    var L = (sheet_(T.BL) ? rows_(T.BL) : []).filter(busyLive_), known = {}, bank = {}, tr = {};
+    V.filter(busyLive_).forEach(function (v) { if (['SALE', 'PURC', 'SRET', 'PRET', 'CN', 'DN'].indexOf(v.reg) >= 0) known[normName_(v.party)] = 1; });
+    (sheet_(T.BTR) ? rows_(T.BTR) : []).forEach(function (t) { tr[t.account] = 1; });
+    L.forEach(function (l) { if (l.reg === 'CONTRA') bank[normName_(l.acc)] = 1; });
+    var acc = {};
+    L.forEach(function (l) {
+      if (['PAY', 'RCPT', 'JRNL'].indexOf(l.reg) < 0) return;
+      var a = normName_(l.acc);
+      if (known[a] || tr[a] || bank[a] || a === 'CASH') return;
+      var x = acc[a] || (acc[a] = { name: a, n: 0, dr: 0, cr: 0, regs: {} });
+      x.n++; x.dr = busyR2_(x.dr + busyNum_(l.dr)); x.cr = busyR2_(x.cr + busyNum_(l.cr)); x.regs[BUSY_REG_NAME_[l.reg]] = 1;
+    });
+    // Parties that are a customer and a supplier: Busy keeps ONE account for them; the app keeps customer money and supplier
+    // payments apart. Their whole Busy account for the year (Dr: sales, payments to them, debit notes, purchase returns, journal Dr;
+    // Cr: purchases, receipts, credit notes, sales returns, journal Cr). Above 0 = they owe us (opening balance not included).
+    var P = {}, live = V.filter(busyLive_), get = function (a) { return P[a] || (P[a] = { name: a, sale: 0, purc: 0, dr: 0, cr: 0 }); };
+    live.forEach(function (v) {
+      if (v.cancelled) return;
+      var a = normName_(v.party), t = busyNum_(v.total);
+      if (v.reg === 'SALE') { get(a).sale += t; get(a).dr += t; }
+      if (v.reg === 'PURC') { get(a).purc += t; get(a).cr += t; }
+      if (v.reg === 'DN' || v.reg === 'PRET') get(a).dr += t;
+      if (v.reg === 'CN' || v.reg === 'SRET') get(a).cr += t;
+    });
+    L.forEach(function (l) { if (['PAY', 'RCPT', 'JRNL'].indexOf(l.reg) >= 0 && P[normName_(l.acc)]) { var x = P[normName_(l.acc)]; x.dr += busyNum_(l.dr); x.cr += busyNum_(l.cr); } });
+    var dual = Object.keys(P).map(function (k) { return P[k]; }).filter(function (x) { return x.sale > 0 && x.purc > 0; })
+      .map(function (x) { return { name: x.name, sale: busyR2_(x.sale), purc: busyR2_(x.purc), dr: busyR2_(x.dr), cr: busyR2_(x.cr), net: busyR2_(x.dr - x.cr) }; });
+    return { other: Object.keys(acc).map(function (k) { var x = acc[k]; x.regs = Object.keys(x.regs).join(', '); return x; }).sort(function (a, b) { return (b.dr + b.cr) - (a.dr + a.cr); }),
+      banks: Object.keys(bank).sort(), dual: dual };
+  }
+  var regs = {};
+  V.forEach(function (v) {
+    var r = regs[v.scope] || (regs[v.scope] = { scope: v.scope, reg: v.reg, name: BUSY_REG_NAME_[v.reg] + (v.reg === 'CASH' ? ' (' + v.scope.split('|')[1] + ')' : ''), live: 0, gone: 0, from: '', to: '' });
+    if (busyLive_(v)) r.live++; else r.gone++;
+    if (!r.from || String(v.date) < r.from) r.from = String(v.date);
+    if (String(v.date) > r.to) r.to = String(v.date);
+  });
+  var ups = sheet_(T.BUP) ? rows_(T.BUP).reverse() : [];
+  return { uploads: ups.slice(0, 200), regs: BUSY_ORDER_.map(function (r) { return Object.keys(regs).filter(function (k) { return regs[k].reg === r; }).map(function (k) { return regs[k]; }); }).reduce(function (a, b) { return a.concat(b); }, []),
+    company: S.busyCompany || '', firm: busyFirm_(S), gap: busySet_(S, 'busyGapDays', 15) };
+}
+
+/* ---------------- the screen (Index.html), included so no HTML file is needed ---------------- */

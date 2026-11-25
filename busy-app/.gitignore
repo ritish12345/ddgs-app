@@ -1,0 +1,4 @@
+node_modules/
+tests/shots/
+# Busy exports hold real accounts: never committed
+*.xlsx
