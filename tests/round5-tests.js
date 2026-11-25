@@ -34,7 +34,7 @@ const R = 'RAGHAV TRADING AND COMPANY', DV = 'DEVAN TRADING AND COMPANY', GOD = 
   delete old.store.props.schema_v; delete old.store.cache.schema_ok;
   neu.run('api_authState');
   ok(firmsCell(old.store) === R + ', ' + DV + ', SHREE RAM SOLVEX', 'done only once: a later change by the Owner is kept');
-  ok(old.store.sheet('APP_PAYMENTS').dump()[0].slice(-1)[0] === 'Firm' && old.store.sheet('APP_ADVANCES').dump()[0].slice(-1)[0] === 'Firm', 'Firm column added at the end of APP_PAYMENTS and APP_ADVANCES');
+  ok(old.store.sheet('APP_PAYMENTS').dump()[0].slice(-3).join('|') === 'Firm|Source|Busy Key' && old.store.sheet('APP_ADVANCES').dump()[0].slice(-3).join('|') === 'Firm|Source|Busy Key', 'Firm column added at the end of APP_PAYMENTS and APP_ADVANCES (Busy app: then Source, Busy Key)');
 
   const s = makeServer();
   const { tokens } = runScenario(s);
@@ -63,7 +63,7 @@ const R = 'RAGHAV TRADING AND COMPANY', DV = 'DEVAN TRADING AND COMPANY', GOD = 
   s.run('api_addCustomerPayment', acc, GOD, 300000, s.run('today_'), 0, '', 'utr9', '', '', DV);
   ac = A().accounts;
   ok(ac[DV + '|' + GOD].received === 300000 && ac[DV + '|' + GOD].outstanding === 510000 && ac[R + '|' + GOD].received === rBefore, 'Devan payment lowers only Devan\'s Godrej account (8,10,000 − 3,00,000 = 5,10,000)');
-  ok(s.store.sheet('APP_PAYMENTS').dump().slice(-1)[0].slice(-1)[0] === DV, 'the payment line says Devan');
+  { const pd = s.store.sheet('APP_PAYMENTS').dump(); ok(pd.slice(-1)[0][pd[0].indexOf('Firm')] === DV, 'the payment line says Devan'); }
 
   console.log('Transporter advances per firm');
   s.run('api_addAdvance', acc, { transporter: 'Kang Transport', amount: 20000, date: '2026-11-20', firm: DV });

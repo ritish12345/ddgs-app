@@ -36,15 +36,19 @@ ok(/Apps Script editor/.test(err(() => s.run('testDailyReport'))), 'testDailyRep
 const mails = s.store.mails.length;
 s.run('dailyReport', { triggerUid: 'made-up' });
 ok(s.store.mails.length === mails, 'dailyReport with a made-up trigger id sends nothing');
-const backupsBefore = (s.store.folders.find(f => f.name === 'DDGS Backups') || { files: [] }).files.length;
+const backupsBefore = (s.store.folders.find(f => f.name === 'RAGHAV BUSY APP Backups') || { files: [] }).files.length;
 s.run('weeklyBackup', { triggerUid: 'made-up' });
-ok((s.store.folders.find(f => f.name === 'DDGS Backups') || { files: [] }).files.length === backupsBefore, 'weeklyBackup with a made-up trigger id makes no copy');
+ok((s.store.folders.find(f => f.name === 'RAGHAV BUSY APP Backups') || { files: [] }).files.length === backupsBefore, 'weeklyBackup with a made-up trigger id makes no copy');
 const daily = s.store.triggers.find(t => t.fn === 'dailyReport'), weekly = s.store.triggers.find(t => t.fn === 'weeklyBackup');
-ok(!!daily && !!weekly, 'setup switched on the two timers');
-s.run('dailyReport', { triggerUid: daily.id });
+ok(!daily && !weekly, 'Busy app: no 9 pm email or Sunday backup timer by default (settings dailyReport / weeklyBackup = no)');
+s.store.sheet('APP_SETTINGS').rows.forEach(r => { if (r && (r[0] === 'dailyReport' || r[0] === 'weeklyBackup')) r[1] = 'yes'; });
+s.store.activeEmail = s.store.ownerEmail; s.run('setup'); s.store.activeEmail = '';
+const daily2 = s.store.triggers.find(t => t.fn === 'dailyReport'), weekly2 = s.store.triggers.find(t => t.fn === 'weeklyBackup');
+ok(!!daily2 && !!weekly2, 'switched on in the settings: setup makes the two timers');
+s.run('dailyReport', { triggerUid: daily2.id });
 ok(s.store.mails.length === mails + 1, 'the real 9 pm trigger still sends the report');
-s.run('weeklyBackup', { triggerUid: weekly.id });
-ok(s.store.folders.find(f => f.name === 'DDGS Backups').files.length === backupsBefore + 1, 'the real Sunday trigger still makes the backup');
+s.run('weeklyBackup', { triggerUid: weekly2.id });
+ok(s.store.folders.find(f => f.name === 'RAGHAV BUSY APP Backups').files.length === backupsBefore + 1, 'the real Sunday trigger still makes the backup');
 s.store.activeEmail = s.store.ownerEmail; // the owner in the editor
 ok(err(() => s.run('setup')) === '', 'setup still works from the editor');
 ok(err(() => s.run('testDailyReport')) === '' && s.store.mails.length === mails + 2, 'testDailyReport still works from the editor');

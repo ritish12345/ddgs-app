@@ -1,6 +1,28 @@
-# CLAUDE.md – DDGS Trade Control app (rules for Claude)
+# CLAUDE.md – RAGHAV BUSY APP (rules for Claude)
 
 Read this file fully before doing any work in this folder.
+
+## 0. This is the BUSY app, not the DDGS app (read first)
+- **RAGHAV BUSY APP** = a full copy of the DDGS Trade Control app (copied from `ddgs-app` main `a0ec10f`, 25-11-2026),
+  with its **own Apps Script project and its own Google Sheet "RAGHAV BUSY APP"**, filled from Busy exports (section 3a).
+  Everything in sections 1–8 below is the DDGS app's rules: they apply here too, except where section 0 / 3a says otherwise.
+- Folder: `ddgs-app/busy-app` (its own git repo, branch `master` / work branches). The DDGS app's `.clasp.json` must
+  **never** come into this folder: `clasp push` / `clasp deploy` from here must only reach the Busy app's own script.
+  Check `.clasp.json` here before any clasp command (its scriptId is NOT the DDGS one). The DDGS sheet/deployment ids in
+  section 2 are the DDGS app's: never deploy to them from here.
+- Differences from the DDGS app (all in `Code.js` / `Index.html`, marked "RAGHAV BUSY APP" / "Busy"):
+  - Busy upload + builder (`busy*_`, `api_busyUpload`, `api_busy`), tabs `BUSY_UPLOADS`, `BUSY_VOUCHERS`, `BUSY_ITEMS`,
+    `BUSY_LINES` (raw Busy data, never deleted), `BUSY_TRANSPORT`, `BUSY_WETCAKE` (rebuilt views).
+  - Busy columns at the END of `APP_PO`, `APP_SO`, `APP_TRUCKS`, `APP_PAYMENTS`, `APP_ADVANCES` (SCHEMA_V `7.1-busy1`).
+  - Pages Busy, Transport, Wet cake, Gaps (roles with `busy`: Owner, Accounts). Truck and order pages show their Busy bills.
+  - Settings: `dailyReport` / `weeklyBackup` (default **no**: no double 9 pm email), `busyCompany`, `busyFirm`, `busyGapDays`,
+    `busyPairQty`, `busyPairBefore`, `busyPairAfter`, `busyWetCakeItems`, `busyWetCakeAccounts`; company `RAGHAV BUSY APP`.
+  - Drive folders `RAGHAV BUSY APP Exports / Slips / Backups` (kept apart from the DDGS app's).
+  - New rows grow the sheet first (`ensureRows_`): Sheets refuses writing past its last grid row (the Busy tabs have ~6,000 rows).
+- Tests: `cd tests && npm test` (all the DDGS tests, adjusted only for the Busy additions, + `busy-tests.js`). Old DDGS commits for
+  the comparison tests are read from the `ddgs-app` repo (parent folder). `busy-tests.js` also runs the real exports in
+  `Downloads\BusyExports\All Busy data\2026-27` when present. **Real Busy files are never copied into this folder or committed**
+  (`.gitignore` has `*.xlsx`).
 
 ## 1. Who and what
 - Owner: **Nitish** (login `nidhish23`). DDGS trading business. He is also a developer, but explain things simply and briefly.
@@ -23,6 +45,36 @@ Read this file fully before doing any work in this folder.
 - Old tabs (`MASTER PO`, `SALE ORDER `, `DISPATCH`, `SALE `, `Freight`, Gemini dashboard) are history only; the app imported them once.
 - Roles (`ROLES` in Code.js): **Owner** everything; **Accounts** money, no users/profit/closed-truck edits; **Dispatch** trucks only, no money (money fields are stripped on the server); **Viewer** read only.
 - Every change is written to `APP_LOG` (time, user, action, record, old → new).
+
+## 3a. Busy → app (Nitish, 25-11-2026)
+- Upload: Busy page → choose the Excel registers (Sales, Purchase, Sales Return, Purchase Return, Credit Note, Debit Note, Payment,
+  Receipt, Journal, Contra, Cash/Bank Book). Owner/Accounts. All files are read and checked first, then saved in one locked call.
+  Refused with a plain message: another Busy company (`busyCompany`), not a register, Voucher Series not All, no period, Total row ≠
+  what was read, an entry with Dr ≠ Cr, Sales/Purchase without item lines, same register twice. A file replaces its register for
+  its own period; same file twice = no change; if more than 10% of a period's entries would leave, only the Owner can confirm.
+- Raw: every voucher / item line / Dr-Cr line kept as Busy gave it; an entry no longer in Busy is marked "Not in Busy any more".
+- Orders: bills (not cancelled, not wet cake, qty > 0) of the same party + item + exact rate; a gap of more than `busyGapDays`
+  (15) days since that rate's previous bill starts a new order (his example: 2750 Godrej 12-05 = one, 2850 13-05 = another,
+  2750 12-08 = a new one). Qty = the bills' total. Status Settled when the last bill is over 15 days before the newest Busy bill.
+  Sale orders: rate before GST (`excl`), we pay freight (`ours`), credit days = defaultCreditDays (Owner can change).
+- Trucks: a purchase line and a sale line of the same weight (±`busyPairQty` 0.05 qtl), the sale 3 days before .. 4 days after
+  the purchase; nearest date wins. A bill without a partner is a truck on its own (sale only: on a "NO PURCHASE BILL" PO, rate 0).
+  A bill returned whole (same party, same total, on or after the bill) is left out (the re-bill counts). Imported trucks:
+  dispatch = purchase bill, received = sale bill (qty, date), freight done in Busy (closed). Supplier paid = the supplier's
+  Busy payments + debit notes + returns cover its bills oldest first, or Busy status Cleared (Busy's "Pending" is not kept bill
+  by bill, so it is only shown).
+- Customer money (APP_PAYMENTS, per firm `busyFirm` + customer): receipts, refunds, credit notes, part returns, debit notes,
+  journals of customers with DDGS sales. A party that is also a supplier keeps payments/journals on the supplier side; the Gaps
+  page shows their one Busy account (Busy has one account per party).
+- Transporters (APP_ADVANCES lines + BUSY_TRANSPORT): freight booked by journal (FREIGHT … Dr / transporter Cr, with TDS) = minus,
+  payments = plus, moves between vehicle accounts ±. Left = paid − booked (minus = we owe). Vehicle accounts ("PB29R7103 GURJIT")
+  are split into vehicle + name.
+- Wet cake (`busyWetCakeItems`, `busyWetCakeAccounts`): only in BUSY_WETCAKE / Wet cake page (bills, receipts of wet-cake-only
+  customers, payments to wet-cake-only suppliers, wet cake freight). Never in orders, trucks, Receivables or Advances.
+- Re-upload: Busy fields follow Busy (`BUSY_OWN_`); fields staff typed are never overwritten (vehicle, transporter, driver,
+  freight rate, advance, slip, placed on, notes, photos, UTRs). Busy can mark a supplier paid, never unpaid. A vanished order /
+  truck → Cancelled "not in Busy any more"; a changed or vanished money line → reversed by a minus line + the new line. Busy money
+  lines cannot be reversed by hand. Opening balances of last year are not in these files (balances start 01-04-2026).
 
 ## 3. Business rules (do not change without Nitish saying so)
 - **Weights:** slips are in kg (5 digits, e.g. 38450) or quintal (e.g. 384.50). Store quintals. ≥1000 typed = kg ÷ 100.

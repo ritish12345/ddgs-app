@@ -11,8 +11,9 @@ process.env.TZ = 'Asia/Kolkata';
 const vm = require('vm'), fs = require('fs'), path = require('path'), crypto = require('crypto');
 
 const ROOT = path.join(__dirname, '..');
-/* busy-app is a copy of the DDGS app without its git history: old DDGS commits are read from the ddgs-app repo next to it. */
-const DDGS_GIT = fs.existsSync(path.join(ROOT, '..', 'ddgs-app', '.git')) ? path.join(ROOT, '..', 'ddgs-app') : ROOT;
+/* busy-app is a copy of the DDGS app without its git history: old DDGS commits are read from the ddgs-app repo
+   (busy-app sits inside ddgs-app since 25-11-2026; next to it before). */
+const DDGS_GIT = [path.join(ROOT, '..'), path.join(ROOT, '..', 'ddgs-app')].filter(d => fs.existsSync(path.join(d, '.git')) && fs.existsSync(path.join(d, 'Code.js')))[0] || ROOT;
 function gitShow(ref, file) {
   const cp = require('child_process');
   try { return cp.execSync('git show ' + ref + ':' + file, { cwd: ROOT, maxBuffer: 1e8, stdio: ['ignore', 'pipe', 'ignore'] }).toString(); }

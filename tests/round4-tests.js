@@ -33,8 +33,8 @@ const advRows = s => s.store.sheet('APP_ADVANCES').dump();
   };
 
   console.log('Tab and rights');
-  ok(!!s.store.sheet('APP_ADVANCES') && advRows(s)[0].join('|') === 'Advance No.|Date|Transporter|Vehicle No|Driver|Amount|UTR / Ref|Note|Entered By|Entered At|Firm', 'APP_ADVANCES tab made by setup');
-  ok(s.store.sheet('APP_TRUCKS').dump()[0].slice(-7).join('|') === 'Transporter Advance Used|Second PO ID|Qty On First PO|Second SO ID|Qty On First SO|Qty On Second PO|Qty On Second SO', 'APP_TRUCKS: new columns at the end only (advance used, then the split columns)');
+  ok(!!s.store.sheet('APP_ADVANCES') && advRows(s)[0].join('|') === 'Advance No.|Date|Transporter|Vehicle No|Driver|Amount|UTR / Ref|Note|Entered By|Entered At|Firm|Source|Busy Key', 'APP_ADVANCES tab made by setup (Busy app: Source and Busy Key at the end)');
+  ok(s.store.sheet('APP_TRUCKS').dump()[0].slice(-17, -10).join('|') === 'Transporter Advance Used|Second PO ID|Qty On First PO|Second SO ID|Qty On First SO|Qty On Second PO|Qty On Second SO', 'APP_TRUCKS: new columns at the end only (advance used, then the split columns)');
   ok(/Dispatch\) is not allowed/.test(err(() => s.run('api_addAdvance', dis, { transporter: 'Kang Transport', amount: 1000, date: '2026-11-20' }))), 'Dispatch cannot enter advances');
   ok(/Enter the amount/.test(err(() => s.run('api_addAdvance', acc, { transporter: 'Kang Transport', amount: 0, date: '2026-11-20' }))) && /Enter the transporter/.test(err(() => s.run('api_addAdvance', acc, { amount: 5, date: '2026-11-20' }))), 'amount and transporter are needed');
 

@@ -89,6 +89,21 @@ Object.keys(B.screens).forEach(k => (B.screens[k].trucks || []).forEach(t => { [
 // Transporter names with an advance (25-11-2026): roles without money get the names only (advNames).
 EXPECTED.push('advNames (transporter names with an advance) sent to roles without money');
 Object.keys(B.screens).forEach(k => { delete B.screens[k].advNames; });
+// RAGHAV BUSY APP (25-11-2026): Busy columns at the end of APP_PO / APP_SO / APP_TRUCKS / APP_PAYMENTS (blank on a day without
+// Busy uploads), Busy settings, company name, the "busy" permission. Everything else must still be exactly the DDGS app.
+EXPECTED.push('Busy app: Busy columns at the end of APP_PO / APP_SO / APP_TRUCKS / APP_PAYMENTS (blank here), Busy settings, company name, perm.busy');
+const BUSY_COLS = ['Source', 'Busy Key', 'GSTIN', 'Busy Bills', 'Busy Amount incl GST', 'Last Bill Date', 'Busy Purchase Key', 'Busy Sale Key', 'Sale Bill No', 'Sale Bill Qty', 'Busy Purchase Amount', 'Busy Sale Amount', 'Supplier Status (Busy)', 'Customer Status (Busy)', 'Match'];
+['APP_PO', 'APP_SO', 'APP_TRUCKS', 'APP_PAYMENTS'].forEach(n => { if (B.tabs[n]) { const cut = B.tabs[n][0].map((h, i) => BUSY_COLS.indexOf(h) >= 0 ? i : -1).filter(i => i >= 0); B.tabs[n] = B.tabs[n].map(r => r.filter((x, i) => cut.indexOf(i) < 0)); } });
+const BUSY_SET = ['dailyReport', 'weeklyBackup', 'busyCompany', 'busyFirm', 'busyGapDays', 'busyPairQty', 'busyPairBefore', 'busyPairAfter', 'busyWetCakeItems', 'busyWetCakeAccounts', 'company'];
+[A, B].forEach(X => {
+  if (X.tabs.APP_SETTINGS) X.tabs.APP_SETTINGS = X.tabs.APP_SETTINGS.filter(r => BUSY_SET.indexOf(r[0]) < 0);
+  Object.keys(X.screens).forEach(k => {
+    const sc = X.screens[k];
+    if (sc.settings) BUSY_SET.forEach(f => { delete sc.settings[f]; });
+    if (sc.perm) delete sc.perm.busy;
+    ['po', 'so', 'trucks', 'pays'].forEach(l => (sc[l] || []).forEach(r => { ['src', 'bkey', 'gstin', 'bBills', 'bAmt', 'bLast', 'bPKey', 'bSKey', 'sBillNo', 'sBillQty', 'bPAmt', 'bSAmt', 'bPStat', 'bSStat', 'bMatch'].forEach(f => { delete r[f]; }); }));
+  });
+});
 // Stage values follow the new Closed rule (checked in parity / receivables tests); here only that Dispatch still gets one.
 [A, B].forEach(X => Object.keys(X.screens).forEach(k => (X.screens[k].trucks || []).forEach(t => { if ('_st' in t) t._st = 'present'; })));
 

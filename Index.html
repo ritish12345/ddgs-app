@@ -4,7 +4,7 @@
 <base target="_top">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>DDGS Trade Control</title>
+<title>RAGHAV BUSY APP</title>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;700&display=swap">
 <style>
 /* Layout: laptop = top tabs + wide list rows; phone = slim top bar + fixed bottom bar + compact cards. One page per PO, SO, buyer, plant, transporter, truck. */
@@ -314,7 +314,7 @@ table.t tfoot td{font-weight:700;background:var(--soft)}
   <div class="wrap">
     <div class="top">
       <div class="logo" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h11v9H3z"/><path d="M14 9h4l3 3v3h-7z"/><circle cx="7" cy="17.5" r="1.8"/><circle cx="17" cy="17.5" r="1.8"/></svg></div>
-      <div class="ttl"><b id="co">DDGS Trade Control</b><span class="sync" id="sync">Connecting…</span></div>
+      <div class="ttl"><b id="co">RAGHAV BUSY APP</b><span class="sync" id="sync">Connecting…</span></div>
       <div id="who"></div>
     </div>
     <nav id="nav"></nav>
@@ -902,6 +902,10 @@ function flagIssues() {
     var tn = normTruck(t.truck);
     L.forEach(function (o) {
       if (o.id === t.id) return;
+      if (!tn) { // trucks from Busy have no vehicle number yet: only the weight check below applies
+        if (t.L && o.L === t.L && o.po === t.po && o.id < t.id && !(t.billQ !== null && t.billOk) && t.src !== 'Busy') t.issues.push({ bad: 1, msg: 'Same loaded weight (' + qt(t.L) + ' qtl) as ' + o.id + '. Copied by mistake?' });
+        return;
+      }
       if (normTruck(o.truck) === tn && o.date === t.date && o.id < t.id) t.issues.push({ bad: 1, msg: 'Same truck entered twice on ' + dmy(t.date) + ' (also ' + o.id + ')' });
       else if (normTruck(o.truck) === tn && o.id < t.id && !o.U) t.issues.push({ bad: 1, msg: 'Same truck is on trip ' + o.id + ' (' + dmy(o.date) + ') which was never unloaded' });
       if (t.L && o.L === t.L && o.po === t.po && o.id < t.id && !(t.billQ !== null && t.billOk)) t.issues.push({ bad: 1, msg: 'Same loaded weight (' + qt(t.L) + ' qtl) as ' + o.id + '. Copied by mistake?' });
@@ -967,6 +971,7 @@ function mainTabs() {
     ['freight', 'Freight & Transport', live().filter(function (t) { return t.L && !t.fBuyer; }).length],
     ['advances', 'Advances', Object.keys(TADV).filter(function (k) { return fIn(TADV[k].firm) && TADV[k].left > 0.5; }).length],
     ['disputes', 'Disputes'], ['reports', 'Reports']);
+  if (P.busy) tabs.push(['busy', 'Busy'], ['transport', 'Transport'], ['wetcake', 'Wet cake'], ['gaps', 'Gaps']); // RAGHAV BUSY APP
   tabs.push(['closed', 'Closed & cancelled']);
   if (P.review) tabs.push(['activity', 'Activity']);
   tabs.push(['more', 'More']);
@@ -983,6 +988,7 @@ function render() {
   if (!D) return;
   if (!P.money && (ROUTE.v === 'settle' || ROUTE.v === 'freight' || ROUTE.v === 'advances' || ROUTE.v === 'disputes' || ROUTE.v === 'reports' || ROUTE.v === 'oreport')) ROUTE = { v: 'home' };
   if (!P.review && ROUTE.v === 'activity') ROUTE = { v: 'home' };
+  if (!P.busy && ['busy', 'transport', 'wetcake', 'gaps'].indexOf(ROUTE.v) >= 0) ROUTE = { v: 'home' };
   var tab = { po: 'pos', so: 'sos', buyer: 'sos', plant: 'pos', transporter: P.money ? 'freight' : 'dispatch', truck: 'dispatch', users: 'more', oreport: 'reports' }[ROUTE.v] || ROUTE.v;
   $('#nav').innerHTML = mainTabs().map(function (v) { return '<button type="button" class="' + (tab === v[0] ? 'on' : '') + '" data-tab="' + v[0] + '">' + v[1] + (v[2] != null ? ' <span class="cnt">' + v[2] + '</span>' : '') + '</button>'; }).join('');
   // Phones: the tab row swipes sideways. Move it only as much as needed to show the chosen tab
@@ -996,7 +1002,7 @@ function render() {
   }
   $('#fab').hidden = !(P.trucks && ROUTE.v === 'dispatch');
   var f = { home: vHome, pos: function () { return orderTable('po'); }, sos: function () { return orderTable('so'); }, dispatch: vDispatch, settle: vSettle, receivables: vReceivables, freight: vFreight, advances: vAdvances, disputes: vDisputes, reports: vReports, oreport: vOrderReport, closed: vClosed,
-    more: vMore, activity: vActivity, users: P.users ? vUsers : vMore, notes: vNotes, po: function () { return vOrder('po', ROUTE.id); }, so: function () { return vOrder('so', ROUTE.id); },
+    more: vMore, activity: vActivity, users: P.users ? vUsers : vMore, notes: vNotes, busy: vBusy, transport: vTransport, wetcake: vWetcake, gaps: vGaps, po: function () { return vOrder('po', ROUTE.id); }, so: function () { return vOrder('so', ROUTE.id); },
     buyer: function () { return vParty('buyer', ROUTE.id); }, plant: function () { return vParty('plant', ROUTE.id); }, transporter: function () { return vParty('transporter', ROUTE.id); }, truck: function () { return vTruck(ROUTE.id); } }[ROUTE.v] || vHome;
   if (FIRM !== 'all' && visFirms().indexOf(FIRM) < 0) FIRM = 'all'; // the remembered firm is no longer shown
   var bar = multiFirm() && DETAIL.indexOf(ROUTE.v) < 0 && ROUTE.v !== 'more' && ROUTE.v !== 'activity' ? firmBar() : '';
@@ -1019,13 +1025,13 @@ function pageHead(title, sub, extra, nt) {
 
 /* ---------- Home ---------- */
 var TODO = [
-  ['billpending', 'Supplier invoice pending', function (t) { return t.L && t.billQ === null; }, 'trucks'],
+  ['billpending', 'Supplier invoice pending', function (t) { return t.L && t.billQ === null && t.src !== 'Busy'; }, 'trucks'], // Busy trucks: on the Gaps page
   ['noweight', 'Enter weight', function (t) { return !t.L; }, 'trucks'],
   ['nobuyer', 'Choose customer', function (t) { return t.L && !t.so && !t.plantPO; }, 'trucks'],
   ['plantunpaid', 'Pay supplier', function (t) { return t.L && !t.plantPaid; }, 'truckMoney'],
   ['onroad', 'On the road', function (t) { return t.L && !t.U; }, 'trucks'],
   ['freightdue', 'Pay freight', function (t) { return t.U && !t.fBuyer && !t.freightPaid; }, 'truckMoney'],
-  ['notransporter', 'No transporter', function (t) { return t.L && !t.transporter; }, 'trucks'],
+  ['notransporter', 'No transporter', function (t) { return t.L && !t.transporter && t.src !== 'Busy'; }, 'trucks'], // Busy has no transporter per truck: Gaps page
   ['noslip', 'No slip photo', function (t) { return t.noSlip; }, 'trucks']
 ];
 function vHome() {
@@ -1168,6 +1174,12 @@ function vTruck(id) {
     row('Vehicle placed on', dmy(t.placed)) + row('Transporter', lnk('transporter', t.transporter)) + row('Driver', esc(t.driver) || '—') + row('RST / Weighment Slip No.', esc(t.slip) || '—') +
     row('Loaded', t.L ? qt(t.L) + ' qtl' : '—') + row('Supplier invoice', t.billQ === null ? (t.L ? '<span class="mu">not entered</span>' : '—') : esc(t.billNo || '') + ' · ' + qt(t.billQ) + ' qtl ' + (t.billOk ? '<span class="tag ok">matches slip</span>' : '<span class="tag">does not match slip</span>')) + row('Unloaded', t.U ? qt(t.U) + ' qtl on ' + dmy(t.unloadDate) : '—') + row('Shortage', t.U ? qt(t.short) + ' qtl' : '—') +
     row('Days on trip', t.trip + (t.detDays && !t.fBuyer ? ' <span class="over">(' + t.detDays + ' over ' + t.freeDays + ' free)</span>' : '')) + '</dl>';
+  if (t.src === 'Busy') { // RAGHAV BUSY APP: the Busy bills this truck was made from
+    var bill = function (no, q, amt, st) { return esc(no) + ' · ' + qt(q) + ' qtl' + (P.money && amt !== '' && amt != null ? ' · ' + inr(n(amt)) + ' incl. GST' : '') + (st ? ' · <span class="mu">Busy status: ' + esc(st) + '</span>' : ''); };
+    h += '<h2>From Busy</h2><dl class="dl">' + row('Purchase bill', t.billNo ? bill(t.billNo, t.billQty, t.bPAmt, t.bPStat) : '<span class="mu">none in Busy (stock, or bought by another firm)</span>') +
+      row('Sale bill', t.sBillNo ? bill(t.sBillNo, t.sBillQty, t.bSAmt, t.bSStat) : '<span class="mu">none in Busy yet</span>') + row('Matched', esc(t.bMatch || '')) +
+      row('Not in Busy', '<span class="mu">vehicle no., transporter, driver, freight rate, slip, real unload weight and date: fill them here if you want (they are kept on every upload)</span>') + '</dl>';
+  }
   if (P.money) {
     h += '<h2>Money</h2><dl class="dl">' + (t.plantUTR ? row('Supplier payment UTR', esc(t.plantUTR)) : '') + (t.freightUTR ? row('Freight payment UTR', esc(t.freightUTR)) : '') + row('Supplier amount', !t.L ? '— <span class="mu">(after weight)</span>' : inr(t.purTot) + (t.plantPaid ? ' · <span style="color:var(--ok)">paid ' + dmy(t.plantPaidDate) + '</span>' : ' · <span class="over">unpaid</span>') + splitWork(t, 'po')) +
       (t.plantPO ? '' : row('Invoice rate', t.so ? rs2(t.rateUsed) + '/qtl' + (t.so2 && !t.rateOwn ? ' + ' + rs2(t.soRate2) + '/qtl' : '') + (t.rateOwn ? ' <span class="tag wn">this truck only</span>' : '') : '—') + row('Sale total', t.so ? inr(t.saleTot) + (t.U ? '' : ' <span class="mu">(on loaded wt)</span>') + splitWork(t, 'so') : '—') +
@@ -1254,6 +1266,7 @@ function vOrder(kind, id) {
   var s = orderStats(kind, o), tr = s.tr.slice().sort(sortT), party = kind === 'po' ? o.plant : o.buyer;
   var extra = (P.money ? '<button type="button" class="btn sm" data-go="oreport" data-id="' + esc(kind + '|' + id) + '">Report</button>' : '') + (P.exportX ? '<button type="button" class="btn sm" data-act="exportPage" data-kind="' + kind + '" data-id="' + esc(id) + '">Excel</button>' : '') + (P.orders ? '<button type="button" class="btn sm" data-act="' + (kind === 'po' ? 'editPO' : 'editSO') + '" data-id="' + esc(id) + '">Edit</button>' : '');
   var goes = (kind === 'po' ? (o.poType === 'plant' ? ' · goes to own plant (' + esc(plantFirm()) + ')' : o.linkSO && SO[o.linkSO] ? ' · sells to ' + lnk('so', o.linkSO) + ' ' + lnk('buyer', SO[o.linkSO].buyer) : '') : (isFirm(o.buyer) ? ' · <span class="tag own">group company</span>' : ''));
+  if (o.src === 'Busy') goes += ' · <span class="tag">From Busy</span> ' + n(o.bBills) + ' bill' + (n(o.bBills) === 1 ? '' : 's') + (o.bLast ? ', last ' + dmy(o.bLast) : '') + (P.money && o.bAmt !== '' && o.bAmt != null ? ', ' + inr(n(o.bAmt)) + ' incl. GST' : '') + (o.gstin ? ' · GSTIN ' + esc(o.gstin) : '') + (o.commodity ? ' · ' + esc(o.commodity) : '');
   var h = pageHead(esc(id) + ' ' + firmTag(firmOf(o)), (multiFirm() ? esc(firmOf(o)) + ' · ' : '') + (kind === 'po' ? 'Supplier ' : 'Customer ') + lnk(kind === 'po' ? 'plant' : 'buyer', party) + ' · ' + dmy(o.date) + (P.money ? ' · ' + inr(o.rate) + (kind === 'so' ? ' ' + terms(o) : ' + GST') : '') + goes + (o.status === 'Cancelled' ? ' · <span class="over">Cancelled</span>' : '') + (o.status === 'Settled' ? ' · <span class="tag ok">Short-closed</span>' : '') + completeTag(kind, o, s), extra, newTab(kind, id));
   h += '<div class="kpis">' + kpi('Ordered', qt(o.qty) + ' qtl') + kpi(kind === 'po' ? 'Loaded' : 'Dispatched', qt(s.done) + ' qtl', trk(s.tr.length)) + kpi('Balance', qt(s.bal) + ' qtl', '', s.bal < 0 ? 'bad' : '') +
     kpi('Unloaded', qt(s.unl) + ' qtl') + kpi('Shortage', qt(s.short) + ' qtl', '', s.short > 0 ? 'warn' : '');
@@ -1816,7 +1829,9 @@ function vMore() {
   if (P.exportX) h += '<div class="row"><div class="m"><b>Download everything (Excel)</b><div class="mu" style="font-size:12.5px">Trucks, orders, freight, transporters and payments in one file' + (multiFirm() ? ' · ' + (FIRM === 'all' ? 'all firms' : esc(FIRM) + ' only') : '') + '</div></div><button type="button" class="btn sm" data-act="exportFull">Download</button></div>';
   h += '<div class="row"><div class="m"><b>' + esc(D.me.name || D.me.id) + '</b><div class="mu" style="font-size:12.5px">' + esc(D.me.role) + ' · ' + esc(ROLE_HELP[D.me.role] || '') + '</div></div><button type="button" class="btn sm" data-act="me">Password</button></div>';
   h += '<div class="row"><div class="m"><b>Log out</b></div><button type="button" class="btn sm danger" data-act="logout">Log out</button></div></div>';
-  if (D.me.role === 'Owner') h += '<p class="mu" style="font-size:12.5px;margin-top:12px">Automatic: a daily report comes to your Gmail around 9 pm with the full Excel attached, and a backup copy of the sheet is saved every Sunday night to Google Drive › DDGS Backups (last 12 kept). Detention: ' + n(D.settings.freeDays === undefined ? 3 : D.settings.freeDays) + ' free days, then ' + inr(n(D.settings.detentionPerDay === undefined ? 500 : D.settings.detentionPerDay)) + ' a day. Change these in the APP_SETTINGS tab.</p>';
+  var onOff = function (v) { return /^(yes|on|true|1)$/i.test(String(v == null ? '' : v).trim()); };
+  if (D.me.role === 'Owner') h += '<p class="mu" style="font-size:12.5px;margin-top:12px">Automatic: ' + (onOff(D.settings.dailyReport) ? 'a daily report comes to your Gmail around 9 pm with the full Excel attached' : 'no daily email (setting dailyReport = no; the DDGS app already sends one)') + ', and ' +
+    (onOff(D.settings.weeklyBackup) ? 'a backup copy of the sheet is saved every Sunday night to Google Drive › RAGHAV BUSY APP Backups (last 12 kept)' : 'no Sunday backup (setting weeklyBackup = no; Busy itself is the master copy: upload again any time)') + '. Detention: ' + n(D.settings.freeDays === undefined ? 3 : D.settings.freeDays) + ' free days, then ' + inr(n(D.settings.detentionPerDay === undefined ? 500 : D.settings.detentionPerDay)) + ' a day. Change these in the APP_SETTINGS tab.</p>';
   return h;
 }
 var NOTE_AREAS = ['Overview', 'Master PO', 'Sale Orders', 'Dispatch Board', 'Receiving', 'Sale & Settlement', 'Freight & Shortage', 'Truck page', 'Forms / entry', 'Phone', 'Other'];
@@ -2613,10 +2628,195 @@ function buyerFlow(name, tr) {
   var recv = r2(sum(tr.filter(function (t) { return !t.cx; }), function (t) { return t.U; }));
   return flowChart(esc(name), ['Dispatched ' + qt(disp) + ' qtl', 'Received ' + qt(recv) + ' qtl'], groups);
 }
+/* ---------- Busy pages (RAGHAV BUSY APP, Nitish 25-11-2026) ----------
+   Busy: upload the Excel registers exported from Busy; each file replaces its register for its own period and the server
+   (api_busyUpload) makes the orders, trucks, customer money and transporter accounts again. What staff typed is kept.
+   Transport: every transporter / vehicle account in Busy (freight booked by journal, TDS, payments, moves).
+   Wet cake: kept apart from the DDGS business. Gaps: what Busy does not have, and Busy data with no page here.
+   The figures come from the server (api_busy), worked out there only, like the Reports. */
+var BUSYC = {}, BUSYRES = null, BUSYUP = 0, TRSEL = '', GAPSEL = '';
+var BUSY_VIEWS = ['busy', 'transport', 'wetcake', 'gaps'];
+function busyGet(what) {
+  var key = what + '|' + D.v, c = BUSYC[what];
+  if (!c || (c.key !== key && c.want !== key)) {
+    BUSYC[what] = c = { key: c ? c.key : '', data: c ? c.data : null, err: '', want: key };
+    call('api_busy', what).then(function (r) { var x = BUSYC[what]; if (!x || x.want !== key) return; x.key = key; x.data = r; x.err = ''; if (BUSY_VIEWS.indexOf(ROUTE.v) >= 0) render(); })
+      .catch(function (e) { var x = BUSYC[what]; if (!x || x.want !== key) return; x.key = key; x.err = e.message || String(e); if (BUSY_VIEWS.indexOf(ROUTE.v) >= 0) render(); });
+  }
+  return BUSYC[what];
+}
+function busyWait(c) { return c.err && !c.data ? '<div class="panel empty">' + esc(c.err) + '</div>' : !c.data ? '<div class="panel empty">Loading…</div>' : ''; }
+/* The chosen files are read on this phone / laptop and sent together in one save. */
+function busyPick(input) {
+  var fl = Array.prototype.slice.call(input.files || []).filter(function (f) { return f.name.indexOf('~$') !== 0; });
+  if (!fl.length) return;
+  var bad = fl.filter(function (f) { return !/\.xlsx$/i.test(f.name); });
+  if (bad.length) { toast(bad[0].name + ' is not an Excel (.xlsx) file. Choose the files exported from Busy.'); return; }
+  if (fl.some(function (f) { return f.size > 5 * 1024 * 1024; })) { toast('A file is over 5 MB. Export one register at a time.'); return; }
+  Promise.all(fl.map(function (f) {
+    return new Promise(function (res, rej) { var r = new FileReader(); r.onload = function () { res({ name: f.name, b64: String(r.result).split(',')[1] || '' }); }; r.onerror = function () { rej(new Error('Could not read ' + f.name)); }; r.readAsDataURL(f); });
+  })).then(function (files) { busyUpload(files); }).catch(function (e) { toast(e.message); });
+}
+function busyUpload(files) {
+  if (BUSY) { toast('Please wait: something is still saving.'); return; }
+  BUSY = true; BUSYUP = files.length; render();
+  toast('Reading ' + files.length + ' Busy file' + (files.length > 1 ? 's' : '') + ' and updating the app… this can take a minute');
+  var done = function (d) { BUSYRES = d && d.busy; BUSYC = {}; return d; };
+  call('api_busyUpload', files, false, newRid()).then(function (d) {
+    BUSY = false; BUSYUP = 0; $('#toast').hidden = true; done(d); applyResult(d); render(); toast('Busy files uploaded');
+  }).catch(function (e) {
+    BUSY = false; BUSYUP = 0; render();
+    var m = e.message || String(e);
+    if (m.indexOf('CONFIRM|') !== 0) { toast(m); return; }
+    m = m.slice(8);
+    if (D.me.role !== 'Owner') { toast(m); return; }
+    openForm({ title: 'Upload anyway?', sub: esc(m), submit: 'Yes, upload it', danger: 1, fields: [], done: 'Busy files uploaded',
+      custom: function () { return call('api_busyUpload', files, true, newRid()).then(done); } });
+  });
+}
+function vBusy() {
+  var c = busyGet('info'), I = c.data;
+  var h = '<div class="ph" style="margin-bottom:6px"><h1>Busy</h1><div class="sub">Upload the Excel files exported from Busy' + (I && I.company ? ' (' + esc(I.company) + ')' : '') + '. Each file replaces its register for its own period; the purchase and sale orders, trucks, customer money and transporter accounts here are made again from Busy. What you typed in the app (vehicle no., transporter, driver, freight rate, notes, photos, UTRs) is kept. Nothing is deleted: an entry that left Busy is cancelled or reversed.</div></div>';
+  h += '<div class="panel" style="padding:14px 16px;margin-bottom:14px">' + (BUSYUP ? '<b>Uploading ' + BUSYUP + ' file' + (BUSYUP > 1 ? 's' : '') + '…</b> <span class="mu">this can take a minute</span>' :
+    '<label class="btn pri" style="display:inline-flex;align-items:center;cursor:pointer;min-height:44px">Choose Busy files…<input type="file" id="busy_files" accept=".xlsx" multiple hidden></label> <span class="mu" style="margin-left:8px">Choose all of them at once: Sales, Purchase, Sales Return, Purchase Return, Credit Note, Debit Note, Payment, Receipt, Journal, Contra, Cash book.</span>') + '</div>';
+  if (BUSYRES) {
+    var R = BUSYRES, info = R.info || {};
+    h += '<h2>Last upload</h2><div class="tbl" style="--cols:44px 1.5fr 1.4fr .7fr .6fr .7fr .8fr 2fr"><div class="tr th"><div>S.No.</div><div>File</div><div>Register · period</div><div class="r">Entries</div><div class="r">New</div><div class="r">Changed</div><div class="r">Left Busy</div><div>Checks</div></div>' +
+      (R.files || []).map(function (f, i) {
+        return '<div class="tr"><div class="td sn" data-l="S.No.">' + (i + 1) + '</div><div class="td wide" data-l="File">' + esc(f.file) + '</div><div class="td" data-l="Register">' + esc(f.regName) + '<small>' + dmy(f.from) + ' to ' + dmy(f.to) + '</small></div>' +
+          '<div class="td r num" data-l="Entries">' + f.vouchers + '</div><div class="td r num" data-l="New">' + f.added + '</div><div class="td r num" data-l="Changed">' + f.changed + '</div><div class="td r num" data-l="Left Busy">' + (f.gone ? '<b class="over">' + f.gone + '</b>' : 0) + '</div>' +
+          '<div class="td" data-l="Checks"><small style="display:block">' + esc(f.check) + '</small>' + ((f.changes || []).length ? '<small class="mu" style="display:block">' + esc(f.changes.slice(0, 5).join(' | ')) + '</small>' : '') + '</div></div>';
+      }).join('') + '</div>';
+    h += '<div class="panel" style="padding:10px 14px;margin:8px 0 14px"><b>App records:</b> ' + esc(R.built || '') + (info.pairs != null ? '<div class="mu" style="font-size:12.5px;margin-top:4px">Trucks: ' + info.pairs + ' purchase bill + sale bill of the same weight · ' + info.saleOnly + ' sale bill only · ' + info.purchaseOnly + ' purchase bill only · ' + info.returned + ' bills returned whole in Busy (left out, the re-bill counts) · newest Busy bill ' + dmy(info.newest) + '</div>' : '') + '</div>';
+  }
+  if (!I) return h + busyWait(c);
+  h += '<h2>What is in the app from Busy</h2>';
+  if (!I.regs.length) h += '<div class="panel empty">Nothing uploaded yet.</div>';
+  else h += '<div class="tbl" style="--cols:44px 1.6fr 1fr 1fr .8fr .9fr"><div class="tr th"><div>S.No.</div><div>Register</div><div>From</div><div>To</div><div class="r">Entries</div><div class="r">Left Busy</div></div>' +
+    I.regs.map(function (r, i) { return '<div class="tr"><div class="td sn" data-l="S.No.">' + (i + 1) + '</div><div class="td wide" data-l="Register">' + esc(r.name) + '</div><div class="td" data-l="From">' + dmy(r.from) + '</div><div class="td" data-l="To">' + dmy(r.to) + '</div><div class="td r num" data-l="Entries">' + r.live + '</div><div class="td r num" data-l="Left Busy">' + (r.gone || 0) + '</div></div>'; }).join('') + '</div>';
+  h += '<h2>Uploads (' + I.uploads.length + ')</h2>' + (I.uploads.length ? '<div class="list">' + I.uploads.slice(0, LIMIT).map(function (u, i) {
+    return '<div class="row"><div class="m"><span class="sn">' + (i + 1) + '.</span> <b>' + esc(u.reg) + '</b> ' + dmy(u.from) + ' to ' + dmy(u.to) + ' <span class="mu">· ' + esc(u.file) + ' · ' + esc(String(u.at).replace(/^(\d{4})-(\d{2})-(\d{2})/, '$3-$2-$1')) + ' · ' + esc(u.by) +
+      ' · ' + n(u.vouchers) + ' entries: ' + n(u.added) + ' new, ' + n(u.changed) + ' changed, ' + n(u.gone) + ' left Busy</span></div></div>';
+  }).join('') + '</div>' + (I.uploads.length > LIMIT ? '<button type="button" class="btn showmore" data-act="showmore">Show more</button>' : '') : '<div class="panel empty">None yet.</div>');
+  h += '<h2>How to export from Busy</h2><div class="panel" style="padding:12px 16px;font-size:13.5px;line-height:1.6">Busy → Reports → Account Books → the register (Sales Register, Purchase Register, Sales Return, Purchase Return, Payment, Receipt, Journal, Contra, Credit Note, Debit Note; Cash/Bank Book for Cash) → period from 01-04 → Voucher Series <b>All</b>. For Sales and Purchase: Filter → tick <b>Show Items Details?</b> and <b>Show Party TIN/GSTIN No.?</b> → Apply. Then the download button → Export to Excel. The desktop shortcut <b>Busy Export</b> does Sales and Purchase for you.' +
+    '<div class="mu" style="margin-top:6px">Settings (APP_SETTINGS): busyGapDays ' + esc(I.gap) + ' (a gap of more days starts a new order), busyPairQty / busyPairBefore / busyPairAfter (same truck), busyWetCakeItems / busyWetCakeAccounts (kept apart), busyFirm ' + esc(I.firm) + '.</div></div>';
+  return h;
+}
+function vTransport() {
+  var c = busyGet('transport'), sub = SUBF.transport || 'all';
+  var h = '<div class="ph" style="margin-bottom:6px"><h1>Transport (from Busy)</h1><div class="sub">Every transporter and vehicle account in Busy: freight booked by journal (with TDS), paid, and moved between accounts. <b>We owe</b> = booked − paid ± moved. The same lines are on the Advances page (Left = paid − booked: minus = we owe). Wet cake transporters are on the Wet cake page.</div></div>';
+  if (!c.data) return h + busyWait(c);
+  var acc = {}, order = [];
+  c.data.rows.forEach(function (r) {
+    var a = acc[r.account];
+    if (!a) { a = acc[r.account] = { name: r.account, vehicle: r.vehicle, person: r.person, kind: r.kind, wet: r.wet === true, booked: 0, tds: 0, paid: 0, moved: 0, bal: 0, n: 0, last: '', list: [] }; order.push(a); }
+    a.booked = r2(a.booked + n(r.booked)); a.tds = r2(a.tds + n(r.tds)); a.paid = r2(a.paid + n(r.paid)); a.moved = r2(a.moved + n(r.moved)); a.bal = n(r.balance); a.n++; a.list.push(r);
+    if (String(r.date) > a.last) a.last = String(r.date);
+  });
+  var all = order.filter(function (a) { return !a.wet; }), q = QS.replace(/\s+/g, '').toLowerCase();
+  var opts = [['all', 'All', function () { return true; }], ['owe', 'We owe', function (a) { return a.bal > 0.5; }], ['adv', 'Advance with them', function (a) { return a.bal < -0.5; }], ['zero', 'Settled', function (a) { return Math.abs(a.bal) <= 0.5; }], ['veh', 'Vehicle accounts', function (a) { return a.kind === 'Vehicle'; }]];
+  var fn = (opts.filter(function (o) { return o[0] === sub; })[0] || opts[0])[2];
+  var list = all.filter(fn).filter(function (a) { return !q || (a.name + a.vehicle + a.person).toLowerCase().replace(/\s+/g, '').indexOf(q) >= 0; }).sort(function (x, y) { return y.bal - x.bal || x.name.localeCompare(y.name); });
+  h += '<div class="kpis" style="margin-bottom:14px">' + kpi('Accounts', all.length, all.filter(function (a) { return a.kind === 'Vehicle'; }).length + ' vehicle accounts') + kpi('Freight booked', inr(sum(all, function (a) { return a.booked; })), 'TDS ' + inr(sum(all, function (a) { return a.tds; }))) +
+    kpi('Paid', inr(sum(all, function (a) { return a.paid; }))) + kpi('We owe', inr(sum(all, function (a) { return Math.max(0, a.bal); })), all.filter(function (a) { return a.bal > 0.5; }).length + ' accounts', 'warn') +
+    kpi('Advance with them', inr(sum(all, function (a) { return Math.max(0, -a.bal); })), all.filter(function (a) { return a.bal < -0.5; }).length + ' accounts', 'good') + '</div>';
+  if (!SUBF.transport) SUBF.transport = 'all';
+  h += '<div class="bar">' + searchBox() + '</div>' + subChips('transport', opts, all);
+  if (!list.length) return h + '<div class="panel empty">No accounts here.</div>';
+  h += '<div class="tbl" style="--cols:44px 2fr 1fr .8fr 1fr .9fr 1fr .9fr"><div class="tr th"><div>S.No.</div><div>Account</div><div class="r">Booked</div><div class="r">TDS</div><div class="r">Paid</div><div class="r">Moved</div><div class="r">We owe</div><div>Last entry</div></div>' +
+    list.map(function (a, i) {
+      var open = TRSEL === a.name, cell = function (l, v) { return '<div class="td r num" data-l="' + l + '">' + v + '</div>'; };
+      var row = '<div class="tr"><div class="td sn" data-l="S.No.">' + (i + 1) + '</div><div class="td wide" data-l="Account"><a href="#" data-act="trsel" data-id="' + esc(a.name) + '"><b>' + esc(a.vehicle || a.name) + '</b></a>' + (a.vehicle ? ' <span class="mu">' + esc(a.person || '') + '</span> <span class="tag">vehicle</span>' : '') + '<small>' + a.n + ' entries' + (open ? ' · tap again to close' : ' · tap to see them') + '</small></div>' +
+        cell('Booked', inr(a.booked)) + cell('TDS', a.tds ? inr(a.tds) : '—') + cell('Paid', inr(a.paid)) + cell('Moved', a.moved ? inr(a.moved) : '—') + cell('We owe', '<b class="' + (a.bal > 0.5 ? 'over' : '') + '">' + (a.bal < -0.5 ? 'advance ' + inr(-a.bal) : inr(a.bal)) + '</b>') + '<div class="td" data-l="Last entry">' + dmy(a.last) + '</div></div>';
+      if (open) row += '<div class="tr" style="background:var(--bg2,#f4f7f6)"><div class="td" style="grid-column:1/-1"><div class="tblw"><table class="t"><thead><tr><th>S.No.</th><th>Date</th><th>Entry</th><th>Freight head / other side</th><th class="r">Booked</th><th class="r">TDS</th><th class="r">Paid</th><th class="r">Moved</th><th class="r">We owe</th></tr></thead><tbody>' +
+        a.list.map(function (r, j) { return '<tr><td>' + (j + 1) + '</td><td>' + dmy(r.date) + '</td><td>' + esc(r.reg) + '</td><td>' + esc(r.head) + '</td><td class="r">' + (r.booked !== '' ? inr(n(r.booked)) : '') + '</td><td class="r">' + (n(r.tds) ? inr(n(r.tds)) : '') + '</td><td class="r">' + (r.paid !== '' ? inr(n(r.paid)) : '') + '</td><td class="r">' + (r.moved !== '' ? inr(n(r.moved)) : '') + '</td><td class="r">' + inr(n(r.balance)) + '</td></tr>'; }).join('') +
+        '</tbody></table></div></div></div>';
+      return row;
+    }).join('') + '</div>';
+  return h;
+}
+function vWetcake() {
+  var c = busyGet('wetcake'), sub = SUBF.wetcake || 'all';
+  var h = '<div class="ph" style="margin-bottom:6px"><h1>Wet cake (from Busy)</h1><div class="sub">Kept completely apart from the DDGS business: every wet cake purchase and sale bill, receipts from wet-cake-only customers (cash / Paytm sales), payments, and wet cake freight, as Busy has them. Not in orders, trucks, Receivables or Advances.</div></div>';
+  if (!c.data) return h + busyWait(c);
+  var rows = c.data.rows, q = QS.replace(/\s+/g, '').toLowerCase();
+  var kinds = {}; rows.forEach(function (r) { kinds[r.what] = 1; });
+  var opts = [['all', 'All', function () { return true; }]].concat(Object.keys(kinds).sort().map(function (k) { return [k, k, function (r) { return r.what === k; }]; }));
+  if (!SUBF.wetcake) SUBF.wetcake = 'all';
+  var fn = (opts.filter(function (o) { return o[0] === sub; })[0] || opts[0])[2];
+  var bought = rows.filter(function (r) { return r.what === 'Purchase'; }), sold = rows.filter(function (r) { return r.what === 'Sale'; });
+  h += '<div class="kpis" style="margin-bottom:14px">' + kpi('Bought', qt(sum(bought, function (r) { return n(r.qty); })) + ' qtl', inr(sum(bought, function (r) { return n(r.total); })) + ' incl. GST') +
+    kpi('Sold', qt(sum(sold, function (r) { return n(r.qty); })) + ' qtl', inr(sum(sold, function (r) { return n(r.total); })) + ' incl. GST') +
+    kpi('Received', inr(sum(rows.filter(function (r) { return r.what === 'Receipt'; }), function (r) { return n(r.amount); }))) +
+    kpi('Freight booked', inr(-sum(rows.filter(function (r) { return r.what === 'Freight booked'; }), function (r) { return n(r.amount); })), 'paid ' + inr(sum(rows.filter(function (r) { return r.what === 'Freight paid'; }), function (r) { return n(r.amount); }))) + '</div>';
+  var M = {};
+  rows.forEach(function (r) {
+    var m = String(r.date).slice(0, 7), x = M[m] || (M[m] = { m: m, bq: 0, ba: 0, sq: 0, sa: 0, rc: 0, fr: 0 });
+    if (r.what === 'Purchase') { x.bq += n(r.qty); x.ba += n(r.total); }
+    if (r.what === 'Sale') { x.sq += n(r.qty); x.sa += n(r.total); }
+    if (r.what === 'Receipt') x.rc += n(r.amount);
+    if (r.what === 'Freight booked') x.fr -= n(r.amount);
+  });
+  h += '<h2>By month</h2><div class="tbl" style="--cols:44px 1fr 1fr 1.1fr 1fr 1.1fr 1.1fr 1fr"><div class="tr th"><div>S.No.</div><div>Month</div><div class="r">Bought qtl</div><div class="r">Bought ₹</div><div class="r">Sold qtl</div><div class="r">Sold ₹</div><div class="r">Received ₹</div><div class="r">Freight ₹</div></div>' +
+    Object.keys(M).sort().map(function (k, i) { var x = M[k], cell = function (l, v) { return '<div class="td r num" data-l="' + l + '">' + v + '</div>'; }; return '<div class="tr"><div class="td sn" data-l="S.No.">' + (i + 1) + '</div><div class="td" data-l="Month">' + k.split('-').reverse().join('-') + '</div>' + cell('Bought qtl', qt(x.bq)) + cell('Bought ₹', inr(x.ba)) + cell('Sold qtl', qt(x.sq)) + cell('Sold ₹', inr(x.sa)) + cell('Received ₹', inr(x.rc)) + cell('Freight ₹', inr(x.fr)) + '</div>'; }).join('') + '</div>';
+  var list = rows.filter(fn).filter(function (r) { return !q || [r.party, r.no, r.item, r.note, r.what].join('|').toLowerCase().replace(/\s+/g, '').indexOf(q) >= 0; }).slice().reverse();
+  h += '<h2>Entries (' + list.length + ')</h2><div class="bar">' + searchBox() + '</div>' + subChips('wetcake', opts, rows);
+  if (!list.length) return h + '<div class="panel empty">Nothing here.</div>';
+  h += '<div class="tbl" style="--cols:44px .9fr 1fr 1.8fr .8fr .8fr 1fr 1.4fr"><div class="tr th"><div>S.No.</div><div>Date</div><div>What</div><div>Party / account</div><div class="r">Qty</div><div class="r">Rate</div><div class="r">Amount</div><div>Bill / note</div></div>' +
+    list.slice(0, LIMIT).map(function (r, i) {
+      var cell = function (l, v) { return '<div class="td r num" data-l="' + l + '">' + v + '</div>'; };
+      return '<div class="tr"><div class="td sn" data-l="S.No.">' + (i + 1) + '</div><div class="td" data-l="Date">' + dmy(r.date) + '</div><div class="td" data-l="What">' + esc(r.what) + '</div><div class="td wide" data-l="Party">' + esc(r.party) + '</div>' +
+        cell('Qty', r.qty !== '' ? qt(r.qty) : '—') + cell('Rate', r.rate !== '' ? rs2(r.rate) : '—') + cell('Amount', inr(n(r.total !== '' ? r.total : r.amount))) + '<div class="td" data-l="Bill / note"><small>' + esc([r.no, r.note].filter(String).join(' · ')) + '</small></div></div>';
+    }).join('') + '</div>' + more(list);
+  return h;
+}
+function vGaps() {
+  var c = busyGet('gaps'), B = T.filter(function (t) { return t.src === 'Busy' && !t.cx && tInFirm(t); });
+  var h = '<div class="ph" style="margin-bottom:6px"><h1>Gaps</h1><div class="sub">What Busy does not have, so the app could not fill it in, and Busy data that has no page in this app (it is kept in the BUSY_ tabs of the sheet). Fill a gap on the truck page: it is kept on every new upload.</div></div>';
+  var gaps = [
+    ['veh', 'No vehicle number', function (t) { return !t.truck; }],
+    ['trn', 'No transporter', function (t) { return !t.transporter; }],
+    ['drv', 'No driver', function (t) { return !t.driver; }],
+    ['fr', 'No freight rate (freight is booked per transporter in Busy, not per truck)', function (t) { return !(n(t.frate) > 0); }],
+    ['slip', 'No RST / weighment slip no.', function (t) { return !t.slip; }],
+    ['photo', 'No slip photo', function (t) { return !t.slipPhoto; }],
+    ['placed', 'Vehicle placed date = bill date (not in Busy)', function (t) { return t.placedOn === t.date; }],
+    ['unl', 'Received weight and date = the sale bill (real unloading not in Busy)', function (t) { return t.U && t.sBillNo && n(t.unloadWt) === n(t.sBillQty); }],
+    ['utr', 'Supplier paid, no UTR (payments are in Busy)', function (t) { return t.plantPaid && !t.plantUTR && t.billNo; }],
+    ['unpaid', 'Supplier not paid yet (Busy payments do not cover the bill)', function (t) { return t.L && !t.plantPaid; }],
+    ['nosale', 'Purchase bill, no sale bill in Busy yet', function (t) { return t.bMatch === 'Purchase bill only'; }],
+    ['nopur', 'Sale bill, no purchase bill in Busy (stock, or another firm bought it)', function (t) { return t.bMatch === 'Sale bill only'; }],
+    ['near', 'Matched by nearest date (2 or more bills of the same weight)', function (t) { return /nearest/.test(t.bMatch || ''); }]
+  ];
+  h += '<h2>Trucks from Busy (' + B.length + ')</h2><div class="tbl" style="--cols:44px 3fr .8fr 130px"><div class="tr th"><div>S.No.</div><div>Gap</div><div class="r">Trucks</div><div></div></div>' +
+    gaps.map(function (g, i) {
+      var k = B.filter(g[2]).length;
+      return '<div class="tr"><div class="td sn" data-l="S.No.">' + (i + 1) + '</div><div class="td wide" data-l="Gap">' + esc(g[1]) + '</div><div class="td r num" data-l="Trucks"><b>' + k + '</b></div><div class="td acts">' + (k ? '<button type="button" class="btn sm' + (GAPSEL === g[0] ? ' pri' : '') + '" data-act="gapsel" data-id="' + g[0] + '">' + (GAPSEL === g[0] ? 'Hide' : 'Show') + '</button>' : '') + '</div></div>';
+    }).join('') + '</div>';
+  var sel = gaps.filter(function (g) { return g[0] === GAPSEL; })[0];
+  if (sel) { var gl = B.filter(sel[2]).sort(sortT); h += '<h2>' + esc(sel[1]) + ' (' + gl.length + ')</h2>' + truckTable(gl.slice(0, LIMIT)) + more(gl); }
+  var bo = D.po.filter(function (o) { return o.src === 'Busy' && o.status !== 'Cancelled'; }), bs = D.so.filter(function (o) { return o.src === 'Busy' && o.status !== 'Cancelled'; });
+  h += '<h2>Orders from Busy</h2><div class="panel" style="padding:12px 16px;font-size:13.5px;line-height:1.6">' + bo.length + ' purchase orders and ' + bs.length + ' sale orders were made from Busy bills (same party, item and rate; a gap of more than ' + esc(D.settings.busyGapDays || 15) + ' days starts a new order).' +
+    '<br>• <b>Ordered quantity</b> = what the bills add up to (Busy has no order quantity).<br>• <b>Sale order terms</b> are set by the app: rate before GST, we pay freight, ' + esc(D.settings.defaultCreditDays || 7) + ' days credit. Change an order if its terms differ (Edit on the order page).' +
+    '<br>• Orders with no bill in the last ' + esc(D.settings.busyGapDays || 15) + ' days are marked Short-closed (done).</div>';
+  if (!c.data) return h + busyWait(c);
+  var G = c.data;
+  if ((G.dual || []).length) {
+    h += '<h2>Customer and supplier at once (' + G.dual.length + ')</h2><div class="sub" style="margin:-4px 0 8px">Busy keeps ONE account for these parties. Here customer money (Receivables) counts only sales and receipts, and supplier payments are on the trucks, so the Receivables figure is not their Busy balance. Busy for the year (no opening balance):</div>' +
+      '<div class="tbl" style="--cols:44px 2fr 1.1fr 1.1fr 1.3fr"><div class="tr th"><div>S.No.</div><div>Party</div><div class="r">Sales</div><div class="r">Purchases</div><div class="r">Busy account (year)</div></div>' +
+      G.dual.map(function (x, i) { return '<div class="tr"><div class="td sn" data-l="S.No.">' + (i + 1) + '</div><div class="td wide" data-l="Party">' + lnk('buyer', x.name) + '</div><div class="td r num" data-l="Sales">' + inr(x.sale) + '</div><div class="td r num" data-l="Purchases">' + inr(x.purc) + '</div><div class="td r num" data-l="Busy account"><b>' + (x.net >= 0 ? 'they owe ' + inr(x.net) : 'we owe ' + inr(-x.net)) + '</b></div></div>'; }).join('') + '</div>';
+  }
+  h += '<h2>Busy data with no page here (' + G.other.length + ' accounts)</h2><div class="sub" style="margin:-4px 0 8px">Expenses, salary, GST, loans / capital, owner, TDS and other accounts from payments, receipts and journals. Kept as Busy has them in BUSY_VOUCHERS / BUSY_LINES. Bank and cash accounts: ' + esc((G.banks || []).join(', ') || '—') + '.</div>' +
+    (G.other.length ? '<div class="tbl" style="--cols:44px 2.2fr .7fr 1.1fr 1.1fr 1.6fr"><div class="tr th"><div>S.No.</div><div>Account</div><div class="r">Entries</div><div class="r">Debit</div><div class="r">Credit</div><div>In</div></div>' +
+      G.other.slice(0, LIMIT).map(function (x, i) { return '<div class="tr"><div class="td sn" data-l="S.No.">' + (i + 1) + '</div><div class="td wide" data-l="Account">' + esc(x.name) + '</div><div class="td r num" data-l="Entries">' + x.n + '</div><div class="td r num" data-l="Debit">' + inr(x.dr) + '</div><div class="td r num" data-l="Credit">' + inr(x.cr) + '</div><div class="td" data-l="In"><small>' + esc(x.regs) + '</small></div></div>'; }).join('') + '</div>' + more(G.other) : '<div class="panel empty">None.</div>');
+  h += '<div class="note" style="margin-top:14px">Opening balances of last year are not in these files: customer, supplier and transporter balances here start on 01-04-2026.</div>';
+  return h;
+}
 /* ---------- events for the new controls ---------- */
 document.addEventListener('change', function (e) {
   var f = e.target;
   if (!f) return;
+  if (f.id === 'busy_files') { busyPick(f); f.value = ''; return; } // Busy page: the chosen Busy Excel files
   if (f.type === 'file' && f.dataset && f.dataset.kind) { if (f.files && f.files[0]) uploadPhoto(f.dataset.kind, f.dataset.id, f.files[0]); f.value = ''; return; }
   if (f.id === 'rv_date') { var rd = ymd(f.value); if (!rd || rd.charAt(0) === '!' || rd > D.today) { toast('Type the day as DD-MM-YYYY (today or earlier).'); return; } REVDATE = rd; render(); return; }
   if (f.id === 'rv_who') { REVWHO = f.value; render(); return; }
@@ -2687,6 +2887,8 @@ function runAct(a, id, kind) {
     repKind: function () { SUBF.reports = id === 'so' ? 'so' : 'po'; QS = ''; LIMIT = 60; render(); },
     repPdf: function () { repFile(id, 'pdf'); }, repXlsx: function () { repFile(id, 'xlsx'); },
     exportDisputes: function () { if (!LASTIDS.length) { toast('No trucks in this list.'); return; } doExport('shortage', DISP_TR, LASTIDS.slice()); },
+    trsel: function () { TRSEL = TRSEL === id ? '' : id; render(); }, gapsel: function () { GAPSEL = GAPSEL === id ? '' : id; LIMIT = 60; render(); },
+    busyKind: function () { SUBF[ROUTE.v] = id; LIMIT = 60; render(); },
     exportList: function () { if (!LASTIDS.length) { toast('No trucks in this list.'); return; } doExport('trucks', '', LASTIDS.slice()); }
   }[a] || function () {})();
 }
@@ -2707,7 +2909,7 @@ window.addEventListener('beforeunload', function (e) { if (Q.length) { e.prevent
 (function boot() {
   var init = window.INIT || {};
   if (init.view && ['po', 'so', 'buyer', 'plant', 'transporter', 'truck'].indexOf(init.view) >= 0) { ROUTE = { v: init.view, id: init.id }; HIST = [{ v: 'home' }]; }
-  else if (init.view && ['pos', 'sos', 'dispatch', 'settle', 'receivables', 'freight', 'advances', 'disputes', 'reports', 'closed'].indexOf(init.view) >= 0) ROUTE = { v: init.view };
+  else if (init.view && ['pos', 'sos', 'dispatch', 'settle', 'receivables', 'freight', 'advances', 'disputes', 'reports', 'closed', 'busy', 'transport', 'wetcake', 'gaps'].indexOf(init.view) >= 0) ROUTE = { v: init.view };
   TOKEN = getTok();
   try { FIRM = localStorage.getItem('ddgs_firm') || 'all'; } catch (x) {} // the firm window chosen last time on this phone
   loadQ(); // saves that were still waiting when the app was last closed
