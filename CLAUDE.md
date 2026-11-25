@@ -6,7 +6,16 @@ Read this file fully before doing any work in this folder.
 - **RAGHAV BUSY APP** = a full copy of the DDGS Trade Control app (copied from `ddgs-app` main `a0ec10f`, 25-11-2026),
   with its **own Apps Script project and its own Google Sheet "RAGHAV BUSY APP"**, filled from Busy exports (section 3a).
   Everything in sections 1–8 below is the DDGS app's rules: they apply here too, except where section 0 / 3a says otherwise.
-- Folder: `ddgs-app/busy-app` (its own git repo, branch `master` / work branches). The DDGS app's `.clasp.json` must
+- **This app's own Google Sheet "RAGHAV BUSY APP"**: id `1_PW9EcKzVsHfP-s7PQa3B7KW-sK4PU534x7pjkssr2c`
+  (https://docs.google.com/spreadsheets/d/1_PW9EcKzVsHfP-s7PQa3B7KW-sK4PU534x7pjkssr2c/edit).
+  Script id `1uedyKQhl4U3AnxLxpO3tQdJF7i3TezKHkQuutGPA08U7KuQHkTNgKsHl` (in `busy-app/.clasp.json`).
+  Test link (/dev, HEAD deployment `AKfycbxms48d-YdJ2LmYqiPaxgrHj1DvqnHlMBaheEPcVJH_`):
+  https://script.google.com/macros/s/AKfycbxms48d-YdJ2LmYqiPaxgrHj1DvqnHlMBaheEPcVJH_/dev
+  Live link: not made yet (made with `clasp deploy` from this folder only when Nitish says OK; then write its id here).
+- **clasp searches parent folders**: without `busy-app/.clasp.json`, clasp run here would use the DDGS app's `.clasp.json`
+  one folder up (it then pushes `..\Code.js`). Never delete `busy-app/.clasp.json`; run `clasp show-file-status` first:
+  it must list `Code.js`, not `..\Code.js`.
+- Folder: `ddgs-app/busy-app` (its own git repo, branch `main` / work branches). The DDGS app's `.clasp.json` must
   **never** come into this folder: `clasp push` / `clasp deploy` from here must only reach the Busy app's own script.
   Check `.clasp.json` here before any clasp command (its scriptId is NOT the DDGS one). The DDGS sheet/deployment ids in
   section 2 are the DDGS app's: never deploy to them from here.
