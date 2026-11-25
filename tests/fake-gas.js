@@ -33,6 +33,7 @@ function coerce(x, text) {
   if (x === null || x === undefined) return '';
   if (isDate(x)) return new Date(x.getTime());
   if (typeof x !== 'string') return x;
+  if (x.charAt(0) === "'") return x.slice(1); // a leading ' keeps the rest as text (and is not stored), like Sheets
   if (text || x === '') return x;
   if (/^(true|false)$/i.test(x)) return x.toUpperCase() === 'TRUE';
   if (/^-?\d+(\.\d+)?$/.test(x)) return Number(x);
@@ -117,6 +118,25 @@ function makeStore(opts) {
   return store;
 }
 
+/* Utilities.unzip: the files inside a zip (an .xlsx is one) as blobs, like Apps Script. */
+function unzip(b) {
+  const zlib = require('zlib'), buf = Buffer.from(b.getBytes().map(x => x & 255)), out = [];
+  let e = buf.length - 22;
+  while (e >= 0 && buf.readUInt32LE(e) !== 0x06054b50) e--;
+  if (e < 0) throw new Error('Could not unzip: not a zip file');
+  let p = buf.readUInt32LE(e + 16);
+  for (let i = 0, n = buf.readUInt16LE(e + 10); i < n; i++) {
+    const method = buf.readUInt16LE(p + 10), size = buf.readUInt32LE(p + 20), nl = buf.readUInt16LE(p + 28), xl = buf.readUInt16LE(p + 30), cl = buf.readUInt16LE(p + 32), off = buf.readUInt32LE(p + 42);
+    const name = buf.toString('utf8', p + 46, p + 46 + nl), start = off + 30 + buf.readUInt16LE(off + 26) + buf.readUInt16LE(off + 28);
+    const data = method === 8 ? zlib.inflateRawSync(buf.subarray(start, start + size)) : buf.subarray(start, start + size);
+    const f = blob(Array.from(data), 'application/octet-stream', name);
+    f.getDataAsString = () => data.toString('utf8');
+    out.push(f);
+    p += 46 + nl + xl + cl;
+  }
+  return out;
+}
+
 function blob(bytes, type, name) {
   let nm = name || 'blob';
   return { getBytes: () => bytes, getName: () => nm, setName(n) { nm = n; return this; }, getContentType: () => type, getDataAsString: () => String(bytes),
@@ -173,7 +193,8 @@ function services(store) {
       computeDigest: (alg, s) => Array.from(crypto.createHash(alg).update(String(s), 'utf8').digest()).map(b => (b > 127 ? b - 256 : b)),
       base64Encode: x => Buffer.from(Array.isArray(x) ? x.map(b => b & 255) : String(x)).toString('base64'),
       base64Decode: s => Array.from(Buffer.from(String(s), 'base64')),
-      newBlob: blob
+      newBlob: blob,
+      unzip
     },
     ScriptApp: {
       getProjectTriggers: () => store.triggers.map(t => ({ getHandlerFunction: () => t.fn, getUniqueId: () => t.id })),
