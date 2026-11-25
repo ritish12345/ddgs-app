@@ -2666,9 +2666,9 @@ function busyUpload(files) {
     BUSY = false; BUSYUP = 0; $('#toast').hidden = true; done(d); applyResult(d); render(); toast('Busy files uploaded');
   }).catch(function (e) {
     BUSY = false; BUSYUP = 0; render();
-    var m = e.message || String(e);
-    if (m.indexOf('CONFIRM|') !== 0) { toast(m); return; }
-    m = m.slice(8);
+    var m = e.message || String(e), ci = m.indexOf('CONFIRM|'); // the server's "Owner must confirm" (Google may put "Error: " before it)
+    if (ci < 0) { toast(m); return; }
+    m = m.slice(ci + 8);
     if (D.me.role !== 'Owner') { toast(m); return; }
     openForm({ title: 'Upload anyway?', sub: esc(m), submit: 'Yes, upload it', danger: 1, fields: [], done: 'Busy files uploaded',
       custom: function () { return call('api_busyUpload', files, true, newRid()).then(done); } });
