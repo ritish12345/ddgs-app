@@ -2048,9 +2048,10 @@ function reportHtml_(A, from, to, f, money, who) {
 }
 
 /* ---------------- Reports (Nitish, 25-11-2026) ----------------
-   Purchase-order-wise: where each PO's trucks went (one line per sale order: rate, trucks, loaded, unloaded, profit),
-   then the trucks of each sale order. Sale-order-wise: the mirror (where the trucks came from). On screen, PDF and Excel,
-   all from the same numbers. Money roles only; the profit only for the Owner (can.profit). */
+   Purchase-order-wise: where each PO's trucks went (one line per sale order: rate, trucks, loaded, unloaded, sale amount),
+   then the trucks of each sale order with the rate each was sold at and its amount. Sale-order-wise: the mirror (where
+   the trucks came from, at the purchase rate and amount). On screen, PDF and Excel, all from the same numbers. Money
+   roles only. No profit: amounts only (Nitish works the profit out himself). Amounts incl. GST, as on the truck page. */
 function pdfHead_() {
   return '<!DOCTYPE html><html><head><meta charset="utf-8"><style>' +
     '@page{size:A4;margin:12mm}body{font-family:Arial,Helvetica,sans-serif;font-size:8pt;color:#14201e}.nw,td.r{white-space:nowrap}' +
@@ -2061,45 +2062,44 @@ function pdfHead_() {
     '.pb{page-break-before:always}' +
     '</style></head><body>';
 }
-/* The pieces of one truck: (PO, SO) pairs with their loaded and unloaded qty and profit. A truck on two orders
-   (po2 / so2) is matched old with old along its dispatch weight: the first PO's part and the first SO's part come first,
-   and a shortage falls at the end (the second order), as in the calculation (derive_). The profit of a piece = its share
-   of the sale (ex GST) − its share of the purchase (ex GST) − its share of freight and the rest, by weight. The pieces
-   always add up to the truck's own numbers. */
+/* The pieces of one truck: (PO, SO) pairs with their loaded and unloaded qty, the rates, and the purchase and sale amount
+   (incl. GST) of each piece. A truck on two orders (po2 / so2) is matched old with old along its dispatch weight: the
+   first PO's part and the first SO's part come first, and a shortage falls at the end (the second order), as in derive_.
+   The pieces of each part add up to the truck's own amounts (purTot / pur1Tot / pur2Tot, saleTot / sale1Tot / sale2Tot). */
 function truckPieces_(t, A) {
   var L = t.L, U = t.U, r2 = function (x) { return Math.round(x * 100) / 100; };
   if (!(L > 0)) return [];
-  var noSO = t.plantPO || !t.so;
-  var pp = t.po2 ? [[t.po, 0, t.poQ1], [t.po2, t.poQ1, L]] : [[t.po, 0, L]];
-  var sp = noSO ? [['', 0, L]] : t.so2 ? [[t.so, 0, t.soQ1], [t.so2, t.soQ1, L]] : [[t.so, 0, L]];
+  var noSO = t.plantPO || !t.so, own = !(t.saleRate === '' || t.saleRate == null);
+  var rate1 = A.po[t.po] ? Number(A.po[t.po].rate) || 0 : 0;
   var recv = function (a, b) { return U ? Math.max(0, Math.min(b, U) - a) : 0; }; // received part of [a, b]
-  var sw = function (a, b) { return U ? recv(a, b) : b - a; }; // sale weight (received, or dispatch until received)
-  var withProfit = !!(U && t.so && !t.plantPO && A.po[t.po]);
-  var pe = [t.purEx], se = [t.saleEx];
-  if (t.po2) { var e1 = r2(t.poQ1 * Number(A.po[t.po] ? A.po[t.po].rate : 0)); pe = [e1, r2(t.purEx - e1)]; }
-  if (!noSO && t.so2) {
-    var ownRate = !(t.saleRate === '' || t.saleRate == null);
-    var x1 = ownRate ? r2(t.saleEx * sw(0, t.soQ1) / (sw(0, L) || 1)) : r2(t.sale1Qty * t.soBase);
-    se = [x1, r2(t.saleEx - x1)];
-  }
-  var cost = withProfit ? t.saleEx - t.purEx - t.profit : 0, out = [];
+  var sw = function (a, b) { return U ? recv(a, b) : b - a; }; // sale weight: received, or dispatch until received
+  // parts: [order, from, to, amount of the part, rate]
+  var pp = t.po2 ? [[t.po, 0, t.poQ1, t.pur1Tot, rate1], [t.po2, t.poQ1, L, t.pur2Tot, t.rate2]] : [[t.po, 0, L, t.purTot, rate1]];
+  var sp;
+  if (noSO) sp = [['', 0, L, 0, 0]];
+  else if (!t.so2) sp = [[t.so, 0, L, t.saleTot, t.rateUsed]];
+  else if (own) { var a1 = r2(t.saleTot * sw(0, t.soQ1) / (sw(0, L) || 1)); sp = [[t.so, 0, t.soQ1, a1, t.rateUsed], [t.so2, t.soQ1, L, r2(t.saleTot - a1), t.rateUsed]]; }
+  else sp = [[t.so, 0, t.soQ1, t.sale1Tot, t.rateUsed], [t.so2, t.soQ1, L, t.sale2Tot, t.soRate2]];
+  var out = [];
   pp.forEach(function (p, i) {
     sp.forEach(function (s, j) {
       var a = Math.max(p[1], s[1]), b = Math.min(p[2], s[2]);
       if (b - a < 0.005) return;
-      var pr = 0;
-      if (withProfit) {
-        var sws = sw(s[1], s[2]);
-        pr = se[j] * (sws > 0 ? sw(a, b) / sws : (b - a) / (s[2] - s[1])) - pe[i] * (b - a) / (p[2] - p[1]) - cost * (b - a) / L;
-      }
-      out.push({ t: t, po: p[0], so: s[0], L: r2(b - a), U: r2(recv(a, b)), profit: r2(pr) });
+      var sws = sw(s[1], s[2]);
+      out.push({ t: t, po: p[0], so: s[0], pi: i, si: j, L: r2(b - a), U: r2(recv(a, b)), purRate: p[4], saleRate: s[4],
+        pur: r2(p[3] * (b - a) / (p[2] - p[1])), sale: r2(s[3] * (sws > 0 ? sw(a, b) / sws : (b - a) / (s[2] - s[1]))) });
     });
   });
-  if (withProfit && out.length) { // the pieces add up to the truck's profit exactly
-    var rest = t.profit;
-    out.forEach(function (x, k) { if (k < out.length - 1) rest -= x.profit; });
-    out[out.length - 1].profit = r2(rest);
-  }
+  // the pieces of each part add up to that part's amount exactly (the last piece takes the rounding)
+  [['pur', 'pi', pp], ['sale', 'si', sp]].forEach(function (f) {
+    f[2].forEach(function (part, k) {
+      var mine = out.filter(function (x) { return x[f[1]] === k; });
+      if (!mine.length) return;
+      var rest = part[3];
+      mine.forEach(function (x, m) { if (m < mine.length - 1) rest -= x[f[0]]; });
+      mine[mine.length - 1][f[0]] = r2(rest);
+    });
+  });
   return out;
 }
 function reportPieces_(A) {
@@ -2114,26 +2114,27 @@ function reportOrder_(o, kind, A) { // the order's own line: party, rate, terms
       (o.gstMode === 'incl' ? 'GST incl.' : o.gstMode === 'excl' ? '+ GST ' + Math.round((Number(o.gst) || 0) * 100) + '%' : '') + (o.freightMode === 'buyer' ? ', customer pays freight' : o.freightMode === 'ours' ? ', freight incl.' : ''),
     qty: Number(o.qty) || 0, firm: firmOf_(o, A.S), status: o.status === 'Settled' ? 'Short-closed' : o.status || '' };
 }
-/* One line per order (kind 'po' or 'so'), newest first: rate, quantity, loaded, unloaded, trucks, profit (Owner). */
-function reportList_(A, kind, firm, can) {
-  var map = kind === 'po' ? A.po : A.so, pieces = reportPieces_(A);
+/* One line per order (kind 'po' or 'so'), newest first: rate, quantity, loaded, unloaded, trucks, amount
+   (purchase amount for a PO, sale amount for an SO). */
+function reportList_(A, kind, firm) {
+  var map = kind === 'po' ? A.po : A.so, pieces = reportPieces_(A), amt = kind === 'po' ? 'pur' : 'sale';
   var rows = Object.keys(map).map(function (id) { return map[id]; }).filter(function (o) { return o.status !== 'Cancelled' && (!firm || firmOf_(o, A.S) === firm); }).map(function (o) {
     var my = pieces.filter(function (x) { return x[kind] === o.id; }), seen = {};
     my.forEach(function (x) { seen[x.t.id] = 1; });
     var r = reportOrder_(o, kind, A);
     r.trucks = Object.keys(seen).length; r.L = reportSum_(my, 'L'); r.U = reportSum_(my, 'U'); r.bal = Math.round((r.qty - r.L) * 100) / 100;
-    r.road = reportSum_(my.filter(function (x) { return !x.t.U; }), 'L');
-    if (can.profit) r.profit = reportSum_(my, 'profit');
+    r.road = reportSum_(my.filter(function (x) { return !x.t.U; }), 'L'); r.amt = reportSum_(my, amt);
     return r;
   }).sort(function (a, b) { return String(b.date).localeCompare(String(a.date)) || String(b.id).localeCompare(String(a.id), 'en', { numeric: true }); });
-  var tot = { trucks: rows.reduce(function (s, r) { return s + r.trucks; }, 0), L: reportSum_(rows, 'L'), U: reportSum_(rows, 'U'), road: reportSum_(rows, 'road') };
-  if (can.profit) tot.profit = reportSum_(rows, 'profit');
-  return { kind: kind, firm: firm || '', profit: !!can.profit, rows: rows, tot: tot };
+  var tot = { trucks: rows.reduce(function (s, r) { return s + r.trucks; }, 0), L: reportSum_(rows, 'L'), U: reportSum_(rows, 'U'), road: reportSum_(rows, 'road'), amt: reportSum_(rows, 'amt') };
+  return { kind: kind, firm: firm || '', rows: rows, tot: tot };
 }
-/* One order: its own line, then one group per sale order (for a PO) or purchase order (for an SO) with its trucks. */
-function orderReport_(A, kind, id, can) {
+/* One order: its own line, then one group per sale order (for a PO: at the sale rate and amount) or purchase order
+   (for an SO: at the purchase rate and amount), each with its trucks. */
+function orderReport_(A, kind, id) {
   if (kind !== 'po' && kind !== 'so') throw new Error('Choose purchase orders or sale orders.');
   var map = kind === 'po' ? A.po : A.so, o = map[id], other = kind === 'po' ? 'so' : 'po', omap = kind === 'po' ? A.so : A.po;
+  var amt = kind === 'po' ? 'sale' : 'pur', rateK = kind === 'po' ? 'saleRate' : 'purRate';
   if (!o) throw new Error(id + ' was not found.');
   var my = reportPieces_(A).filter(function (x) { return x[kind] === id; }), G = {};
   my.forEach(function (x) {
@@ -2144,47 +2145,43 @@ function orderReport_(A, kind, id, can) {
       g = G[key] = c ? reportOrder_(c, other, A) : { kind: other, id: '', party: key === '(own plant)' ? 'Own plant' : 'No customer yet', date: '', rate: 0, terms: '' };
       g.key = key; g.rows = [];
     }
-    var row = { id: x.t.id, date: x.t.date, unloadDate: x.t.U ? x.t.unloadDate : '', truck: x.t.truck, L: x.L, U: x.U, of: x.L !== x.t.L ? x.t.L : '', road: !x.t.U };
-    if (can.profit) row.profit = x.profit;
-    g.rows.push(row);
+    g.rows.push({ id: x.t.id, date: x.t.date, unloadDate: x.t.U ? x.t.unloadDate : '', truck: x.t.truck, L: x.L, U: x.U, of: x.L !== x.t.L ? x.t.L : '', road: !x.t.U, rate: x[rateK], amt: x[amt] });
   });
   var groups = Object.keys(G).map(function (k) {
     var g = G[k], seen = {};
     g.rows.sort(function (a, b) { return String(a.date).localeCompare(String(b.date)) || String(a.id).localeCompare(String(b.id), 'en', { numeric: true }); });
     g.rows.forEach(function (r) { seen[r.id] = 1; });
-    g.trucks = Object.keys(seen).length; g.L = reportSum_(g.rows, 'L'); g.U = reportSum_(g.rows, 'U');
-    if (can.profit) g.profit = reportSum_(g.rows, 'profit');
+    g.trucks = Object.keys(seen).length; g.L = reportSum_(g.rows, 'L'); g.U = reportSum_(g.rows, 'U'); g.amt = reportSum_(g.rows, 'amt');
     return g;
   }).sort(function (a, b) { return (a.id ? 0 : 1) - (b.id ? 0 : 1) || String(a.date).localeCompare(String(b.date)) || String(a.id).localeCompare(String(b.id), 'en', { numeric: true }); });
   var head = reportOrder_(o, kind, A), seen = {};
   my.forEach(function (x) { seen[x.t.id] = 1; });
   head.trucks = Object.keys(seen).length; head.L = reportSum_(my, 'L'); head.U = reportSum_(my, 'U'); head.bal = Math.round((head.qty - head.L) * 100) / 100;
-  head.road = reportSum_(my.filter(function (x) { return !x.t.U; }), 'L');
-  if (can.profit) head.profit = reportSum_(my, 'profit');
-  return { order: head, groups: groups, profit: !!can.profit };
+  head.road = reportSum_(my.filter(function (x) { return !x.t.U; }), 'L'); head.pur = reportSum_(my, 'pur'); head.sale = reportSum_(my, 'sale');
+  return { order: head, groups: groups };
 }
 function api_reports(token, kind, firm) {
   auth_(token); need_('money');
   if (kind !== 'po' && kind !== 'so') throw new Error('Choose purchase orders or sale orders.');
   var A = deriveAll_(), f = firm ? normName_(firm) : '';
   if (f && firms_(A.S).indexOf(f) < 0) throw new Error('Unknown firm: ' + f);
-  return reportList_(A, kind, f, ME.can);
+  return reportList_(A, kind, f);
 }
 function api_orderReport(token, kind, id) {
   auth_(token); need_('money');
-  return orderReport_(deriveAll_(), kind, id, ME.can);
+  return orderReport_(deriveAll_(), kind, id);
 }
 /** A report as PDF or Excel (format 'pdf' / 'xlsx'): one order (id), or the list of orders (no id). */
 function api_reportFile(token, kind, id, firm, format) {
   auth_(token); need_('money');
   if (kind !== 'po' && kind !== 'so') throw new Error('Choose purchase orders or sale orders.');
-  var A = deriveAll_(), f = firm ? normName_(firm) : '', can = ME.can, who = ME.name || ME.id;
+  var A = deriveAll_(), f = firm ? normName_(firm) : '', who = ME.name || ME.id;
   if (f && firms_(A.S).indexOf(f) < 0) throw new Error('Unknown firm: ' + f);
-  var data = id ? orderReport_(A, kind, id, can) : reportList_(A, kind, f, can);
+  var data = id ? orderReport_(A, kind, id) : reportList_(A, kind, f);
   var stamp = Utilities.formatDate(new Date(), tz_(), 'dd-MM-yyyy HHmm');
   var name = 'DDGS ' + (id ? id + ' report' : (kind === 'po' ? 'Purchase orders' : 'Sale orders') + ' report' + (f ? ' ' + shortFirm_(f) : '')) + ' ' + stamp;
   var blob = format === 'xlsx' ? buildXlsx_(name, id ? orderReportTabs_(data) : listReportTabs_(data)) :
-    Utilities.newBlob(id ? orderReportHtml_(data, who) : listReportHtml_(data, who, A), 'text/html', name + '.html').getAs('application/pdf').setName(name + '.pdf');
+    Utilities.newBlob(id ? orderReportHtml_(data, who) : listReportHtml_(data, who), 'text/html', name + '.html').getAs('application/pdf').setName(name + '.pdf');
   var file = folder_('DDGS Exports').createFile(blob);
   log_('Report ' + (format === 'xlsx' ? 'Excel' : 'PDF'), id || (kind === 'po' ? 'Purchase orders' : 'Sale orders'), name);
   return { name: blob.getName(), url: file.getUrl(), b64: Utilities.base64Encode(blob.getBytes()) };
@@ -2197,61 +2194,66 @@ function reportTable_(cols, rows, tot) { // cols = [[heading, right-aligned?]]
     rows.map(function (r) { return '<tr>' + r.map(function (c, i) { return cell('td', c, i); }).join('') + '</tr>'; }).join('') +
     (tot ? '<tr class="tot">' + tot.map(function (c, i) { return cell('td', c, i); }).join('') + '</tr>' : '') + '</tbody></table>';
 }
-function orderReportHtml_(d, who) {
-  var o = d.order, e = reportEsc_, q = function (x) { return qtl_(Number(x) || 0); }, rs = function (x) { return money_(Number(x) || 0); }, P = d.profit;
-  var isPO = o.kind === 'po', mk = function (k) { return k + (k === 1 ? ' truck' : ' trucks'); };
-  var h = pdfHead_() + '<h1>' + e(o.id) + ' · ' + e(o.party) + '</h1><div class="top">' + (isPO ? 'Purchase order' : 'Sale order') + ' of ' + dmy_(o.date) + ' · ' + rs(o.rate) + ' ' + e(o.terms) + ' · ' + e(o.firm) +
-    (o.status ? ' · ' + e(o.status) : '') + ' · made by ' + e(who) + ' on ' + Utilities.formatDate(new Date(), tz_(), 'dd-MM-yyyy HH:mm') + '</div>';
-  h += '<table class="kp"><tr><td>Quantity<br><b>' + q(o.qty) + '</b> qtl</td><td>' + (isPO ? 'Loaded' : 'Dispatched') + '<br><b>' + q(o.L) + '</b> qtl<br>' + mk(o.trucks) + '</td><td>Unloaded<br><b>' + q(o.U) + '</b> qtl' + (o.road ? '<br>on the road ' + q(o.road) : '') + '</td>' +
-    '<td>Balance<br><b>' + q(o.bal) + '</b> qtl</td>' + (P ? '<td>Profit<br><b>' + rs(o.profit) + '</b><br><span class="mu">before GST, unloaded trucks</span></td>' : '') + '</tr></table>';
-  var cols = [['#'], [isPO ? 'Customer' : 'Supplier'], [isPO ? 'Sale order' : 'Purchase order'], ['Rate', 1], ['Trucks', 1], ['Loaded qtl', 1], ['Unloaded qtl', 1]].concat(P ? [['Profit', 1]] : []);
-  h += '<h2>' + (isPO ? 'Where the trucks went' : 'Where the trucks came from') + '</h2>' + reportTable_(cols, d.groups.map(function (g, i) {
-    return [i + 1, e(g.party), e(g.id || '—') + (g.date ? '<br><span class="mu">' + dmy_(g.date) + '</span>' : ''), g.rate ? rs(g.rate) + '<br><span class="mu">' + e(g.terms) + '</span>' : '—', g.trucks, q(g.L), q(g.U)].concat(P ? [rs(g.profit)] : []);
-  }), ['', 'Total', '', '', o.trucks, q(o.L), q(o.U)].concat(P ? [rs(o.profit)] : []));
-  var tc = [['#'], ['Dispatch No.'], ['Date out'], ['Vehicle'], ['Loaded qtl', 1], ['Unloaded qtl', 1]].concat(P ? [['Profit', 1]] : []);
-  d.groups.forEach(function (g) {
-    h += '<div class="pb"></div><h2>' + e(g.id || g.party) + (g.id ? ' · ' + e(g.party) : '') + (g.rate ? ' · ' + rs(g.rate) + ' ' + e(g.terms) : '') + ' · ' + mk(g.trucks) + '</h2>' + reportTable_(tc, g.rows.map(function (r, i) {
-      return [i + 1, e(r.id), '<span class="nw">' + dmy_(r.date) + '</span>', '<b class="nw">' + e(r.truck) + '</b>', q(r.L) + (r.of ? '<br><span class="mu">of ' + q(r.of) + ' (2 orders)</span>' : ''),
-        r.road ? '<span class="mu">on the road</span>' : q(r.U) + '<br><span class="mu">' + dmy_(r.unloadDate) + '</span>'].concat(P ? [r.road ? '—' : rs(r.profit)] : []);
-    }), ['', 'Total', '', '', q(g.L), q(g.U)].concat(P ? [rs(g.profit)] : []));
-  });
-  return h + '<p class="mu" style="margin-top:14px">Weights in quintals.' + (P ? ' Profit before GST: sale − purchase − freight (+ shortage recovered), on unloaded trucks.' : '') + ' A truck on two orders counts only its part on each. DDGS Trade Control.</p></body></html>';
+function reportRs_(x) { // Rs 2,745 or Rs 2,821.60
+  var v = Number(x) || 0, p = Math.abs(v).toFixed(Math.round(v * 100) % 100 ? 2 : 0).split('.'), i = p[0], last = i.slice(-3), rest = i.slice(0, -3);
+  return (v < 0 ? '-' : '') + 'Rs ' + (rest ? rest.replace(/\B(?=(\d{2})+(?!\d))/g, ',') + ',' : '') + last + (p[1] ? '.' + p[1] : '');
 }
-function listReportHtml_(d, who, A) {
-  var e = reportEsc_, q = function (x) { return qtl_(Number(x) || 0); }, rs = function (x) { return money_(Number(x) || 0); }, P = d.profit, isPO = d.kind === 'po';
+function orderReportHtml_(d, who) {
+  var o = d.order, e = reportEsc_, q = function (x) { return qtl_(Number(x) || 0); }, rs = function (x) { return money_(Number(x) || 0); };
+  var isPO = o.kind === 'po', mk = function (k) { return k + (k === 1 ? ' truck' : ' trucks'); }, amtH = isPO ? 'Sale amount' : 'Purchase amount';
+  var h = pdfHead_() + '<h1>' + e(o.id) + ' · ' + e(o.party) + '</h1><div class="top">' + (isPO ? 'Purchase order' : 'Sale order') + ' of ' + dmy_(o.date) + ' · ' + reportRs_(o.rate) + ' ' + e(o.terms) + ' · ' + e(o.firm) +
+    (o.status ? ' · ' + e(o.status) : '') + ' · made by ' + e(who) + ' on ' + Utilities.formatDate(new Date(), tz_(), 'dd-MM-yyyy HH:mm') + '</div>';
+  h += '<table class="kp"><tr><td>Quantity<br><b>' + q(o.qty) + '</b> qtl<br>balance ' + q(o.bal) + '</td><td>' + (isPO ? 'Loaded' : 'Dispatched') + '<br><b>' + q(o.L) + '</b> qtl<br>' + mk(o.trucks) + '</td><td>Unloaded<br><b>' + q(o.U) + '</b> qtl' + (o.road ? '<br>on the road ' + q(o.road) : '') + '</td>' +
+    '<td>Purchase amount<br><b>' + rs(o.pur) + '</b></td><td>Sale amount<br><b>' + rs(o.sale) + '</b></td></tr></table>';
+  var cols = [['#'], [isPO ? 'Customer' : 'Supplier'], [isPO ? 'Sale order' : 'Purchase order'], ['Rate', 1], ['Trucks', 1], ['Loaded qtl', 1], ['Unloaded qtl', 1], [amtH, 1]];
+  h += '<h2>' + (isPO ? 'Where the trucks went' : 'Where the trucks came from') + '</h2>' + reportTable_(cols, d.groups.map(function (g, i) {
+    return [i + 1, e(g.party), e(g.id || '—') + (g.date ? '<br><span class="mu">' + dmy_(g.date) + '</span>' : ''), g.rate ? reportRs_(g.rate) + '<br><span class="mu">' + e(g.terms) + '</span>' : '—', g.trucks, q(g.L), q(g.U), g.amt ? rs(g.amt) : '—'];
+  }), ['', 'Total', '', '', o.trucks, q(o.L), q(o.U), rs(isPO ? o.sale : o.pur)]);
+  var tc = [['#'], ['Dispatch No.'], ['Date out'], ['Vehicle'], ['Loaded qtl', 1], ['Unloaded qtl', 1], ['Rate', 1], [amtH, 1]];
+  d.groups.forEach(function (g) {
+    h += '<div class="pb"></div><h2>' + e(g.id || g.party) + (g.id ? ' · ' + e(g.party) : '') + (g.rate ? ' · ' + reportRs_(g.rate) + ' ' + e(g.terms) : '') + ' · ' + mk(g.trucks) + '</h2>' + reportTable_(tc, g.rows.map(function (r, i) {
+      return [i + 1, e(r.id), '<span class="nw">' + dmy_(r.date) + '</span>', '<b class="nw">' + e(r.truck) + '</b>', q(r.L) + (r.of ? '<br><span class="mu">of ' + q(r.of) + ' (2 orders)</span>' : ''),
+        r.road ? '<span class="mu">on the road</span>' : q(r.U) + '<br><span class="mu">' + dmy_(r.unloadDate) + '</span>', r.rate ? reportRs_(r.rate) : '—',
+        r.amt ? rs(r.amt) + (isPO && r.road ? '<br><span class="mu">on loaded wt</span>' : '') : '—'];
+    }), ['', 'Total', '', '', q(g.L), q(g.U), '', g.amt ? rs(g.amt) : '—']);
+  });
+  return h + '<p class="mu" style="margin-top:14px">Weights in quintals. Amounts incl. GST: purchase on the loaded weight; sale on the received weight (loaded weight until unloaded). A truck on two orders counts only its part on each. DDGS Trade Control.</p></body></html>';
+}
+function listReportHtml_(d, who) {
+  var e = reportEsc_, q = function (x) { return qtl_(Number(x) || 0); }, rs = function (x) { return money_(Number(x) || 0); }, isPO = d.kind === 'po';
   var h = pdfHead_() + '<h1>' + (isPO ? 'Purchase orders' : 'Sale orders') + ' report · ' + e(d.firm || 'All firms') + '</h1><div class="top">made by ' + e(who) + ' on ' + Utilities.formatDate(new Date(), tz_(), 'dd-MM-yyyy HH:mm') + '</div>';
-  var cols = [['#'], [isPO ? 'PO' : 'SO'], [isPO ? 'Supplier' : 'Customer'], ['Rate', 1], ['Quantity', 1], [isPO ? 'Loaded' : 'Dispatched', 1], ['Unloaded', 1], ['Balance', 1], ['Trucks', 1]].concat(P ? [['Profit', 1]] : []);
+  var cols = [['#'], [isPO ? 'PO' : 'SO'], [isPO ? 'Supplier' : 'Customer'], ['Rate', 1], ['Quantity', 1], [isPO ? 'Loaded' : 'Dispatched', 1], ['Unloaded', 1], ['Balance', 1], ['Trucks', 1], [isPO ? 'Purchase amount' : 'Sale amount', 1]];
   h += reportTable_(cols, d.rows.map(function (r, i) {
     return [i + 1, e(r.id) + (r.status ? '<br><span class="mu">' + e(r.status) + '</span>' : '') + (d.firm ? '' : '<br><span class="mu">' + e(shortFirm_(r.firm)) + '</span>'), e(r.party) + '<br><span class="mu">' + dmy_(r.date) + '</span>',
-      rs(r.rate) + '<br><span class="mu">' + e(r.terms) + '</span>', q(r.qty), q(r.L), q(r.U), q(r.bal), r.trucks].concat(P ? [rs(r.profit)] : []);
-  }), ['', 'Total', '', '', '', q(d.tot.L), q(d.tot.U), '', d.tot.trucks].concat(P ? [rs(d.tot.profit)] : []));
-  return h + '<p class="mu" style="margin-top:14px">Weights in quintals.' + (P ? ' Profit before GST, on unloaded trucks.' : '') + ' DDGS Trade Control.</p></body></html>';
+      reportRs_(r.rate) + '<br><span class="mu">' + e(r.terms) + '</span>', q(r.qty), q(r.L), q(r.U), q(r.bal), r.trucks, rs(r.amt)];
+  }), ['', 'Total', '', '', '', q(d.tot.L), q(d.tot.U), '', d.tot.trucks, rs(d.tot.amt)]);
+  return h + '<p class="mu" style="margin-top:14px">Weights in quintals. Amounts incl. GST' + (isPO ? ' on the loaded weight' : ': received weight, or loaded weight until unloaded') + '. DDGS Trade Control.</p></body></html>';
 }
 /* Excel: the order, where the trucks went (or came from), then one sheet per sale order (or purchase order). */
 function orderReportTabs_(d) {
-  var o = d.order, P = d.profit, isPO = o.kind === 'po', tabs = [];
+  var o = d.order, isPO = o.kind === 'po', tabs = [], amtH = isPO ? 'Sale Amount' : 'Purchase Amount';
   tabs.push({ name: 'Order', rows: [['', o.id], [isPO ? 'Supplier' : 'Customer', o.party], ['Date', dmy_(o.date)], ['Rate', o.rate], ['Terms', o.terms], ['Firm', o.firm], ['Status', o.status || 'Open'],
-    ['Quantity (qtl)', o.qty], [isPO ? 'Loaded (qtl)' : 'Dispatched (qtl)', o.L], ['Unloaded (qtl)', o.U], ['On the road (qtl)', o.road], ['Balance (qtl)', o.bal], ['Trucks', o.trucks]].concat(P ? [['Profit before GST', o.profit]] : []) });
-  var gh = ['S.No.', isPO ? 'Customer' : 'Supplier', isPO ? 'Sale Order' : 'Purchase Order', 'Order Date', 'Rate', 'Terms', 'Trucks', 'Loaded (qtl)', 'Unloaded (qtl)'].concat(P ? ['Profit'] : []);
-  tabs.push({ name: isPO ? 'Where it went' : 'Where it came from', dateCols: [3], rows: [gh].concat(d.groups.map(function (g, i) {
-    return [i + 1, g.party, g.id, g.date ? parseDate_(g.date) : '', g.rate || '', g.terms, g.trucks, g.L, g.U].concat(P ? [g.profit] : []);
-  })).concat([['', 'Total', '', '', '', '', o.trucks, o.L, o.U].concat(P ? [o.profit] : [])]) });
+    ['Quantity (qtl)', o.qty], [isPO ? 'Loaded (qtl)' : 'Dispatched (qtl)', o.L], ['Unloaded (qtl)', o.U], ['On the road (qtl)', o.road], ['Balance (qtl)', o.bal], ['Trucks', o.trucks],
+    ['Purchase Amount', o.pur], ['Sale Amount', o.sale]] });
+  tabs.push({ name: isPO ? 'Where it went' : 'Where it came from', dateCols: [3], rows: [['S.No.', isPO ? 'Customer' : 'Supplier', isPO ? 'Sale Order' : 'Purchase Order', 'Order Date', 'Rate', 'Terms', 'Trucks', 'Loaded (qtl)', 'Unloaded (qtl)', amtH]]
+    .concat(d.groups.map(function (g, i) { return [i + 1, g.party, g.id, g.date ? parseDate_(g.date) : '', g.rate || '', g.terms, g.trucks, g.L, g.U, g.amt || '']; }))
+    .concat([['', 'Total', '', '', '', '', o.trucks, o.L, o.U, isPO ? o.sale : o.pur]]) });
   var used = {};
   d.groups.forEach(function (g) {
     var nm = String(g.id || g.party).replace(/[\[\]:*?\/\\]/g, ' ').slice(0, 30), k = 2;
     while (used[nm]) nm = String(g.id || g.party).slice(0, 27) + ' ' + k++;
     used[nm] = 1;
-    tabs.push({ name: nm, dateCols: [2, 6], rows: [['S.No.', 'Dispatch No.', 'Date Out', 'Vehicle No', 'Loaded (qtl)', 'Unloaded (qtl)', 'Unload Date'].concat(P ? ['Profit'] : [])].concat(g.rows.map(function (r, i) {
-      return [i + 1, r.id, parseDate_(r.date), r.truck, r.L, r.road ? '' : r.U, r.road ? '' : parseDate_(r.unloadDate)].concat(P ? [r.road ? '' : r.profit] : []);
-    })).concat([['', 'Total', '', '', g.L, g.U, ''].concat(P ? [g.profit] : [])]) });
+    tabs.push({ name: nm, dateCols: [2, 6], rows: [['S.No.', 'Dispatch No.', 'Date Out', 'Vehicle No', 'Loaded (qtl)', 'Unloaded (qtl)', 'Unload Date', 'Rate', amtH]]
+      .concat(g.rows.map(function (r, i) { return [i + 1, r.id, parseDate_(r.date), r.truck, r.L, r.road ? '' : r.U, r.road ? '' : parseDate_(r.unloadDate), r.rate || '', r.amt || '']; }))
+      .concat([['', 'Total', '', '', g.L, g.U, '', '', g.amt || '']]) });
   });
   return tabs;
 }
 function listReportTabs_(d) {
-  var P = d.profit, isPO = d.kind === 'po';
-  return [{ name: isPO ? 'Purchase orders' : 'Sale orders', dateCols: [4], rows: [['S.No.', isPO ? 'PO' : 'SO', 'Firm', isPO ? 'Supplier' : 'Customer', 'Date', 'Rate', 'Terms', 'Quantity (qtl)', isPO ? 'Loaded (qtl)' : 'Dispatched (qtl)', 'Unloaded (qtl)', 'Balance (qtl)', 'Trucks', 'Status'].concat(P ? ['Profit'] : [])]
-    .concat(d.rows.map(function (r, i) { return [i + 1, r.id, r.firm, r.party, parseDate_(r.date), r.rate, r.terms, r.qty, r.L, r.U, r.bal, r.trucks, r.status || 'Open'].concat(P ? [r.profit] : []); }))
-    .concat([['', 'Total', '', '', '', '', '', '', d.tot.L, d.tot.U, '', d.tot.trucks, ''].concat(P ? [d.tot.profit] : [])]) }];
+  var isPO = d.kind === 'po';
+  return [{ name: isPO ? 'Purchase orders' : 'Sale orders', dateCols: [4], rows: [['S.No.', isPO ? 'PO' : 'SO', 'Firm', isPO ? 'Supplier' : 'Customer', 'Date', 'Rate', 'Terms', 'Quantity (qtl)', isPO ? 'Loaded (qtl)' : 'Dispatched (qtl)', 'Unloaded (qtl)', 'Balance (qtl)', 'Trucks', 'Status', isPO ? 'Purchase Amount' : 'Sale Amount']]
+    .concat(d.rows.map(function (r, i) { return [i + 1, r.id, r.firm, r.party, parseDate_(r.date), r.rate, r.terms, r.qty, r.L, r.U, r.bal, r.trucks, r.status || 'Open', r.amt]; }))
+    .concat([['', 'Total', '', '', '', '', '', '', d.tot.L, d.tot.U, '', d.tot.trucks, '', d.tot.amt]]) }];
 }
 
 /* ---------------- daily report and weekly backup ---------------- */
